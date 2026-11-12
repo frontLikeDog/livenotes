@@ -515,7 +515,10 @@ def _cache_get(key: tuple) -> dict | None:
         if not hit:
             return None
         expires, payload, cached_at = hit
-        if expires < time.monotonic():
+        # 用 <=：TTL=0 表示「不缓存」。Windows 的 time.monotonic() 走
+        # GetTickCount64，分辨率约 15.6ms，写入和读取可能落在同一 tick，
+        # 此时 expires == now，用 < 会把它当成命中。
+        if expires <= time.monotonic():
             _CACHE.pop(key, None)
             return None
         _CACHE.move_to_end(key)
