@@ -502,6 +502,9 @@ def test_resolve_douyin_falls_back_to_streamlink(monkeypatch):
                         lambda landing, timeout: (
                             '<html>no stream here<script>{"owner":'
                             '{"webRid":"123456789012"}}</script></html>', 0.1))
+    # live 页也拿不到地址（下播/需要验证），才轮到 streamlink。
+    monkeypatch.setattr(direct_capture, "_fetch_live_page",
+                        lambda live, timeout: ("<html>直播已结束</html>", 0.1))
 
     def fake_streamlink(target, timeout):
         seen.append(target)
@@ -512,6 +515,119 @@ def test_resolve_douyin_falls_back_to_streamlink(monkeypatch):
         "https://webcast.amemv.com/douyin/webcast/reflow/1")
     assert url == "http://stream.example/live.flv"
     assert seen == ["https://live.douyin.com/123456789012"]
+
+
+# live.douyin.com 桌面页里 stream_url 的形状：外面套了一层 RSC 字符串转义，
+# URL 里的 & 是 \\u0026。真实页面就是这样，别在测试里“简化”掉。
+_LIVE_HTML = (
+    r'<script>self.__rsc_f.push([1,"{\"roomId\":\"7707637494791080738\",'
+    r'\"stream_url\":{\"flv_pull_url\":{'
+    r'\"FULL_HD1\":\"http://pull.example/stream-1_or4.flv?k=1\\u0026t=2\",'
+    r'\"SD1\":\"http://pull.example/stream-1_md.flv?k=3\\u0026t=4\"}}}"])'
+    r'</script>')
+
+
+def test_pick_live_stream_prefers_best_quality_and_unescapes():
+    url = direct_capture._pick_live_stream(_LIVE_HTML)
+    assert url == "http://pull.example/stream-1_or4.flv?k=1&t=2"
+    assert "\\u0026" not in url
+
+
+def test_resolve_douyin_prefers_live_page_over_pinned_reflow(monkeypatch):
+    """reflow 是上一场的房间号：页面还吐着旧地址、写着「直播已结束」，
+    但 web_rid 页面上正开着播——必须用后者，不能被旧地址带偏。"""
+    reflow = direct_capture._REFLOW_BASE + "7700000000000000003"
+    stale = ('<div>直播已结束</div>'
+             '<webcast-reflow-player url="http://pull.example/old.flv">'
+             '</webcast-reflow-player>'
+             '<script>{"owner":{"webRid":"123456789012"}}</script>')
+    fetched: list[str] = []
+
+    def fake_live(live, timeout):
+        fetched.append(live)
+        return _LIVE_HTML, 0.5
+
+    monkeypatch.setattr(direct_capture, "_landing_url",
+                        lambda url, timeout=10.0: reflow)
+    monkeypatch.setattr(direct_capture, "_fetch_reflow",
+                        lambda landing, timeout: (stale, 0.2))
+    monkeypatch.setattr(direct_capture, "_fetch_live_page", fake_live)
+    url, note = direct_capture.resolve_douyin(reflow)
+    assert url == "http://pull.example/stream-1_or4.flv?k=1&t=2"
+    assert note.startswith("live ")
+    assert fetched == ["https://live.douyin.com/123456789012"]
+
+
+def test_resolve_douyin_never_returns_stream_from_an_ended_reflow(monkeypatch):
+    """没有 web_rid 可换、页面也明说下播：残留的播放地址绝不能交给 ffmpeg。"""
+    reflow = direct_capture._REFLOW_BASE + "1"
+    stale = ('<div>直播已结束</div>'
+             '<webcast-reflow-player url="http://pull.example/old.flv">'
+             '</webcast-reflow-player>')
+    monkeypatch.setattr(direct_capture, "_landing_url",
+                        lambda url, timeout=10.0: reflow)
+    monkeypatch.setattr(direct_capture, "_fetch_reflow",
+                        lambda landing, timeout: (stale, 0.2))
+    monkeypatch.setattr(direct_capture, "_resolve_streamlink",
+                        lambda *a, **kw: (_ for _ in ()).throw(
+                            AssertionError("页面明说下播时不该再跑 streamlink")))
+    with pytest.raises(direct_capture.ResolveError) as err:
+        direct_capture.resolve_douyin(reflow)
+    assert "没有开播" in str(err.value)
+    assert "old.flv" not in str(err.value)
+
+
+def test_stream_gone_recognises_ffmpeg_404_text():
+    assert direct_capture._stream_gone(
+        "Error opening input: Server returned 404 Not Found")
+    assert direct_capture._stream_gone(
+        "[https @ 1] HTTP error 403 Forbidden")
+    assert not direct_capture._stream_gone("Error while decoding stream #0:0")
+
+
+def test_stream_key_ignores_signed_query_params():
+    """每次解析签名都会变，stream id 不变才是同一场直播。"""
+    a = direct_capture._stream_key(
+        "http://pull-flv-l1.douyincdn.com/radio/stream-696886772589133859_or4.flv"
+        "?wsSecret=aaa&t=1")
+    b = direct_capture._stream_key(
+        "http://pull-flv-l6.douyincdn.com/radio/stream-696886772589133859_md.flv"
+        "?wsSecret=bbb&t=2")
+    c = direct_capture._stream_key(
+        "http://pull-flv-l1.douyincdn.com/radio/stream-7707637494791080738_or4.flv"
+        "?wsSecret=ccc&t=3")
+    assert a == b == "stream-696886772589133859"
+    assert a != c
+
+
+def test_recover_stops_retrying_when_404_resolves_to_same_stream(api_calls,
+                                                               monkeypatch):
+    """同一个地址再解析一次还是它：就是下播了，别再重建 2 次白等半分钟。"""
+    a = direct_capture.DirectAgent("http://127.0.0.1:8765")
+    try:
+        old = ("http://pull.example/radio/stream-696886772589133859_or4.flv"
+               "?wsSecret=old")
+        info = a._new_info(FakeProc(rc=3419392776), "LIVE_test", old)
+        info["stderr_tail"] = ("[in#0] Error opening input: Server returned "
+                               "404 Not Found\n")
+        a.running["rm1"] = info
+        # 重新解析只换了签名，stream id 还是那一路：这就是同一场。
+        monkeypatch.setattr(direct_capture, "resolve_douyin",
+                            lambda url, timeout=20.0: (
+                                "http://pull.example/radio/"
+                                "stream-696886772589133859_md.flv?wsSecret=new",
+                                "live 0.1s"))
+        monkeypatch.setattr(direct_capture, "spawn_ffmpeg",
+                            lambda stream: (_ for _ in ()).throw(
+                                AssertionError("同一个死地址不该再重建")))
+        reasons: list[str] = []
+        monkeypatch.setattr(a, "_fallback",
+                            lambda room, info, reason, stage=1: reasons.append(reason))
+        a._check(_room(), info)
+        assert reasons and "下播" in reasons[0]
+        assert "404" in reasons[0]
+    finally:
+        a.shutdown()
 
 
 def test_direct_fallback_defaults_to_ask(monkeypatch):
@@ -725,6 +841,9 @@ def test_resolve_caches_meta_for_page_url(monkeypatch):
     monkeypatch.setattr(direct_capture, "_landing_url",
                         lambda url, timeout=10.0: landing)
     monkeypatch.setattr(direct_capture, "_fetch_reflow", fake_fetch)
+    # live 页抓不到流，退回 reflow；这次不该再为 meta 多抓一次 reflow。
+    monkeypatch.setattr(direct_capture, "_fetch_live_page",
+                        lambda live, timeout: ("<html>no stream</html>", 0.1))
     direct_capture._META_CACHE.clear()
     stream, note = direct_capture.resolve_douyin(landing)
     assert stream == "http://pull.example/live.flv"

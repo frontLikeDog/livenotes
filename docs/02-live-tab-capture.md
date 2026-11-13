@@ -22,7 +22,7 @@
 |---|---|---|
 | `per_room`（默认） | 每个房间拉起一个专属 Chrome，打开 `/capture` 采集页，走 `getDisplayMedia` | 1~3 路；互相隔离，一个浏览器崩了不影响其它路 |
 | `shared`（实验性） | 一个 Edge 开 N 个直播间标签页，扩展往每个标签页注入采集脚本，走 `video.captureStream()` | 3~5 路，想省内存 |
-| `direct`（抖音） | 从 reflow 页取播放地址，ffmpeg 直接拉音频，不加载页面 | 抖音 1~5 路；最省内存；失败停下等你确认切换 |
+| `direct`（抖音） | 解析直播流地址（live 页内嵌 `stream_url` 优先，reflow 兜底），ffmpeg 直接拉音频，不加载页面 | 抖音 1~5 路；最省内存；失败停下等你确认切换 |
 
 浏览器选择：`per_room` 用 Chrome 正式版优先，找不到才用 Edge；`shared` 反过来优先 Edge，
 因为 Chrome 正式版 137 起忽略 `--load-extension`，要 Chrome 只能用 Chrome for Testing
@@ -58,9 +58,10 @@
 ### direct 模式的链路（只支持抖音）
 
 ```
-webcast.amemv.com/douyin/webcast/reflow/<id>（分享短链先跟一次跳转）
-  -> 抓 HTML 里现成的 <webcast-reflow-player url="...flv...">（约 0.5 秒）
-  -> FLV 地址（约 7 天有效）
+live.douyin.com/<web_rid>（房号跨场次稳定）
+  -> 首屏 JSON 里的 stream_url.flv_pull_url（约 0.7 秒）
+  -> FLV 地址
+reflow 分享页 / streamlink 只在 live 页拿不到流时兜底
   -> ffmpeg -vn -ac 1 -ar 16000 -f s16le pipe
   -> 重新切块成 4096 样本（8192 字节） -> POST /api/live/chunk
 ```
@@ -70,13 +71,15 @@ webcast.amemv.com/douyin/webcast/reflow/<id>（分享短链先跟一次跳转）
 - **会话由代理自己建**：浏览器模式是采集页调 `/api/live/start`；direct 模式下代理先建会话
   （`source_mode=direct`），再把音频按 `X-Live-Id` 推给同一个 `/api/live/chunk`，服务端
   不需要区分音频从哪来。
-- **为什么从 reflow 页取流**：抖音新版 `live.douyin.com` 把房间数据挪进了客户端脚本，
-  streamlink 的插件扒不到（实测返回 `No playable streams found`）；而分享落地页
-  `webcast.amemv.com/.../reflow/<id>` 的 HTML 里直接嵌着播放地址，稳定且快。
-  streamlink 只在 reflow 页拿不到地址时兜底，没装也不影响直取。
-- **不要改写房间 URL**：reflow 后面的 `<id>` 有时是分享/回流 id，不是 `web_rid`；
-  把它直接换成 `live.douyin.com/<id>` 会被抖音回「服务器开小差了」。房间保留原链接，
-  浏览器回退也能打开。
+- **为什么以 `web_rid` 为准**：抖音一次开播一个 `room id`，锚点重新开播就换新的；reflow
+  路径里的 `<id>` 正是 room id，所以那张分享页永远停在上一场，还会**继续吐上一场的播放
+  地址**。`web_rid`（`live.douyin.com` 后面的房号）不变，页面里的 `stream_url` 永远是最新
+  一场的，所以先抓 live 页；reflow 页只用来拿主播名/标题、算「显示页面」地址，以及兜底。
+- **先判下播，再取地址**：已结束的 reflow 页里残留的播放地址一律不用——先取地址就会把死
+  地址交给 ffmpeg，表现为反复 404（Windows 上退出码是 `3419392776` 这种看不懂的
+  32 位值，真正原因只在 stderr 里）。
+- **不要改写房间 URL**：reflow 后面的 `<id>` 不是 `web_rid`，把它换成
+  `live.douyin.com/<id>` 会被抖音回「服务器开小差了」。房间保留原链接，浏览器回退也能打开。
 - **失败不自动切换**：解析失败、ffmpeg 起不来、首块 8 秒没到、或运行中连续 15 秒没块，
   先按下面的运行中自愈重试；超过 3 次就把房间停在 `failed`，在房间卡片/详情里亮出
   「直取失败 · 切换到浏览器采集」。**只有你点了确认**（`POST /api/rooms/switch`）采集代理
@@ -84,7 +87,9 @@ webcast.amemv.com/douyin/webcast/reflow/<id>（分享短链先跟一次跳转）
   策略默认 `ask`，可在「⚙ 设置 → 采集」里改成 `auto`（自动切浏览器）或 `none`（只报错）；
   设环境变量 `LIVENOTES_DIRECT_FALLBACK` 则覆盖设置页。
 - **运行中自愈**：ffmpeg 退出或 15 秒没新块，先重新解析、重启 ffmpeg，沿用原会话，最多 3 次；
-  超过 3 次才停下来等你确认切换。
+  超过 3 次才停下来等你确认切换。例外是「地址已失效」（stderr 里 403/404）且重新解析回来
+  还是同一路流（`stream-<id>` 不变，签名参数本来每次都会变）——那就是下播了，直接停下等你
+  确认切换，不再把同一段 404 重放两遍。
 - **分块大小**：ffmpeg 输出的是连续字节流，代理按 4096 样本（256ms）重新切块，
   和服务端 `AudioWorklet` 的块大小一致，VAD/看门狗的行为不变。
 - **下播判断**：沿用代理原有的页面探针（`LIVENOTES_RECHECK_SECONDS`）；探针发现下播就停会话。

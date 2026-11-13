@@ -10,8 +10,8 @@
 - **三种采集底座**：默认「每个房间一个专属浏览器」，互不影响、最稳；设
   `LIVENOTES_CAPTURE_MODE=shared` 改成「一个 Edge 开多个房间标签页」，3 路实测
   浏览器内存 2.4GB（独立模式约 2.8GB）；设 `LIVENOTES_CAPTURE_MODE=direct`
-  则从抖音 reflow 页取流、用 ffmpeg 直取，5 路并发实测 139MB；直取失败不会
-  偷偷切浏览器，会在收听页停下来让你确认切换。
+  则解析抖音直播流地址（优先 live 页内嵌 `stream_url`）、用 ffmpeg 直取，
+  5 路并发实测 139MB；直取失败不会偷偷切浏览器，会在收听页停下来让你确认切换。
   见 [docs/02](docs/02-live-tab-capture.md#三种采集底座)
 - **实时字幕**：主播开口约 1 秒后出现灰色「识别中」字幕，每 4 秒切句成定稿
 - **说话人分离**：基于 CAM++ 声纹在线聚类，两位说话人轮流发言会自动分成「主播 / 嘉宾」
@@ -111,9 +111,10 @@
   【主播名】正在直播，建房间时就先落这个名字。为的是"刚加进来那 5~10 秒"——
   这段时间采集端还没落地，只有域名的话根本认不出是哪一路。
   `【抖音】`这种平台名会被排除，见 `app/watchlink.py` 的 `share_label()`。
-- **页面读到的真名**（`name_source=page`）：直取解析流地址时，reflow 页的
-  首屏 JSON 里就有 `room.title` 和 `owner.nickname`，同一次抓取顺手解析，
-  不额外请求、不开浏览器（`tools/direct_capture.py` 的 `parse_room_meta()`）。
+- **页面读到的真名**（`name_source=page`）：直取解析时，reflow 页的首屏 JSON
+  里就有 `room.title` 和 `owner.nickname`，同一次抓取顺手解析，不额外请求、
+  不开浏览器（`tools/direct_capture.py` 的 `parse_room_meta()`）。直播流地址
+  本身优先从 `live.douyin.com/<web_rid>` 页取（见 [docs/02](docs/02-live-tab-capture.md)）。
   浏览器采集模式本来就靠标签页标题取名，`clean_title()` 会洗掉
   「 - 抖音直播」这类后缀。
 - **人工改名**（`name_source=user`）：收听页详情里的「改名」。一旦改过，
@@ -151,7 +152,7 @@ python tools/fetch_models.py           # 约 270MB 本地模型
 | 2 | 采集代理 | `python tools\capture_agent.py --base http://127.0.0.1:8765` | 贴一个链接就拉起一个专属 Chrome 去录，崩了重拉。共享模式：`set LIVENOTES_CAPTURE_MODE=shared`；抖音直取：`set LIVENOTES_CAPTURE_MODE=direct`，用同一条命令，需 ffmpeg 在 PATH（streamlink 可选兜底） |
 | 3 | 飞书机器人 | `python tools\feishu_bot.py` | 长连接收消息（贴链接/确认/命令），推高光 |
 
-抖音直取只需 `ffmpeg` 在 PATH；`streamlink` 仅在 reflow 页拿不到流时兜底，可选安装
+抖音直取只需 `ffmpeg` 在 PATH；`streamlink` 仅在页面里拿不到流时兜底，可选安装
 （`pip install -r requirements-direct.txt`）。然后双击 `tools\start_direct.bat`
 （等同于先设 `LIVENOTES_CAPTURE_MODE=direct` 再运行 `start.bat`）。
 直取失败时默认停在收听页等你确认切换，不会自动打开浏览器；这个策略在「⚙ 设置 →
@@ -268,7 +269,7 @@ data/               数据库、录音、日志（不提交）
 | `LIVENOTES_LLM_DEDUPE_TTL` / `_TASK_TIMEOUT` | `600` / `600` | 成功结果复用窗口、HTTP 等任务的上限（秒） |
 | `LIVENOTES_NO_BROWSER` | 空 | 设为 `1` 不自动开浏览器 |
 | `LIVENOTES_MAX_ROOMS` | `5` | 同时监听几路（独立浏览器约 0.9GB/路；共享模式 3 路实测浏览器 2.4GB） |
-| `LIVENOTES_CAPTURE_MODE` | `per_room` | 采集底座：`per_room` = 每个房间一个浏览器；`shared` = 一个 Edge 开多个房间标签页（省内存，实验性）；`direct` = 从抖音 reflow 页取流、ffmpeg 直取（最省内存；失败停下等你确认，不自动切浏览器） |
+| `LIVENOTES_CAPTURE_MODE` | `per_room` | 采集底座：`per_room` = 每个房间一个浏览器；`shared` = 一个 Edge 开多个房间标签页（省内存，实验性）；`direct` = 解析抖音直播流地址、ffmpeg 直取（最省内存；失败停下等你确认，不自动切浏览器） |
 | `LIVENOTES_DIRECT_FALLBACK` | 空（用设置页） | direct 失败后怎么办：`ask`（默认，停在收听页等你点「切换浏览器采集」）/ `auto`（旧行为，自动切 `per_room`，不可用再 `shared`）/ `per_room`、`shared`（自动切到指定引擎）/ `none`（只报失败，不提供切换）。平时在「⚙ 设置 → 采集」里选，改完立即生效；这里设了环境变量则覆盖设置页，留给脚本/临时调试 |
 | `LIVENOTES_SHARED_BROWSER` | 空 | 共享模式指定 Edge / Chrome for Testing 的 `exe` 路径；不填按 Edge → Chrome for Testing 顺序找 |
 | `LIVENOTES_CONFIRM_TTL` | `600` | 陌生站点的确认卡多久失效（秒） |

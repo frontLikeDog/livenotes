@@ -1,10 +1,19 @@
 # -*- coding: utf-8 -*-
-"""抖音直取采集：streamlink 解析 FLV -> ffmpeg 拉 16k 单声道 PCM -> /api/live/chunk。
+"""抖音直取采集：解析出 FLV/HLS -> ffmpeg 拉 16k 单声道 PCM -> /api/live/chunk。
 
 为什么单独一个模块：浏览器采集的会话是采集页自己建的，direct 没有页面，
 必须由代理自己调 /api/live/start；把它和 SharedAgent 混在一个类里会让
 「谁建会话、谁停会话」变得不清楚。这里只做抖音，B 站/快手等以后按同样
 的 resolver 接口加，不改变主循环。
+
+解析优先级（按地址保质期排）：
+  1. live.douyin.com/<web_rid>：房号跨场次稳定，页面首屏 JSON 里直接嵌着
+     当前这一场的 stream_url；
+  2. reflow 分享页里现成的播放地址（页面没改版时仍可用，顺带兜底主播名）；
+  3. streamlink。
+reflow 路径里的是 room id，一场直播一个：锚点重新开播后那张页面就永远停在
+上一场，还继续吐上一场的播放地址——先取地址就会把死地址交给 ffmpeg，反复
+404。web_rid 不变，所以以它为准。
 
 失败策略：
   - 解析失败 / ffmpeg 退出 / 15 秒没有成功送出的音频块 -> 用同一个 session
@@ -85,8 +94,13 @@ _REFLOW_RE = re.compile(r"/(?:douyin/webcast/reflow|share/live)/(\d+)")
 _MOBILE_UA = ("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
               "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 "
               "Mobile/15E148 Safari/604.1")
+# live.douyin.com 是桌面版页面：用手机 UA 拿到的首屏 JSON 形状不一样，
+# 而且它本来就是为了不装浏览器才抓的，别用移动 UA 去撞。
+_PC_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+          "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36")
 
 
+_LIVE_PAGE = "https://live.douyin.com/"
 _REFLOW_BASE = "https://webcast.amemv.com/douyin/webcast/reflow/"
 # reflow 页里没有播放器元素时，用这些文案判断是「没开播」还是「抖音临时报错」。
 # 「服务器开小差了」不能算下播：它只是抖音的通用错误提示，直播间可能开着。
@@ -94,36 +108,52 @@ _OFFLINE_MARKS = ("直播已结束", "主播已下播", "主播暂未开播", "�
 _PAGE_ERROR_MARKS = ("服务器开小差了", "直播间不存在", "页面不存在")
 
 
-def _landing_url(url: str, timeout: float = 10.0) -> str:
-    """抖音直播间链接 -> 浏览器能打开、HTML 里带播放地址的 reflow 页。
+def _final_url(url: str, timeout: float = 10.0) -> str:
+    """跟一次跳转，返回落地地址；失败返回空串。短链（v.douyin.com）靠它落地。"""
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": _MOBILE_UA})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.geturl()
+    except Exception:
+        return ""
 
-    reflow 是分享落地页，页面里直接嵌着 <webcast-reflow-player url="...flv">。
-    live.douyin.com 现在把房间数据挪进了客户端脚本，streamlink 扒不到；
-    reflow 页反而稳定，所以直取以它为主。短链先跟一次跳转，落到 reflow
-    或 live 页后再换回 reflow 形状。返回空串表示不是抖音 / 跳转失败。
+
+def _live_target(url: str, timeout: float = 10.0) -> str:
+    """链接 -> live.douyin.com/<web_rid>；本来就落不到 live 页就返回空串。
+
+    这是**跨场次稳定**的房号：同一主播重新开播，web_rid 不变，页面里的
+    stream_url 会换成新一场的。reflow 里的 room id 做不到这一点。
     """
     u = (url or "").strip()
     m = _LIVE_RE.match(u)
     if m:
-        return _REFLOW_BASE + m.group(1)
+        return _LIVE_PAGE + m.group(1)
+    if not is_douyin(u):
+        return ""
+    m = _LIVE_RE.match(_final_url(u, timeout))
+    return _LIVE_PAGE + m.group(1) if m else ""
+
+
+def _landing_url(url: str, timeout: float = 10.0) -> str:
+    """抖音直播间链接 -> HTML 里带房间信息的 reflow 分享页。
+
+    reflow 是分享落地页，首屏 JSON 里有主播名、标题和 owner.webRid。
+    注意：reflow 路径上的 <id> 是 room id，**不是** web_rid。拿 web_rid
+    拼 reflow/<web_rid> 只会得到一张空壳页（抖音回「服务器开小差了」），
+    所以 live.douyin.com 链接在这里直接返回空串，交给 _live_target 处理。
+    短链先跟一次跳转，落到 reflow 再换回 reflow 形状；返回空串表示不是
+    抖音 / 跳转失败 / 落到了 live 页。
+    """
+    u = (url or "").strip()
+    if _LIVE_RE.match(u):
+        return ""
     m = _REFLOW_RE.search(urllib.parse.urlsplit(u).path)
     if m:
         return _REFLOW_BASE + m.group(1)
     if not is_douyin(u):
         return ""
-    try:
-        req = urllib.request.Request(u, headers={"User-Agent": _MOBILE_UA})
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            final = resp.geturl()
-    except Exception:
-        return ""
-    m = _LIVE_RE.match(final)
-    if m:
-        return _REFLOW_BASE + m.group(1)
-    m = _REFLOW_RE.search(urllib.parse.urlsplit(final).path)
-    if m:
-        return _REFLOW_BASE + m.group(1)
-    return ""
+    m = _REFLOW_RE.search(urllib.parse.urlsplit(_final_url(u, timeout)).path)
+    return _REFLOW_BASE + m.group(1) if m else ""
 
 
 def canonical_douyin_url(url: str, timeout: float = 10.0) -> str:
@@ -181,6 +211,79 @@ def _fetch_reflow(landing: str, timeout: float) -> tuple[str, float]:
         if (resp.headers.get("Content-Encoding") or "").lower() == "gzip":
             raw = gzip.decompress(raw)
     return raw.decode("utf-8", "replace"), time.monotonic() - t0
+
+
+def _fetch_live_page(live_url: str, timeout: float) -> tuple[str, float]:
+    """抓 live.douyin.com 桌面页。首屏约 1MB，stream_url 就嵌在里面。"""
+    req = urllib.request.Request(live_url, headers={
+        "User-Agent": _PC_UA,
+        "Accept-Language": "zh-CN,zh;q=0.9",
+        "Accept-Encoding": "identity",
+    })
+    t0 = time.monotonic()
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        raw = resp.read()
+        if (resp.headers.get("Content-Encoding") or "").lower() == "gzip":
+            raw = gzip.decompress(raw)
+    return raw.decode("utf-8", "replace"), time.monotonic() - t0
+
+
+def _flatten_json(text: str) -> str:
+    """摊平页面里 RSC/JS 字符串的转义，只留一层能直接匹配的 JSON。
+
+    播放地址里的 & 可能是 \\u0026，也可能是 \\\\u0026（外面又套了一层字符串）。
+    两种都得还原：带着字面反斜杠的 URL 交给 ffmpeg 只会 403/404。
+    """
+    t = str(text or "")
+    for _ in range(2):          # 双层转义：\\u0026 -> & -> &
+        t = (t.replace("\\\\u0026", "&").replace("\\u0026", "&")
+              .replace("\\\\/", "/").replace("\\/", "/")
+              .replace('\\\\"', '"').replace('\\"', '"'))
+    return t
+
+
+_FLV_BLOCK_RE = re.compile(r'"flv_pull_url"\s*:\s*\{([^{}]{0,4000})\}')
+_FLV_PAIR_RE = re.compile(
+    r'"([A-Za-z0-9_]{1,24})"\s*:\s*"(https?://[^"]+?\.flv[^"]*)"')
+# 画质从高到低：音频只取一路，挑最高质量的流最稳。
+_QUALITY_ORDER = ("FULL_HD1", "HD1", "SD1", "SD2", "LD1", "LD2")
+
+
+def _pick_live_stream(text: str) -> str:
+    """live 页 -> 当前这一场的播放地址。优先 FLV，拿不到退 HLS。"""
+    flat = _flatten_json(text)
+    found: dict[str, str] = {}
+    for block in _FLV_BLOCK_RE.finditer(flat):
+        for name, url in _FLV_PAIR_RE.findall(block.group(1)):
+            found.setdefault(name, _clean_url(url))
+    for q in _QUALITY_ORDER:
+        if found.get(q):
+            return found[q]
+    for url in found.values():          # 画质名换了也认，只要有一路
+        if url:
+            return url
+    m = re.search(r"https?://[^\"'\s<>]+\.m3u8[^\"'\s<>]*", flat)
+    return _clean_url(m.group(0)) if m else ""
+
+
+def _resolve_live_page(web_rid: str, timeout: float) -> tuple[str, str]:
+    """web_rid -> 当前场次的播放地址；下播 / 空页面抛 ResolveError。
+
+    解析的第一选择：web_rid 不随场次变，页面里的 stream_url 永远是最新一场。
+    reflow 里的 room id 一场一个，锚点重新开播后那里只剩上一场的死地址。
+    """
+    try:
+        text, cost = _fetch_live_page(_LIVE_PAGE + str(web_rid or ""), timeout)
+    except Exception as e:
+        raise ResolveError("抓取直播间页面失败：%s"
+                           % (str(e)[:120] or type(e).__name__))
+    stream = _pick_live_stream(text)
+    if stream:
+        return stream, "live %.1fs" % cost
+    for mark in _OFFLINE_MARKS:
+        if mark in text:
+            raise ResolveError("直播间当前没有开播（页面显示「%s」）" % mark)
+    raise ResolveError("直播间页面里没有找到直播流地址（可能需要登录/验证）")
 
 
 # ---------------------------------------------------------------- 房间名
@@ -348,53 +451,79 @@ def _resolve_streamlink(target: str, timeout: float) -> tuple[str, str]:
     return out[-1], "streamlink %.1fs" % (time.monotonic() - t0)
 
 
+def _join_errors(*parts: str) -> str:
+    return "；".join([p for p in parts if p]) or "没能解析出直播流地址"
+
+
 def resolve_douyin(url: str, timeout: float = RESOLVE_TIMEOUT_S) -> tuple[str, str]:
     """抖音直播页 -> 可播放的 FLV/HLS 地址。返回 (stream_url, note)。
 
-    先抓 reflow 页拿页面里现成的播放地址（约 1 秒，不依赖 streamlink）；
-    实在拿不到才用 streamlink 兜底。页面明确写着「直播已结束」时直接报下播，
-    不再白跑一次 streamlink。
+    顺序按「地址保质期」排：
+      1. live.douyin.com/<web_rid>：房号跨场次稳定，页面里带着当前场次的
+         stream_url，优先用它；
+      2. reflow 页里现成的播放地址（页面没改版时仍可用）；
+      3. streamlink。
+    reflow 里的 room id 一场直播一个，锚点重新开播后那张页面永远停在上一场，
+    还继续吐上一场的播放地址——**必须先判「直播已结束」再取地址**，否则会
+    把一个死地址交给 ffmpeg，反复 404。live 页则永远是最新一场的。
     """
-    landing = _landing_url(url)
-    if not landing:
+    u = (url or "").strip()
+    landing = _landing_url(u)
+    live_url = "" if landing else _live_target(u)
+    if not landing and not live_url and not is_douyin(u):
         raise ResolveError("无法从链接里找到抖音直播间房号")
 
     reflow_err = ""
+    reflow_text = ""
+    reflow_cost = 0.0
     meta: dict = {}
-    try:
-        text, cost = _fetch_reflow(landing, timeout)
-    except Exception as e:
-        reflow_err = "抓取直播页失败：%s" % (str(e)[:120] or type(e).__name__)
-    else:
-        # 同一次抓取顺手把房间信息（含 web_rid）缓存下来：后面算页面地址、
-        # 补房间名都不再为同一张页面多跑一次 HTTP。
-        meta = parse_room_meta(text)
-        _remember_meta(landing, meta)
-        stream = _pick_stream_url(text)
-        if stream:
-            return stream, "reflow %.1fs" % cost
+    if landing:
+        try:
+            reflow_text, reflow_cost = _fetch_reflow(landing, timeout)
+        except Exception as e:
+            reflow_err = "抓取直播页失败：%s" % (str(e)[:120] or type(e).__name__)
+        else:
+            # 同一次抓取顺手把房间信息（含 web_rid）缓存下来：后面算页面地址、
+            # 补房间名都不再为同一张页面多跑一次 HTTP。
+            meta = parse_room_meta(reflow_text)
+            _remember_meta(landing, meta)
+
+    web_rid = (live_url.rsplit("/", 1)[-1] if live_url
+               else str(meta.get("web_rid") or ""))
+
+    # 第一选择：live 页。跨场次稳定的房号 + 当前场次的地址。
+    live_err = ""
+    if web_rid:
+        try:
+            return _resolve_live_page(web_rid, timeout)
+        except ResolveError as e:
+            live_err = str(e)
+
+    # 第二选择：reflow 页里的地址。先判下播/故障，再取地址——顺序反了就会
+    # 把已结束那一场残留的播放地址当成可用的。
+    if reflow_text:
         for mark in _OFFLINE_MARKS:
-            if mark in text:
-                raise ResolveError("直播间当前没有开播（页面显示「%s」）" % mark)
+            if mark in reflow_text:
+                raise ResolveError(_join_errors(
+                    live_err, "直播间当前没有开播（页面显示「%s」）" % mark))
         for mark in _PAGE_ERROR_MARKS:
-            if mark in text:
-                raise ResolveError(
-                    "抖音页面返回「%s」（临时故障，不一定是没开播），稍后重试" % mark)
+            if mark in reflow_text:
+                raise ResolveError(_join_errors(
+                    live_err, "抖音页面返回「%s」（临时故障，不一定是没开播），稍后重试"
+                    % mark))
+        stream = _pick_stream_url(reflow_text)
+        if stream:
+            return stream, "reflow %.1fs" % reflow_cost
         reflow_err = "reflow 页里没有找到直播流地址"
 
-    live = page_url(meta)
-    if not live:
-        # 用户直接贴的就是 live.douyin.com/<web_rid>：这个地址本身可信，reflow
-        # 页抓不到时仍可交给 streamlink 兜底；reflow 链接则没有可信房号，不冒险。
-        m = _LIVE_RE.match(str(url or "").strip())
-        if m:
-            live = "https://live.douyin.com/" + m.group(1)
-    if not live:
-        raise ResolveError(reflow_err)
+    target = live_url or ("https://live.douyin.com/" + web_rid if web_rid else "")
+    if not target:
+        raise ResolveError(_join_errors(live_err, reflow_err))
     try:
-        return _resolve_streamlink(live, timeout)
+        return _resolve_streamlink(target, timeout)
     except ResolveError as e:
-        raise ResolveError("%s；streamlink 兜底也失败：%s" % (reflow_err, e))
+        raise ResolveError(_join_errors(
+            live_err, "%s；streamlink 兜底也失败：%s" % (reflow_err, e)))
 
 
 def spawn_ffmpeg(stream: str) -> subprocess.Popen:
@@ -436,6 +565,35 @@ def post_chunk(base: str, sid: str, data: bytes, timeout: float = 5.0) -> None:
                 resp.status, body.decode("utf-8", "replace")[:120]))
     finally:
         conn.close()
+
+
+_GONE_RE = re.compile(r"(?:Server returned|HTTP error)\s*(?:403|404)"
+                      r"|(?:403|404)\s*(?:Not Found|Forbidden)", re.I)
+
+
+def _stream_gone(text: str) -> bool:
+    """ffmpeg stderr 里是不是「这个地址已经失效」——下播和过期都长这样。
+
+    别拿 rc 判断：Windows 上 CDN 拒绝时 ffmpeg 的退出码是 3419392776 这种
+    32 位值（0xCBCFCB08），看不出任何信息，真正的原因只在 stderr 里。
+    """
+    return bool(_GONE_RE.search(str(text or "")))
+
+
+_STREAM_ID_RE = re.compile(r"stream-(\d+)")
+
+
+def _stream_key(url: str) -> str:
+    """播放地址的「身份」：把每次都变的签名参数去掉，只留 stream id。
+
+    重新解析一次签名/时间戳必然变，但同一场直播的 stream id 不变；换了
+    stream id 才是新的一场。所以判断「还是不是同一个死地址」只能比这个。
+    """
+    text = str(url or "")
+    m = _STREAM_ID_RE.search(urllib.parse.urlsplit(text).path)
+    if m:
+        return "stream-" + m.group(1)
+    return urllib.parse.urlsplit(text).path or text
 
 
 def _kill_proc(proc) -> None:
@@ -776,9 +934,13 @@ class DirectAgent(Agent):
         proc = info.get("proc")
         if proc is not None and proc.poll() is not None:
             tail = str(info.get("stderr_tail") or "").strip().splitlines()
-            why = "ffmpeg 退出（rc=%s%s）" % (
-                proc.returncode, ("：" + tail[-1][:160]) if tail else "")
-            self._recover(room, info, why)
+            last = tail[-1].strip()[:160] if tail else ""
+            # stderr 才是原因，rc 只是附注：Windows 上 ffmpeg 的退出码是个
+            # 看不懂的 32 位值（比如 3419392776），排障时最没用的就是它。
+            why = "ffmpeg 退出（%s）" % (
+                ("%s；rc=%s" % (last, proc.returncode)) if last
+                else "rc=%s" % proc.returncode)
+            self._recover(room, info, why, gone=_stream_gone("\n".join(tail)))
             return
         if info.get("eof"):
             self._recover(room, info, "ffmpeg 输出结束")
@@ -798,7 +960,8 @@ class DirectAgent(Agent):
         elif idle < 5:
             info["warned"] = False
 
-    def _recover(self, room: dict, info: dict, reason: str) -> None:
+    def _recover(self, room: dict, info: dict, reason: str,
+                 gone: bool = False) -> None:
         rid = room["id"]
         if info.get("recovering"):
             return
@@ -834,6 +997,14 @@ class DirectAgent(Agent):
                             note="重新解析失败，%d 秒后重试：%s"
                                  % (int(DIRECT_RETRY_S), str(e)[:120]),
                             engine="direct", session_id=info.get("sid"))
+                return
+            if gone and _stream_key(stream) == _stream_key(info.get("stream")):
+                # 重新解析拿回来的还是同一路流（签名/时间戳变了，stream id 没变）：
+                # 不是 URL 过期，是这一场真的结束了。再重建两次只会把同一段
+                # 404 重放一遍、白等半分钟。
+                self._fallback(room, info,
+                               "直播流已失效，重新解析拿到的还是同一个地址，"
+                               "直播间应该已经下播（%s）" % reason[:120])
                 return
             info["retry_at"] = 0.0
             try:
