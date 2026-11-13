@@ -17,6 +17,7 @@ from urllib.parse import urlencode
 import pytest
 
 from app import live, server
+from app.config import BASE_URL
 from tests import helpers
 
 
@@ -94,13 +95,13 @@ def test_evidence_link_switches_between_live_and_reader():
 
     s = _fake_session(seconds=1, running=True)
     row = {"id": 1, "t_start": 12.0, "speaker_label": "主播", "text": "一句原话"}
-    assert live._reader_link("LIVE_T", 12).startswith(live.BASE_URL + "/live?")
-    assert livebrief._evidence(row, "LIVE_T")["reader_url"].startswith(live.BASE_URL + "/live?")
+    assert live._reader_link("LIVE_T", 12).startswith(BASE_URL + "/live?")
+    assert livebrief._evidence(row, "LIVE_T")["reader_url"].startswith(BASE_URL + "/live?")
 
     s.running = False
-    assert live._reader_link("LIVE_T", 12).startswith(live.BASE_URL + "/reader?")
+    assert live._reader_link("LIVE_T", 12).startswith(BASE_URL + "/reader?")
     # 收尾回顾在这个窗口里发送：会话还在内存，但必须回 reader。
-    assert livebrief._evidence(row, "LIVE_T")["reader_url"].startswith(live.BASE_URL + "/reader?")
+    assert livebrief._evidence(row, "LIVE_T")["reader_url"].startswith(BASE_URL + "/reader?")
     assert not live.is_active("NOPE")
 
 

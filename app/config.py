@@ -53,9 +53,29 @@ def _lan_ip() -> str:
     return sorted(cands, key=rank)[0] if cands else HOST
 
 
-# 推给手机时用的地址：手机访问不到 127.0.0.1，未显式配置时自动用局域网 IP
-BASE_URL = os.environ.get("LIVENOTES_BASE_URL") or (
-    "http://%s:%d" % (HOST if HOST not in ("127.0.0.1", "0.0.0.0") else _lan_ip(), PORT))
+def lan_ip() -> str:
+    """手机能连上的本机地址；找不到局域网网卡时退回回环（调用方据此提示）。"""
+    return _lan_ip()
+
+
+def _default_base_url() -> str:
+    """链接前缀：只在服务确实监听在可达地址时才用局域网 IP。
+
+    旧逻辑是「HOST 只要是回环就自动换成局域网 IP」，但桌面壳把引擎绑在
+    127.0.0.1 的随机端口上——拼出来的 http://192.168.x.x:<端口> 指向一个
+    没人监听的地址，手机点开只会超时。回环就老实写回环，局域网访问由
+    app/lan.py 在显式开启后接管（它会给出真实监听的地址）。
+    """
+    env = os.environ.get("LIVENOTES_BASE_URL")
+    if env:
+        return env.rstrip("/")
+    if HOST in ("127.0.0.1", "localhost", "::1"):
+        return "http://127.0.0.1:%d" % PORT
+    host = _lan_ip() if HOST in ("0.0.0.0", "::") else HOST
+    return "http://%s:%d" % (host, PORT)
+
+
+BASE_URL = _default_base_url()
 # 高光推送：默认每天最多 5 条。单用户场景下，"烦"比"漏"代价大得多，
 # 但 3 条 + 30 分钟冷却叠起来，一场两小时的直播最多只响一次——用户会以为没在推。
 PUSH_DAILY_CAP = int(os.environ.get("LIVENOTES_PUSH_CAP", "5"))

@@ -31,6 +31,7 @@ from typing import Any
 from . import analysis
 from . import audio as _audio
 from . import glossary
+from . import lan
 from . import logs
 from . import metrics
 from . import scheduler
@@ -41,7 +42,6 @@ from . import recluster as _recluster
 from .asr_pool import AsrPool
 from .config import (
     AUDIO_DIR,
-    BASE_URL,
     DATA_DIR,
     LIVE_ASR_LANGUAGE,
     LIVE_FORCE_SEGMENT_S,
@@ -1388,13 +1388,13 @@ def _get_bot():
 def _reader_link(sid: str, t: float) -> str:
     """采集中去 /live 能直接听 spool；结束后 /live 没有音频，仍走 reader。"""
     page = "live" if is_active(sid) else "reader"
-    return "%s/%s?session=%s&t=%d" % (BASE_URL, page, sid, int(t or 0))
+    return "%s/%s?session=%s&t=%d" % (lan.base_url(), page, sid, int(t or 0))
 
 
 def _feedback_link(sid: str, t: float, verdict: int) -> str:
     """卡片上的 👍/👎 落到本地：飞书只有 URL 按钮能在纯内网用，
     点开一个确认页即写回，不需要回调地址/公网。"""
-    return "%s/card/feedback?sid=%s&t=%.2f&v=%d" % (BASE_URL, sid, float(t or 0), verdict)
+    return "%s/card/feedback?sid=%s&t=%.2f&v=%d" % (lan.base_url(), sid, float(t or 0), verdict)
 
 
 def _room_title(session: dict) -> str:
@@ -1626,7 +1626,7 @@ def push_capture_lost(sid: str, idle_s: float) -> bool:
         "已经 %d 秒没收到音频块。这不是没人说话：安静时采集页也会每 256ms 推一块。" % int(idle_s),
         "可能是浏览器崩溃 / 采集页被关 / 页面被冻结；直播间可能还在播。",
         "采集端会自动尝试恢复；如果一直没恢复，请打开收听页看一眼。",
-        "收听页：%s/live?session=%s" % (BASE_URL, sid),
+        "收听页：%s/live?session=%s" % (lan.base_url(), sid),
     ])
     # 同一声道内 monotonic 不会重复；重启后会话本身也没了，不存在跨进程撞号。
     episode = int((s._chunk_stall_warned_at if s else 0) * 1000) or int(time.time())

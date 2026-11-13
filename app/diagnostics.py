@@ -24,7 +24,7 @@ import sys
 from datetime import datetime
 from urllib.parse import urlsplit
 
-from . import live, logs, metrics, rooms, scheduler, store
+from . import lan, live, logs, metrics, rooms, scheduler, store
 from .config import (DATA_DIR, HOST, LIVE_STALL_STOP_S, LIVE_STALL_WARN_S,
                      MODELS_DIR, PORT, SAMPLE_RATE)
 
@@ -140,6 +140,7 @@ def summary(event_limit: int = 80, log_limit: int = 30) -> dict:
             "sample_rate": SAMPLE_RATE,
             "stall_warn_s": LIVE_STALL_WARN_S,
             "stall_stop_s": LIVE_STALL_STOP_S,
+            "lan": lan.status(),
         },
         "live": _live(),
         "rooms": _rooms(),

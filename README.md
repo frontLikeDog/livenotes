@@ -176,7 +176,10 @@ python tools/fetch_models.py           # 约 270MB 本地模型
 ```
 
 > 网页里的「实时监听」（手动抓当前标签页）必须用 `127.0.0.1` 打开，浏览器才允许采集；
-> 手机访问局域网 IP 只能看回放。
+> 手机访问局域网 IP 只能看回放。接上飞书机器人（`data/feishu.json` 或
+> `FEISHU_APP_ID`）后首次启动会默认开启手机访问，飞书里的新链接直接是
+> `http://<局域网IP>:8765/`；也可以在设置 →「手机访问」里开关
+> （首次开启会请求管理员权限添加防火墙规则）。
 
 > 模型与运行数据不在仓库里：`models/` 由 `tools/fetch_models.py` 下载，`data/` 里的数据库和录音是本地运行产物。
 
@@ -241,8 +244,9 @@ data/               数据库、录音、日志（不提交）
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `LIVENOTES_HOST` / `LIVENOTES_PORT` | `127.0.0.1` / `8765` | 监听地址与端口；手机要访问回听页时用 `python run.py --lan`（绑 `0.0.0.0`） |
-| `LIVENOTES_BASE_URL` | 自动 | 飞书卡片里给手机用的地址前缀。默认：`HOST` 非回环时用 `HOST`，否则取本机局域网 IP；多网卡选错（VPN / WSL / Hyper-V）时显式设成 `http://<局域网IP>:8765` |
+| `LIVENOTES_HOST` / `LIVENOTES_PORT` | `127.0.0.1` / `8765` | 监听地址与端口；`python run.py --lan` 直接绑 `0.0.0.0`。桌面版也可以不改启动参数，在设置 →「手机访问」里开启 |
+| `LIVENOTES_BASE_URL` | 自动 | 飞书卡片里给手机用的地址前缀。默认：`HOST` 非回环时用 `HOST`；回环时用 `127.0.0.1`，开启「手机访问」后自动换成实际监听的局域网地址（接上飞书机器人时首次启动默认开启，设置里关掉后不再自动开）。多网卡选错（VPN / WSL / Hyper-V）时可显式设成 `http://<局域网IP>:<端口>` |
+| `LIVENOTES_LAN_PORT` | `8765` | 「手机访问」第二个监听的端口；被占用时会自动换一个空闲端口 |
 | `LIVENOTES_MODELS_DIR` | `./models` | 模型目录 |
 | `LIVENOTES_DATA_DIR` | `./data` | 数据库/录音目录（压测可指向临时目录） |
 | `LIVENOTES_MAX_SPEAKERS` | `8` | 实时阶段声纹聚类上限 |

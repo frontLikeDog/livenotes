@@ -32,7 +32,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from app import (clips, feishu, profile, report, share, store, timefmt,
+from app import (clips, feishu, lan, profile, report, share, store, timefmt,
                  watchlink)  # noqa: E402
 from app.config import BASE_URL, LIVE_STALL_WARN_S, PORT  # noqa: E402
 
@@ -42,8 +42,8 @@ MAX_ROOMS = watchlink.MAX_ROOMS
 # 私聊仍然只认命令——这是防误触发的底线。
 NL_ENABLED = os.environ.get("FEISHU_NL_ENABLED", "0").lower() in ("1", "true", "yes", "on")
 
-# 采集代理和本服务在这台机器上，优先走回环：BASE_URL 是给手机用的局域网地址，
-# 服务只绑 127.0.0.1 时那个地址连不上。
+# 采集代理和本服务在这台机器上，优先走回环：给手机看的链接由
+# app.lan.base_url() 生成，开启局域网访问后才是局域网地址。
 _BASES = [b.rstrip("/") for b in (
     os.environ.get("LIVENOTES_API"),
     "http://127.0.0.1:%d" % PORT,
@@ -347,7 +347,7 @@ def _ts(x: float) -> str:
 
 
 def _link(sid: str, t: float) -> str:
-    return "%s/reader?session=%s&t=%d" % (BASE_URL, sid, int(t))
+    return "%s/reader?session=%s&t=%d" % (lan.base_url(), sid, int(t))
 
 
 def _split_mixed(term: str) -> list[str]:
@@ -425,7 +425,7 @@ def cmd_rooms() -> str:
     lines.append("")
     lines.append("状态：/状态 或 /状态 CH02")
     lines.append("停一路：/stop 1（上面的序号）或 /stop CH02（固定编号）")
-    lines.append("管理页：%s/rooms" % BASE_URL)
+    lines.append("管理页：%s/rooms" % lan.base_url())
     return "\n".join(lines)
 
 
@@ -480,14 +480,14 @@ def _status_one(r: dict, sess: dict | None, cap: dict | None) -> str:
         lines.append("  录音：%s" % ("已保存" if r.get("has_recording") else "没有录到"))
         sid = str(r.get("session_id") or "")
         if sid:
-            lines.append("  回放：%s/reader?session=%s" % (BASE_URL, sid))
+            lines.append("  回放：%s/reader?session=%s" % (lan.base_url(), sid))
         return "\n".join(lines)
 
     sid = str(r.get("session_id") or "")
     if sid and not sess:
         lines.append("  会话丢失：服务可能刚重启，或采集页已关闭。")
         if r.get("has_recording"):
-            lines.append("  历史录音还在：%s/reader?session=%s" % (BASE_URL, sid))
+            lines.append("  历史录音还在：%s/reader?session=%s" % (lan.base_url(), sid))
         return "\n".join(lines)
 
     if not sess:
@@ -726,7 +726,7 @@ def _share_worker(room: dict, sid: str, start: float | None, duration: float,
             err_text = err_text or getattr(_BOT, "last_error", "")
             link = (("%s/live?session=%s&t=%d" if room.get("state") in _ACTIVE
                      else "%s/reader?session=%s&t=%d")
-                    % (BASE_URL, sid, int(clip.start)))
+                    % (lan.base_url(), sid, int(clip.start)))
             fail("飞书接口没发出去（%s）。\n%s 的片段已经生成，也可以先在本机回听：%s"
                  % (_friendly_net_error(err_text), span, link))
             return
@@ -1035,7 +1035,7 @@ def cmd_replay(rest: str, open_id: str = "", chat_id: str = "",
     if minutes:
         return "🎧 %s 整场回听（妙记）：\n%s" % (_ch(room), minutes)
     link = ("%s/live?session=%s" if room.get("state") in _ACTIVE
-            else "%s/reader?session=%s") % (BASE_URL, sid)
+            else "%s/reader?session=%s") % (lan.base_url(), sid)
     return ("🎧 %s 回听：\n%s\n"
             "这是局域网地址，转发给别人打不开；外发请先在妙记上传 /分享包，"
             "再发 /妙记 %s <链接>。" % (_ch(room), link, _ch(room)))
@@ -1178,6 +1178,10 @@ def _topics_text(data: dict) -> str:
     if data.get("minutes_url"):
         lines.append("")
         lines.append("整场回听 %s" % data["minutes_url"])
+    if lan.local_only():
+        lines.append("")
+        lines.append("（回听链接是电脑本机地址，手机上打不开；"
+                     "在电脑上打开设置 →「手机访问」开启后重新生成。）")
     return "\n".join(lines)
 
 
@@ -1222,6 +1226,10 @@ def _summary_text(data: dict) -> str:
     if data.get("minutes_url"):
         lines.append("")
         lines.append("整场回听 %s" % data["minutes_url"])
+    if lan.local_only():
+        lines.append("")
+        lines.append("（回听链接是电脑本机地址，手机上打不开；"
+                     "在电脑上打开设置 →「手机访问」开启后重新生成。）")
     return "\n".join(lines)
 
 
@@ -1323,7 +1331,7 @@ def _console_card(data: dict) -> dict:
                                          "room": r.get("room_id"), "seconds": 90}))
             acts.append({"tag": "button", "type": "default",
                          "text": {"tag": "plain_text", "content": "回听"},
-                         "url": "%s/reader?session=%s" % (BASE_URL, r["session_id"])})
+                         "url": "%s/reader?session=%s" % (lan.base_url(), r["session_id"])})
         elements.append({"tag": "action", "actions": acts})
     if not elements:
         elements.append({"tag": "div", "text": {"tag": "lark_md",
@@ -2270,7 +2278,7 @@ def _watch_rooms() -> None:
                 continue
             if st == "live" and prev != "live":
                 _notify("✅ 开好了：%s\n%s\n看实时：%s/live"
-                        % (r.get("name") or "这个房间", r.get("url") or "", BASE_URL))
+                        % (r.get("name") or "这个房间", r.get("url") or "", lan.base_url()))
             elif st == "failed" and prev != "failed":
                 _notify("⚠️ 没打开：%s\n原因：%s\n可能已下播，或链接不是直播间。"
                         "把链接再发一次我就重试。"
@@ -2282,7 +2290,7 @@ def _watch_rooms() -> None:
                 _notify("⚠️ 已自动收尾：%s\n原因：%s\n录音和逐字稿已经保存，可以回放：%s"
                         % (r.get("name") or "这个房间",
                            r.get("auto_stop_reason") or r.get("error") or "没收到音频块",
-                           BASE_URL))
+                           lan.base_url()))
         primed = True
         time.sleep(4)
 

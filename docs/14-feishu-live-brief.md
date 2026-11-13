@@ -505,7 +505,7 @@ def window_of(conn, sid: str, minutes: int) -> tuple[float, float]
 | 覆盖率/剔除统计 | `analysis.build_scope` |
 | 压缩 token | `analysis._pack_rows` |
 | 证据对象 | `analysis._evidence` |
-| 时区/回听链接 | `timefmt`、`BASE_URL` |
+| 时区/回听链接 | `timefmt`、`app.lan.base_url()` |
 | 预算 | `scheduler.budget_status` |
 | 观测 | `metrics`、`logs.log_event` |
 
@@ -639,7 +639,7 @@ def window_of(conn, sid: str, minutes: int) -> tuple[float, float]
 - `as_of` 用带时区的 ISO 时间；卡片同时给北京时间和录音偏移。
 - `last_utterance_ago_s`：优先用新增的 `live.status()["last_final_ago_s"]`（墙钟，见 14 节）；会话丢失时用 `t_to - max(t_end)`。现状 `status()` 只有 `idle_s`（最后一句人声），没有“最后一句定稿”字段，P1 需要补。
 - 如果 `last_utterance_ago_s > 120`，文案明确写“最近 N 分钟没有新内容”，不要假装在聊。
-- 回听链接：`BASE_URL/reader?session=<sid>&t=<int(t_start)>`。
+- 回听链接：`app.lan.base_url() + /reader?session=<sid>&t=<int(t_start)>`。
 - 跨零点/跨年：日期一起带；录音偏移超过 1 小时用 `H:MM:SS`。
 
 ## 12. 边界矩阵

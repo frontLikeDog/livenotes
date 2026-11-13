@@ -294,6 +294,18 @@
       </select>
     </div>
     <div class="set-sec">
+      <div class="sec-t">手机访问 <span style="color:var(--faint);font-weight:400;font-size:11px">（同一 Wi-Fi）</span></div>
+      <div class="set-hint" style="margin:6px 0">飞书卡片里的「收听页 / 回听」要在手机上打开，需要电脑和手机连同一个 Wi-Fi，并在这里开启局域网访问。</div>
+      <label class="chk"><input type="checkbox" id="prefLan"> 允许同一局域网内的设备访问</label>
+      <div class="set-hint" id="prefLanHint">未开启：链接只在这台电脑上能打开。</div>
+      <div class="set-hint" id="prefLanWarn" style="display:none;color:#d48806">服务没有登录密码：开启后同网段设备都能打开，只建议在自家网络使用。</div>
+      <div class="rowset" id="prefLanRow" style="display:none">
+        <span style="flex:1;min-width:0;word-break:break-all" id="prefLanUrl"></span>
+        <button class="ghost" id="prefLanCopy" style="flex:none">复制</button>
+      </div>
+      <div class="set-hint" id="prefLanCmd" style="display:none"></div>
+    </div>
+    <div class="set-sec">
       <div class="sec-t">连接档案
         <a id="setNew" style="cursor:pointer;margin-left:10px" title="新建一份空配置">＋ 新建</a>
       </div>

@@ -20,10 +20,11 @@ import time
 from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from urllib.parse import urlsplit
 
-from . import analysis, llm, metrics, scheduler, settings, store, timefmt
+from . import analysis, lan, llm, metrics, scheduler, settings, store, timefmt
 from .config import (
-    BASE_URL, BRIEF_DAILY_CAP, BRIEF_LLM, BRIEF_MAX_MINUTES,
+    BRIEF_DAILY_CAP, BRIEF_LLM, BRIEF_MAX_MINUTES,
     BRIEF_SESSION_TOKEN_CAP, BRIEF_SUMMARY_COOLDOWN_S, BRIEF_SUMMARY_MAX_ROWS,
     BRIEF_SUMMARY_TTL_S, BRIEF_TOPICS_COOLDOWN_S, BRIEF_TOPICS_TTL_S,
     LIVE_STALL_WARN_S,
@@ -298,12 +299,12 @@ def _caveats(scope, extra: list[str] | None = None) -> list[str]:
 def _evidence(row: dict, sid: str) -> dict:
     t = float(row.get("t_start") or 0.0)
     t_end = max(t, float(row.get("t_end") or 0.0))
-    url = "%s/reader?session=%s&t=%d" % (BASE_URL, sid, int(t))
+    url = "%s/reader?session=%s&t=%d" % (lan.base_url(), sid, int(t))
     try:
         # 采集中 /reader 还没有 audio_path，点进去只能看字；改去 /live 听 spool。
         from . import live as _live
         if _live.is_active(sid):
-            url = "%s/live?session=%s&t=%d" % (BASE_URL, sid, int(t))
+            url = "%s/live?session=%s&t=%d" % (lan.base_url(), sid, int(t))
     except Exception:
         pass
     return {
@@ -509,6 +510,33 @@ def _key(sid: str, kind: str, minutes: int, t_from: float, t_to: float) -> tuple
     return (sid, kind, window, int(minutes), PROMPT_VERSION, model)
 
 
+def _refresh_links(payload: dict) -> dict:
+    """缓存结果里的绝对链接改成当前前缀。
+
+    缓存是按内容指纹存的，但链接前缀会变（开启/关闭「手机访问」、重启后
+    换了局域网 IP）。原样返回旧 payload，手机上点到的就是一条过期的
+    `127.0.0.1` 死链；这里只换 scheme/host，不动路径和参数。
+    """
+    base = lan.base_url()
+
+    def walk(x) -> None:
+        if isinstance(x, dict):
+            u = x.get("reader_url")
+            if isinstance(u, str) and u:
+                parts = urlsplit(u)
+                if parts.path:
+                    x["reader_url"] = base + parts.path + (
+                        "?" + parts.query if parts.query else "")
+            for v in x.values():
+                walk(v)
+        elif isinstance(x, list):
+            for v in x:
+                walk(v)
+
+    walk(payload)
+    return payload
+
+
 def _cache_get(key: tuple) -> dict | None:
     with _LOCK:
         hit = _CACHE.get(key)
@@ -522,7 +550,7 @@ def _cache_get(key: tuple) -> dict | None:
             _CACHE.pop(key, None)
             return None
         _CACHE.move_to_end(key)
-    out = copy.deepcopy(payload)
+    out = _refresh_links(copy.deepcopy(payload))
     out["cached"] = True
     out["cached_at"] = cached_at
     return out
@@ -559,7 +587,7 @@ def _stale_summary(conn: sqlite3.Connection, sid: str, t_to: float) -> dict | No
     count = int((n or [0])[0] or 0)
     if count <= 0:
         return None
-    out = copy.deepcopy(payload)
+    out = _refresh_links(copy.deepcopy(payload))
     out["cached"] = True
     out["cached_at"] = cached_at
     out["new_utterances"] = count

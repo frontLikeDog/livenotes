@@ -1,7 +1,7 @@
 // 由 app/web/index.html 按功能域切出，逻辑未改。
 // 改动请只动本文件；跨模块依赖看下面的 import。
 
-import { $, $$, api, esc, post, toast } from './core.js';
+import { $, $$, api, copyText, esc, post, toast } from './core.js';
 import { askText } from './dialog.js';
 import { mark } from './search.js';
 var LLM_PRESETS=[
@@ -16,6 +16,86 @@ var LLM_PRESETS=[
 var LLMCFG={provider:''};
 var SET={active:'',profiles:[],editing:'',isNew:false,lastState:null};
 var MODELS=[];
+var LAN={};
+
+// ---------------- 手机访问（局域网） ----------------
+function renderLan(st){
+  st=st||{};LAN=st;
+  var box=$('#prefLan'),hint=$('#prefLanHint'),warn=$('#prefLanWarn'),
+      row=$('#prefLanRow'),url=$('#prefLanUrl'),cmd=$('#prefLanCmd');
+  if(!box||!hint)return;
+  box.disabled=st.managed===false;
+  box.checked=!!st.enabled;
+  if(warn)warn.style.display=st.enabled?'':'none';
+  if(st.managed===false){
+    if(row)row.style.display=st.url?'':'none';
+    if(url)url.textContent=(st.url||'')+'/';
+    hint.style.color='';
+    hint.textContent='当前以 --lan 启动，局域网已经开放；要关闭请重启服务并去掉 --lan。';
+  }else if(st.enabled&&st.url){
+    if(row)row.style.display='';
+    if(url)url.textContent=st.url+'/';
+    hint.textContent='已开启：飞书里的新链接会用这个地址。手机先连同一个 Wi-Fi，再打开试试。';
+    hint.style.color='';
+  }else{
+    if(row)row.style.display='none';
+    hint.style.color=(st.error||st.persisted)?'#d48806':'';
+    hint.textContent=st.error?('开启失败：'+st.error)
+      :st.persisted?'上次开过，但这次没起来：看下面的提示，或重启服务后再试。'
+      :'未开启：链接只在这台电脑上能打开。';
+  }
+  if(cmd){
+    var miss=st.enabled&&st.firewall==='missing';
+    cmd.style.display=miss?'':'none';
+    if(miss)cmd.textContent=(st.firewall_error?st.firewall_error+'。':'')
+      +'手机如果还是打不开，可能是防火墙没放行这个端口：把开关关掉再打开，'+
+      '允许「用户账户控制」，或管理员运行：'+st.manual_command;
+  }
+}
+function bindLan(){
+  var box=$('#prefLan');
+  if(box&&!box._lanBound){
+    box._lanBound=true;
+    box.onchange=function(){ setLan(this.checked) };
+  }
+  var copy=$('#prefLanCopy');
+  if(copy&&!copy._lanBound){
+    copy._lanBound=true;
+    copy.onclick=function(){
+      if(!LAN.url)return;
+      copyText(LAN.url+'/').then(function(ok){ toast(ok?'地址已复制，发给手机试试':'复制失败，手动选中地址复制') });
+    };
+  }
+}
+async function loadLan(){
+  try{ renderLan(await api('/api/lan')) }
+  catch(e){
+    var hint=$('#prefLanHint');
+    if(hint)hint.textContent='读取局域网状态失败：'+e.message;
+  }
+}
+async function setLan(on){
+  var box=$('#prefLan'),hint=$('#prefLanHint');
+  if(!box)return;
+  if(on&&!confirm('开启后，同一 Wi-Fi 下的设备都能打开这个服务，而且没有密码。\n\n只建议在自家网络使用。继续？')){
+    box.checked=false;
+    return;
+  }
+  box.disabled=true;
+  if(hint){
+    hint.style.color='';
+    hint.textContent=on?'正在开启…如果弹出「用户账户控制」，请点「是」允许添加防火墙规则。':'正在关闭…';
+  }
+  try{
+    renderLan(await post('/api/lan',{enabled:on}));
+    toast(on?'手机访问已开启':'手机访问已关闭');
+  }catch(e){
+    box.disabled=false;
+    box.checked=!on;
+    if(hint){ hint.style.color='#d48806'; hint.textContent='操作失败：'+e.message }
+    try{ renderLan(await api('/api/lan')) }catch(_){}
+  }
+}
 
 // 「桌面版专属」选项由宿主清单声明能力（profile.capabilities），页面里不再
 // 出现壳注入的全局标记；网页版没有 native-windows 就不显示这一行。
@@ -173,6 +253,8 @@ async function openSettings(){
   $('#setMask').classList.add('show');
   $('#setDrawer').classList.add('show');
   $('#setModels').innerHTML='';MODELS=[];
+  bindLan();
+  loadLan();
   try{ applyState(await api('/api/settings')) }
   catch(e){ setStatus('读取设置失败：'+e.message,'err') }
 }
@@ -275,4 +357,4 @@ async function fetchModels(){
 }
 /* ---------------- 全局搜索（跨场次） ---------------- */
 
-export { LLMCFG, LLM_PRESETS, MODELS, SET, applyState, closeSettings, fetchModels, fillForm, formBody, newProfile, openSettings, probeModels, profileAction, renderModelChips, renderProfiles, renderProviders, saveSettings, setStatus, testLLM };
+export { LLMCFG, LLM_PRESETS, MODELS, SET, applyState, closeSettings, fetchModels, fillForm, formBody, loadLan, newProfile, openSettings, probeModels, profileAction, renderModelChips, renderProfiles, renderProviders, saveSettings, setLan, setStatus, testLLM };

@@ -94,8 +94,8 @@ if _overlay is not None:
     os.environ["LIVENOTES_WEB_OVERLAY"] = str(_overlay_path)
 
 from app import live, logs, metrics, scheduler, seed_demo, store, runtime  # noqa: E402
-from app import audio  # noqa: E402
-from app.config import (BASE_URL, HOST, METRICS_SAMPLE_S, PORT, RESUME_ROOMS,  # noqa: E402
+from app import audio, lan  # noqa: E402
+from app.config import (HOST, METRICS_SAMPLE_S, PORT, RESUME_ROOMS,  # noqa: E402
                         ensure_dirs)
 from app.server import make_server, reconcile_rooms  # noqa: E402
 
@@ -104,7 +104,7 @@ BANNER = """
   LiveNotes / 直播语记  ·  多人语音直播结构化记录原型
 --------------------------------------------------------------------------
   本机打开 : http://127.0.0.1:{port}/      ← 点「实时监听」必须用这个地址
-  手机访问 : {base}/    ← 只能看回放（手机浏览器做不了标签页采集）
+  链接前缀 : {base}/    ← 手机能否打开取决于是否开启局域网访问
   数据文件 : {db}
   实时监听 : 页面右上角「● 实时监听」→ 选择正在播放的直播标签页（勾选分享音频）
 
@@ -304,8 +304,8 @@ def _start_helpers(port: int) -> dict:
         "LIVENOTES_HOST": "127.0.0.1",
         # 机器人/采集代理都直连本机引擎，不靠 LAN 地址猜端口。
         "LIVENOTES_API": f"http://127.0.0.1:{port}",
-        # 飞书消息里的回听/分享链接也指向本机；桌面版本来就只监听 127.0.0.1。
-        "LIVENOTES_BASE_URL": f"http://127.0.0.1:{port}",
+        # 不写 LIVENOTES_BASE_URL：给手机看的链接由 app.lan.base_url() 按
+        # 当前是否开启局域网访问动态生成，固定成回环会让飞书链接永远打不开。
         "LIVENOTES_DATA_DIR": str(DATA_DIR),
         "PYTHONUNBUFFERED": "1",
         "PYTHONIOENCODING": "utf-8",
@@ -420,10 +420,17 @@ def main() -> int:
     audio.start_backfill()
 
     srv = make_server(HOST, PORT)
-    print(BANNER.format(host=HOST, port=PORT, db=store.DB_PATH, base=BASE_URL), flush=True)
-    if HOST in ("127.0.0.1", "localhost"):
-        print("  [提示] 当前只监听本机，手机打不开推送里的链接。要手机能访问："
-              "python run.py --lan", flush=True)
+    # 上次在设置里开过「手机访问」就接着开第二个监听；--lan 则把真实地址
+    # 写给独立的 helper 进程（飞书机器人），让它们生成链接时别退回回环。
+    if HOST in ("127.0.0.1", "localhost", "::1"):
+        lan.autostart()
+    else:
+        lan.publish_external()
+    print(BANNER.format(host=HOST, port=PORT, db=store.DB_PATH,
+                        base=lan.base_url()), flush=True)
+    if HOST in ("127.0.0.1", "localhost") and lan.local_only():
+        print("  [提示] 当前只监听本机，手机打不开推送里的链接。"
+              "打开设置 →「手机访问」开启，或启动时加 --lan", flush=True)
     if os.environ.get("LIVENOTES_NO_BROWSER", "").lower() not in ("1", "true", "yes"):
         try:
             # 必须用 127.0.0.1：浏览器只把 localhost/127.0.0.1 当安全上下文，

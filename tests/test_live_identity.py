@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 from app import live
+from app.config import BASE_URL
 
 
 YEAR = datetime.now(timezone(timedelta(hours=8))).year
@@ -258,7 +259,7 @@ def test_digest_text_lists_unpushed_with_both_timezones():
     assert "共 5 条入榜，实时推过 2 条" in text
     assert "1. 11-05 17:05:38 北京 / 09:05:38 UTC · 主播 · 老周 · 录音 1:00" in text
     assert "2. 11-05 17:06:38 北京 / 09:06:38 UTC · 嘉宾1 · 阿哲（疑似） · 录音 2:00" in text
-    assert "回听：%s/reader?session=S_DIGEST&t=60" % live.BASE_URL in text
+    assert "回听：%s/reader?session=S_DIGEST&t=60" % BASE_URL in text
 
 
 def test_digest_text_keeps_utc_date_when_day_differs():

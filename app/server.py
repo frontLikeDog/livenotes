@@ -20,9 +20,9 @@ from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from . import (analysis, analysis_job, audio, classify, coach, diagnostics, export,
-               feedback, glossary, highlight, live, livebrief, llm, logs, metrics,
-               polish, profile, reader, rooms, runtime, scheduler, seed_demo, settings,
-               share, store, tasks, timefmt, titles, voiceprint, webroot)
+               feedback, glossary, highlight, lan, live, livebrief, llm, logs,
+               metrics, polish, profile, reader, rooms, runtime, scheduler, seed_demo,
+               settings, share, store, tasks, timefmt, titles, voiceprint, webroot)
 from .config import AUDIO_DIR, HOST, LIVE_STALL_STOP_S, LIVE_STALL_WARN_S, PORT, WEB_DIR
 
 TRASH_DIR = AUDIO_DIR.parent / "trash"
@@ -617,7 +617,9 @@ def _job_failure(e: Exception, sid: str = "") -> tuple[dict, int]:
 # 只放行本机 origin，不让普通网页跨域读本地服务。
 #   - tauri.localhost：正式壳页（Windows 上是 http，其他平台可能是 https）
 #   - 127.0.0.1 / localhost 任意端口：`tauri dev` 的 devUrl（壳页从 dev server 加载）
-# 引擎只监听回环地址，所以「本机 origin」就是全部可信来源；远程站点仍然读不到响应。
+# 引擎默认只监听回环地址，所以「本机 origin」就是全部可信来源；远程站点
+# 仍然读不到响应。开启「手机访问」后，手机页面和接口是同一个局域网 origin，
+# 走同源请求，不依赖这里的 CORS 放行。
 CORS_ORIGINS = {"http://tauri.localhost", "https://tauri.localhost"}
 CORS_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", "tauri.localhost"}
 
@@ -1141,6 +1143,8 @@ p{font-size:14px;line-height:1.75;margin:8px 0}
                 return self._json(polish.cached(conn, sid) or {"ok": False, "reason": "还没润色过"})
             except ValueError as e:
                 return self._json({"ok": False, "reason": str(e)}, 404)
+        if p == "/api/lan":
+            return self._json(lan.status())
         if p == "/api/settings":
             return self._json(settings.public())
         if p == "/api/llm/models":
@@ -1919,6 +1923,13 @@ p{font-size:14px;line-height:1.75;margin:8px 0}
                     out["cached"] = True
                 out["job"] = job.public()
             return self._json(out)
+        if p == "/api/lan":
+            try:
+                return self._json(lan.set_enabled(bool((b or {}).get("enabled"))))
+            except RuntimeError as e:
+                out = lan.status()
+                out["error"] = str(e)
+                return self._json(out, 400)
         if p == "/api/settings/prefs":
             return self._json(settings.set_prefs(b if isinstance(b, dict) else {}))
         if p == "/api/settings":
