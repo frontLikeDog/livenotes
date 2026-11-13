@@ -67,4 +67,29 @@ if errorlevel 1 (
   echo [env] Current CARGO_HOME=%CARGO_HOME%
   exit /b 1
 )
+
+rem ---------- Python ----------
+rem Dev shell runs `python run.py` from PATH, so whichever terminal started us
+rem decides the interpreter. Pin the repo venv when it exists: otherwise a plain
+rem system Python gets picked and the engine dies on `import numpy` before its
+rem health check, which the shell can only report as "exit code: 1".
+if defined LIVENOTES_PYTHON goto :python_check
+if not exist "%~dp0..\.venv\Scripts\python.exe" goto :python_missing
+set "LIVENOTES_PYTHON=%~dp0..\.venv\Scripts\python.exe"
+echo [env] python: %LIVENOTES_PYTHON%
+
+:python_check
+"%LIVENOTES_PYTHON%" -c "import numpy" >nul 2>nul
+if errorlevel 1 (
+  echo [env] WARNING: %LIVENOTES_PYTHON% cannot import numpy, the engine will fail to start.
+  echo [env] Fix: "%LIVENOTES_PYTHON%" -m pip install -r requirements-dev.txt -r requirements-live.txt
+)
+goto :done
+
+:python_missing
+echo [env] WARNING: no .venv\Scripts\python.exe under the repo root.
+echo [env] The shell will run whatever "python" PATH resolves to. Create the venv
+echo [env] or set LIVENOTES_PYTHON to an interpreter that has the requirements.
+
+:done
 exit /b 0
