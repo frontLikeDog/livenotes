@@ -34,6 +34,8 @@ def main() -> int:
     ap.add_argument("--until", type=_date_arg, help="结束日期 YYYY-MM-DD")
     ap.add_argument("--out", default="", help="输出目录（默认 data/reports）")
     ap.add_argument("--no-write", action="store_true", help="只打印，不落地文件")
+    ap.add_argument("--no-llm", action="store_true",
+                    help="不调模型，用规则版主线（离线/省 token）")
     ap.add_argument("--doc", action="store_true", help="顺手建成飞书云文档")
     args = ap.parse_args()
 
@@ -56,7 +58,8 @@ def main() -> int:
         store.init_db(conn)
         info = report.build(conn, kind=args.kind, since=since, until=until,
                             out_dir=(Path(args.out) if args.out else None),
-                            write=not args.no_write)
+                            write=not args.no_write,
+                            use_llm=not args.no_llm)
     except ValueError as e:
         print("生成失败：%s" % e, file=sys.stderr)
         return 2

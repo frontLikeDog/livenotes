@@ -126,6 +126,17 @@ LIVE_STALL_STOP_S = float(os.environ.get("LIVENOTES_STALL_SECONDS", "120"))
 # 和「主播只是安静」区分开——安静时块照推，所以「没块」一定是采集链路出了问题。
 # 设 0 关闭。
 LIVE_STALL_WARN_S = float(os.environ.get("LIVENOTES_STALL_WARN_SECONDS", "30"))
+# 静音看门狗：块照推、链路健康，但内容连续这么久都是「数字全零」（RMS 恰好为 0）
+# 就收尾。抖音下播后 CDN 常常还挂着连接、继续按实时速率吐全静音帧，ffmpeg 也照常
+# 出 PCM——断流看门狗只数块，永远发现不了。主播真安静的时候会有底噪（RMS 不是 0），
+# 所以连续全零几乎只可能是这一场已经没东西可录了。默认 15 分钟，设 0 关闭。
+LIVE_ZERO_STOP_S = float(os.environ.get("LIVENOTES_ZERO_STOP_SECONDS", "900"))
+# 静音预警：到这个时长只把房间提示改成「音频已连续静音 N 分钟」，不结束场次。
+# 用户能提前看见「这一路其实没声音了」，还来得及自己决定要不要停。设 0 关闭。
+LIVE_ZERO_WARN_S = float(os.environ.get("LIVENOTES_ZERO_WARN_SECONDS", "120"))
+# 判定「数字静音」的 RMS 上限。实测安静房间的底噪在 0.0002~0.003，
+# 真正断掉的流是精确的 0（AAC 静音帧解出来就是全零），留一点余量即可。
+LIVE_ZERO_RMS = float(os.environ.get("LIVENOTES_ZERO_RMS", "0.0001"))
 
 # ASR 工作池：采集/VAD 与识别解耦，多个会话共享一个识别器（sherpa-onnx 的
 # Recognizer 在 CPU provider 下线程安全，Stream 不共享）。0 = 按 CPU 核数自动。

@@ -462,41 +462,22 @@ def _json(obj: Any) -> str:
 
 # ---------------------------------------------------------------- 对外
 
-def score_session(conn: sqlite3.Connection, sid: str, limit: int = LIMIT) -> list[dict]:
-    """算一场的高光事件，不写库。给评测脚本和页面预览用。"""
-    rows = store.list_utterances_for_highlight(conn, sid)
-    if not rows:
-        return []
-    sess = store.get_session(conn, sid) or {}
-    feats = score_rows(rows, sess.get("audio_path"))
-    for f in feats:
-        f["session_id"] = sid
-    return to_events(feats, limit=limit)
+def score_session(conn: sqlite3.Connection, sid: str,
+                  limit: int | None = None) -> list[dict]:
+    """算一场的高光场面，不写库、不调模型。给评测脚本和页面预览用。"""
+    from . import scenes
+    return scenes.session_events(conn, sid, limit=limit or scenes.LIMIT)
 
 
-def build(conn: sqlite3.Connection, sid: str, limit: int = LIMIT) -> dict:
-    """算完并落库；同时把逐句特征回写到 utterances.features_json（W2 流式要用）。"""
-    rows = store.list_utterances_for_highlight(conn, sid)
-    if not rows:
-        return {"session_id": sid, "n": 0, "highlights": [], "audio": False}
-    sess = store.get_session(conn, sid) or {}
-    feats = score_rows(rows, sess.get("audio_path"))
-    for f in feats:
-        f["session_id"] = sid
-    pairs = []
-    for f in feats:
-        if f.get("id") is None:
-            continue
-        pairs.append((_json({"rate": None if f.get("rate") is None else round(f["rate"], 2),
-                             "rms": f["rms"],
-                             "chars": f["chars"], "num": f["num"], "concl": f["concl"],
-                             "qa": f["qa"], "interrupt": f["interrupt"],
-                             "burst": f["burst"], "kind": f["kind"]}), f["id"]))
-    store.save_utterance_features(conn, pairs)
-    events = to_events(feats, limit=limit)
-    n = store.replace_highlights(conn, sid, events)
-    return {"session_id": sid, "n": n, "highlights": events,
-            "audio": any(f["rms"] is not None for f in feats)}
+def build(conn: sqlite3.Connection, sid: str, limit: int | None = None,
+          use_llm: bool = True) -> dict:
+    """算完并落库；同时把逐句特征回写到 utterances.features_json（W2 流式要用）。
+
+    场面切分和可读层在 app/scenes.py：先切 30~90 秒的段，再让模型写钩子 /
+    挑原声 / 打标签；模型不可用时退回规则版，接口不报错。
+    """
+    from . import scenes
+    return scenes.build(conn, sid, limit=limit or scenes.LIMIT, use_llm=use_llm)
 
 # ---------------------------------------------------------------- 实时
 

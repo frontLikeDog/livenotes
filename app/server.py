@@ -23,7 +23,8 @@ from . import (analysis, analysis_job, audio, classify, coach, diagnostics, expo
                feedback, glossary, highlight, lan, live, livebrief, llm, logs,
                metrics, polish, profile, reader, rooms, runtime, scheduler, seed_demo,
                settings, share, store, tasks, timefmt, titles, voiceprint, webroot)
-from .config import AUDIO_DIR, HOST, LIVE_STALL_STOP_S, LIVE_STALL_WARN_S, PORT, WEB_DIR
+from .config import (AUDIO_DIR, HOST, LIVE_STALL_STOP_S, LIVE_STALL_WARN_S,
+                     LIVE_ZERO_STOP_S, LIVE_ZERO_WARN_S, PORT, WEB_DIR)
 
 TRASH_DIR = AUDIO_DIR.parent / "trash"
 from .models import SOURCE_MODE_META, parse_ts
@@ -299,6 +300,14 @@ def _stall_reason(item: dict) -> str:
             "浏览器崩溃 / 页面被关 / 页面被冻结）" % int(item.get("idle_s") or 0))
 
 
+def _silent_reason(item: dict) -> str:
+    """静音收尾的理由。刻意不写「音频块」三个字：直取代理靠这个子串判断
+    「断流收尾之后流还在，要不要重新拉起」，静音收尾不该被当成断流重拉。"""
+    minutes = max(1, int(round(float(item.get("zero_s") or 0) / 60)))
+    return ("连续 %d 分钟音频全零（流还在推，但里面没有任何声音：直播间大概率"
+            "已经下播，CDN 只是还挂着连接）" % minutes)
+
+
 def _warn_capture_lost(sid: str, item: dict) -> None:
     """块停超过预警阈值：先告警，不结束场次。"""
     idle = float(item.get("idle_s") or 0)
@@ -333,6 +342,43 @@ def _watch_stalled_warn(warn_s: float | None = None) -> list[str]:
     return warned
 
 
+def _watch_silent_warn(warn_s: float | None = None) -> list[str]:
+    """全零音频超过预警时长：房间提示改成「已静音 N 分钟」，不结束场次。
+
+    和断流预警的区别：断流是「块停了」，这里是「块照来、内容全零」。提前提示
+    的价值在于用户还来得及自己停，而不是等 15 分钟后看门狗替他做决定。
+    """
+    limit = LIVE_ZERO_WARN_S if warn_s is None else warn_s
+    if limit <= 0:
+        return []
+    out: list[str] = []
+    for item in live.silent_sessions(limit):
+        sid = item["id"]
+        room = rooms.get_by_session(sid)
+        if not room or room.get("state") not in ("live", "starting"):
+            continue
+        mins = max(1, int(round(float(item.get("zero_s") or 0) / 60)))
+        note = "音频已连续静音 %d 分钟（流还在推，但没有任何声音）" % mins
+        if str(room.get("stage_note") or "") == note:
+            continue          # 同一分钟不重复写库
+        rooms.update(room["id"], stage_note=note)
+        out.append(sid)
+    return out
+
+
+def _clear_silent_notes() -> None:
+    """声音回来后把「已连续静音」的提示换掉，别让一句话挂一整场。"""
+    for room in rooms.list_rooms():
+        if not str(room.get("stage_note") or "").startswith("音频已连续静音"):
+            continue
+        sid = str(room.get("session_id") or "")
+        if not sid:
+            continue
+        zero = live.zero_age(sid)
+        if zero is not None and zero < 5:
+            rooms.update(room["id"], stage_note="音频已恢复")
+
+
 def _clear_recovered_notes() -> None:
     """块恢复后把房间上的「采集断流」提示换掉，别让一句话挂一整场。"""
     for room in rooms.list_rooms():
@@ -365,7 +411,7 @@ def _auto_close_session(sid: str, reason: str) -> None:
     if room.get("state") in ("live", "starting"):
         rooms.update(rid, state="stopped", stage=6, failed_stage=None,
                      auto_stopped=True, auto_stop_reason=reason,
-                     stage_note="断流自动收尾：" + reason, error=reason,
+                     stage_note="自动收尾：" + reason, error=reason,
                      saved=False, has_recording=False)
     try:
         live.stop(sid)             # finalize=True：WAV、总结、本场回顾都走正常收尾
@@ -407,6 +453,28 @@ def _watch_stalled(idle_s: float | None = None) -> list[str]:
     return started
 
 
+def _watch_silent(zero_s: float | None = None) -> list[str]:
+    """检查一轮，给「块照来、内容全零」的场次各起一个收尾线程。
+
+    与 _watch_stalled 是两条独立的路：那条管链路断没断，这条管流里还有没有
+    声音。抖音下播后 CDN 继续吐静音帧时，只有这条会触发。
+    """
+    limit = LIVE_ZERO_STOP_S if zero_s is None else zero_s
+    if limit <= 0:
+        return []
+    started: list[str] = []
+    for item in live.silent_sessions(limit):
+        sid = item["id"]
+        with _STALL_LOCK:
+            if sid in _STALL_CLOSING:
+                continue
+            _STALL_CLOSING.add(sid)
+        started.append(sid)
+        threading.Thread(target=_auto_close_session, args=(sid, _silent_reason(item)),
+                         name="watchdog-silent-" + sid, daemon=True).start()
+    return started
+
+
 def start_watchdog(interval_s: float = 10.0) -> threading.Thread | None:
     """起一个常驻线程定期查断流；重复调用不会起第二个。"""
     global _WATCHDOG
@@ -420,9 +488,13 @@ def start_watchdog(interval_s: float = 10.0) -> threading.Thread | None:
                 try:
                     # 先预警，再收尾：30 秒发飞书，120 秒才落 stopped。
                     # 顺序反过来的话，已经到收尾阈值的场次会先被停掉，预警就发不出去了。
+                    # 静音和断流各有自己的预警/收尾：一个看块，一个看内容。
                     _watch_stalled_warn()
+                    _watch_silent_warn()
                     _watch_stalled()
+                    _watch_silent()
                     _clear_recovered_notes()
+                    _clear_silent_notes()
                 except Exception:
                     traceback.print_exc()
 
@@ -1770,8 +1842,10 @@ p{font-size:14px;line-height:1.75;margin:8px 0}
                 return self._json({"error": "session_id required"}, 400)
             if not store.get_session(conn, sid):
                 return self._json({"error": "场次不存在"}, 404)
-            limit = min(50, int(b.get("limit") or highlight.LIMIT))
-            out = highlight.build(conn, sid, limit=limit)
+            # 默认切 3 段；llm=false 可强制走规则版（离线/预算用完时仍能用）。
+            limit = min(20, int(b.get("limit") or 3))
+            use_llm = b.get("llm") is not False
+            out = highlight.build(conn, sid, limit=limit, use_llm=use_llm)
             return self._json(out)
         if p == "/api/highlights/feedback":
             sid = str(b.get("session_id") or "")

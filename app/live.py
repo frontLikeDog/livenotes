@@ -58,6 +58,7 @@ from .config import (
     LIVE_STALL_IDLE_S,
     LIVE_STALL_MIN_S,
     LIVE_STALL_S,
+    LIVE_ZERO_RMS,
     PUSH_CARD,
     PUSH_DIGEST,
     PUSH_SESSION_CAP,
@@ -411,6 +412,10 @@ class LiveSession:
         self.total_samples = 0
         self.recognized_s = 0.0
         self.speech_s = 0.0            # VAD 判定为人声的时长（用于区分"没识别"和"本来就没人说话"）
+        # 连续「数字静音」的时长：波形恰好全零，不是"主播安静"。抖音下播后
+        # CDN 还挂着连接照推静音帧时，块一直在到、断流看门狗永远不响，只有它
+        # 能看出这一场其实已经没声音了。有声（RMS ≥ LIVE_ZERO_RMS）就清零。
+        self.zero_s = 0.0
         self.speech = False
         self.partial: dict | None = None   # 当前这句的临时字幕（未定稿）
         self.paused = False                # 客户端暂停推流时置位，计时随 total_samples 一起冻结
@@ -732,9 +737,11 @@ class LiveSession:
                 produced = self._drain(vad)
                 now_s = self.total_samples / SAMPLE_RATE
                 try:
-                    self.level = float(np.sqrt((x * x).mean()))
+                    rms = float(np.sqrt((x * x).mean()))
                 except Exception:
-                    pass
+                    rms = self.level
+                self.level = rms
+                self._note_level(rms, len(item) // 2)
                 if vad.is_speech_detected():
                     self.speech_s += (len(item) // 2) / SAMPLE_RATE
                     self.last_speech_s = now_s
@@ -817,6 +824,16 @@ class LiveSession:
         with self.lock:
             self.partial = None
             self._partial_epoch += 1      # 让还在解码的旧半句结果作废
+
+    def _note_level(self, level: float, samples: int) -> None:
+        """累计「连续数字静音」的时长。有声就清零。
+
+        用采样数换算秒（而不是墙钟）：暂停/积压时时间轴不动，静音时长也不该涨。
+        """
+        if level < LIVE_ZERO_RMS:
+            self.zero_s += samples / SAMPLE_RATE
+        else:
+            self.zero_s = 0.0
 
     def _drain(self, vad) -> int:
         """把 VAD 切出来的定稿全部入队；解码与落库由 ASR worker 完成。"""
@@ -1274,6 +1291,9 @@ class LiveSession:
                 "n_utterances": self.n_utts,
                 "level": round(self.level, 5),
                 "idle_s": round(max(0.0, self.total_samples / SAMPLE_RATE - self.last_speech_s), 1),
+                # 连续全零音频的时长：流没断但内容已经空了。和 idle_s（没人声）是
+                # 两件事——主播安静坐着有底噪，idle_s 会涨而 zero_s 一直是 0。
+                "zero_s": round(min(self.zero_s, self.total_samples / SAMPLE_RATE), 1),
                 "last_chunk_at": self.last_chunk_at or None,
                 "last_chunk_ago_s": round(max(0.0, time.monotonic() - self._last_chunk_mono), 1)
                 if self._last_chunk_mono else None,
@@ -1315,6 +1335,7 @@ class LiveSession:
             "recognized_s": round(self.recognized_s, 1),
             "speech_s": round(min(self.speech_s, elapsed), 1),
             "last_speech_age_s": round(max(0.0, elapsed - self.last_speech_s), 1),
+            "zero_s": round(min(self.zero_s, elapsed), 1),
             "last_final_age_s": round(max(0.0, now - self.last_final_at), 1),
             "stall": bool(self._stall_state),
             "error": self.error or "", "pushed": self.pushed,
@@ -1421,11 +1442,15 @@ def _push_text(ev: dict, session: dict) -> str:
     peak = float(ev.get("peak_t") or 0)
     icon = {"both": "🔥", "live": "🎙", "info": "💡"}.get(ev.get("kind") or "", "✨")
     sid = str(session.get("id") or ev.get("session_id") or "")
+    tag = str(ev.get("tag") or "")
+    ctx = str(ev.get("hook") or ev.get("why") or "综合得分靠前")
+    if tag:
+        ctx = "[%s] %s" % (tag, ctx)
+    quote = str(ev.get("quote") or ev.get("text") or "")
     return "\n".join([
         "%s %s · %s" % (icon, _push_label(ev), timefmt.clock_line(session, peak)),
-        "📻 %s · 录音 %s · %s" % (_room_title(session), timefmt.offset(peak),
-                                  ev.get("why") or "综合得分靠前"),
-        "「%s」" % (ev.get("text") or "")[:120],
+        "📻 %s · 录音 %s · %s" % (_room_title(session), timefmt.offset(peak), ctx),
+        "「%s」" % quote[:120],
         "回听：%s" % _reader_link(sid, peak),
     ])
 
@@ -1457,10 +1482,12 @@ def _push_card(ev: dict, session: dict) -> dict:
                  "text": {"tag": "lark_md", "content": "**UTC**\n%s" % utc}},
             ]},
             {"tag": "div", "text": {"tag": "lark_md",
-             "content": "**录音 %s** · %s" % (timefmt.offset(peak),
-                                              ev.get("why") or "综合得分靠前")}},
+             "content": "**录音 %s** · %s" % (
+                 timefmt.offset(peak),
+                 ("[%s] " % ev["tag"] if ev.get("tag") else "")
+                 + (ev.get("hook") or ev.get("why") or "综合得分靠前"))}},
             {"tag": "div", "text": {"tag": "lark_md",
-             "content": "「%s」" % (ev.get("text") or "")[:120]}},
+             "content": "「%s」" % (ev.get("quote") or ev.get("text") or "")[:120]}},
             {"tag": "action", "actions": [
                 {"tag": "button", "type": "primary",
                  "text": {"tag": "plain_text", "content": "回听这一段"},
@@ -1496,14 +1523,20 @@ def _digest_text(session: dict, events: list[dict], n_all: int,
              % (timefmt.clock_line(session, 0), n_all, n_pushed)]
     for i, ev in enumerate(events, 1):
         peak = float(ev.get("peak_t") or 0)
-        cn, utc = timefmt.clock_pair(session, peak)
+        start = float(ev.get("t_start") or peak)
+        cn, utc = timefmt.clock_pair(session, start)
         when = ("%s 北京 / %s UTC" % (cn, utc[6:])
                 if cn[:5] == utc[:5] else "%s 北京 / %s UTC" % (cn, utc))
         lines.append("%d. %s · %s · 录音 %s" % (
             i, when, _digest_speaker(ev, identities),
-            timefmt.offset(peak)))
-        lines.append("「%s」" % (ev.get("text") or "")[:60])
-        lines.append("回听：%s" % _reader_link(sid, peak))
+            timefmt.offset(start)))
+        tag = str(ev.get("tag") or "")
+        hook = str(ev.get("hook") or "").strip()
+        if hook:
+            lines.append("%s%s" % ("[%s] " % tag if tag else "", hook))
+        quote = str(ev.get("quote") or ev.get("text") or "")
+        lines.append("「%s」" % quote[:80])
+        lines.append("回听：%s" % _reader_link(sid, start))
     return "\n".join(lines)
 
 
@@ -1519,16 +1552,21 @@ def _digest_card(session: dict, events: list[dict], n_all: int,
     actions: list[dict] = []
     for i, ev in enumerate(events, 1):
         peak = float(ev.get("peak_t") or 0)
-        cn, utc = timefmt.clock_pair(session, peak)
+        start = float(ev.get("t_start") or peak)
+        cn, utc = timefmt.clock_pair(session, start)
         when = ("%s 北京 / %s UTC" % (cn, utc[6:])
                 if cn[:5] == utc[:5] else "%s 北京 / %s UTC" % (cn, utc))
+        tag = str(ev.get("tag") or "")
+        hook = str(ev.get("hook") or "").strip()
+        quote = str(ev.get("quote") or ev.get("text") or "")
+        head = ("[%s] " % tag if tag else "") + (hook or "本场高光")
         elements.append({"tag": "div", "text": {"tag": "lark_md", "content":
-            "**%d · %s**\n%s · 录音 %s\n「%s」" % (
+            "**%d · %s**\n%s · 录音 %s\n%s\n「%s」" % (
                 i, when, _digest_speaker(ev, identities),
-                timefmt.offset(peak), (ev.get("text") or "")[:60])}})
+                timefmt.offset(start), head, quote[:80])}})
         actions.append({"tag": "button", "type": "default",
                         "text": {"tag": "plain_text", "content": "回听第 %d 段" % i},
-                        "url": _reader_link(sid, peak)})
+                        "url": _reader_link(sid, start)})
     if actions:
         elements.append({"tag": "action", "actions": actions})
     return {
@@ -1708,13 +1746,15 @@ def push_digest(session: dict, limit: int = 3,
                     "WHERE s.session_id=?", (sid,)):
                 identities[r["speaker_id"]] = (r["name"] or "", r["person_state"] or "")
         pushed = store.pushed_peaks(conn, sid)
-        rest = [e for e in events if round(float(e["peak_t"]), 2) not in pushed]
+        # 场面窗口可能把已推的那一句包在里面；只要窗口里推过，就不再补这一段。
+        rest = [e for e in events
+                if not any(float(e["t_start"]) <= p <= float(e["t_end"])
+                           for p in pushed)]
         if not rest:
             store.log_push_skip(conn, sid, "digest", "all_pushed")
             _push_skip(sid, "digest", "all_pushed")
             return False
-        n_pushed = sum(1 for e in events
-                       if round(float(e["peak_t"]), 2) in pushed)
+        n_pushed = len(events) - len(rest)
         text = _digest_text(session, rest[:limit], len(events), n_pushed, identities)
         card = _digest_card(session, rest[:limit], len(events), n_pushed, identities)
         ok = _send(conn, sid, "digest", text, card=card)
@@ -1788,6 +1828,14 @@ def chunk_age(sid: str) -> float | None:
     if not s or not s._last_chunk_mono:
         return None
     return max(0.0, time.monotonic() - s._last_chunk_mono)
+
+
+def zero_age(sid: str) -> float | None:
+    """连续全零音频多少秒；会话不在返回 None。看门狗清提示用。"""
+    s = _SESSIONS.get(sid)
+    if not s:
+        return None
+    return max(0.0, float(getattr(s, "zero_s", 0.0) or 0.0))
 
 
 AUDIO_BYTES_PER_SEC = SAMPLE_RATE * 2      # 16k / 单声道 / s16le
@@ -1872,6 +1920,28 @@ def stalled_sessions(idle_s: float, now: float | None = None) -> list[dict]:
             out.append({"id": s.id, "title": s.title, "idle_s": round(idle, 1),
                         "never": never})
     out.sort(key=lambda x: -x["idle_s"])
+    return out
+
+
+def silent_sessions(zero_s: float) -> list[dict]:
+    """还在 running、但音频已经连续 zero_s 秒是数字全零的场次。
+
+    和 stalled_sessions 是互补的两件事：那边看「块有没有到」（链路断没断），
+    这边看「块里有没有声音」。抖音下播后 CDN 常常还挂着连接、继续按实时速率
+    吐全静音帧——块一块不少，断流看门狗永远不响，可这一场已经没有内容了。
+    暂停的场次不算：暂停期间本来就没有音频，不能算成"流变空了"。
+    """
+    with _LOCK:
+        items = list(_SESSIONS.values())
+    out: list[dict] = []
+    for s in items:
+        if not s.running or getattr(s, "paused", False):
+            continue
+        zero = float(getattr(s, "zero_s", 0.0) or 0.0)
+        if zero <= 0 or zero < zero_s:
+            continue
+        out.append({"id": s.id, "title": s.title, "zero_s": round(zero, 1)})
+    out.sort(key=lambda x: -x["zero_s"])
     return out
 
 

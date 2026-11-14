@@ -2,6 +2,7 @@
 """周报/复盘：范围解析、多场汇总、兜底素材、飞书云文档降级。"""
 from __future__ import annotations
 
+import json
 from datetime import date
 from types import SimpleNamespace
 
@@ -87,7 +88,7 @@ def test_build_weekly_aggregates_and_avoids_lan_links(db, tmp_path, monkeypatch)
     monkeypatch.setattr(report, "REPORTS_DIR", tmp_path / "reports")
     _seed(db)
     info = report.build(db, "weekly", date(2026, 11, 3), date(2026, 11, 9),
-                        write=False)
+                        write=False, use_llm=False)
     md = info["markdown"]
     assert info["stats"]["sessions"] == 2
     assert "直播周报" in md and "一号场" in md and "二号场" in md
@@ -95,11 +96,13 @@ def test_build_weekly_aggregates_and_avoids_lan_links(db, tmp_path, monkeypatch)
     assert "https://x.feishu.cn/minutes/abc" in md
     assert "reader?session=" not in md and "192.168." not in md
     assert "不该出现" not in md
-    assert "本场没有已生成总结" in md          # S2 没有总结，走原句兜底
+    assert "本周主线" in md and "本周金句" in md
+    assert "未生成总结：《二号场》" in md
     assert "投放（2 场）" in md                  # 跨场重复话题
     assert "范围外" not in md and "已删除" not in md and "没有字幕" not in md
     assert "未回填妙记" in md
     assert info["path"] is None
+    assert info["narrative"]["engine"] == "rules"
 
 
 def test_build_retro_keeps_human_sections(db, tmp_path, monkeypatch):
@@ -107,21 +110,79 @@ def test_build_retro_keeps_human_sections(db, tmp_path, monkeypatch):
     add_session(db, "S1", title="一号场", started_at="2026-11-05T20:00:00")
     add_rows(db, "S1", [utt_row(0, "一句可以进复盘的内容")])
     info = report.build(db, "retro", date(2026, 11, 3), date(2026, 11, 9),
-                        write=False)
+                        write=False, use_llm=False)
     md = info["markdown"]
     assert "直播复盘" in md
     assert "四、结论与行动" in md and "（待填）" in md
     assert "跨场观察" in md
+    assert info["narrative"] is None
 
 
 def test_build_writes_markdown(db, tmp_path, monkeypatch):
     monkeypatch.setattr(report, "REPORTS_DIR", tmp_path / "reports")
     add_session(db, "S1", title="一号场", started_at="2026-11-05T20:00:00")
     add_rows(db, "S1", [utt_row(0, "一句可以写进文件的内容")])
-    info = report.build(db, "weekly", date(2026, 11, 3), date(2026, 11, 9))
+    info = report.build(db, "weekly", date(2026, 11, 3), date(2026, 11, 9),
+                        use_llm=False)
     assert info["path"].is_file()
     assert info["path"].read_text(encoding="utf-8") == info["markdown"]
     assert info["path"].name.startswith("weekly_2026-11-03_2026-11-09")
+
+
+def _configured(monkeypatch):
+    monkeypatch.setattr(report.settings, "resolve", lambda *a, **k: {
+        "configured": True, "model": "test-model", "base": "http://x",
+        "key": "k", "temperature": 0.4, "timeout": 30, "total_timeout": 60,
+        "source": "file"})
+
+
+def test_weekly_llm_storylines_are_rendered(db, tmp_path, monkeypatch):
+    monkeypatch.setattr(report, "REPORTS_DIR", tmp_path / "reports")
+    _seed(db)
+    _configured(monkeypatch)
+    payload = {
+        "lead": "这周两场都在聊投放。",
+        "storylines": [{
+            "title": "投放收紧后，大家先保账号",
+            "body": "一号场在说平台查得严，二号场在拆投放模型；两场都指向先把账号和预算稳住。",
+            "evidence_ids": [0, 1],
+        }],
+        "quotes": [{"evidence_id": 0}],
+        "questions": ["预算要不要先砍一半？"],
+    }
+    monkeypatch.setattr(report.llm, "chat", lambda *a, **k: json.dumps(
+        payload, ensure_ascii=False))
+    info = report.build(db, "weekly", date(2026, 11, 3), date(2026, 11, 9),
+                        write=False, use_llm=True)
+    md = info["markdown"]
+    assert info["narrative"]["engine"] == "llm"
+    assert "这周两场都在聊投放。" in md
+    assert "投放收紧后，大家先保账号" in md
+    assert "预算要不要先砍一半？" in md
+    assert "平台最近查得很严" in md
+
+
+def test_weekly_narrative_drops_invented_numbers(db, tmp_path, monkeypatch):
+    monkeypatch.setattr(report, "REPORTS_DIR", tmp_path / "reports")
+    _seed(db)
+    _configured(monkeypatch)
+    payload = {
+        "lead": "这周很棒。",
+        "storylines": [{
+            "title": "投放预算涨到 999 万",
+            "body": "一号场和二号场都在说这件事。",
+            "evidence_ids": [0, 1],
+        }],
+        "quotes": [],
+        "questions": [],
+    }
+    monkeypatch.setattr(report.llm, "chat", lambda *a, **k: json.dumps(
+        payload, ensure_ascii=False))
+    info = report.build(db, "weekly", date(2026, 11, 3), date(2026, 11, 9),
+                        write=False, use_llm=True)
+    assert info["narrative"]["engine"] == "rules"
+    assert "999" not in info["markdown"]
+    assert "本周主线" in info["markdown"]
 
 
 def test_cleanup_removes_old_reports(tmp_path, monkeypatch):

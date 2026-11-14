@@ -189,3 +189,100 @@ def test_feed_resets_warning_before_first_chunk(monkeypatch):
 
     assert s._chunk_stall_warned is False
     assert s.q.qsize() == 1
+
+
+# ---------------------------------------------------------------- 静音看门狗
+class SilentSession(FakeSession):
+    """块一直在到、但内容全零的场次。"""
+
+    def __init__(self, sid: str, zero_s: float = 0.0, paused: bool = False,
+                 running: bool = True) -> None:
+        super().__init__(sid, started=0.0, last_chunk=time.monotonic(),
+                         running=running)
+        self.zero_s = zero_s
+        self.paused = paused
+
+
+def test_zero_audio_accumulates_until_sound_returns():
+    """数字静音按时长累计；只要有一块有声就清零（安静房间的底噪也算有声）。"""
+    s = live.LiveSession("静音")
+    s._note_level(0.0, 16000)
+    s._note_level(0.0, 16000)
+    assert s.zero_s == 2.0
+    s._note_level(0.002, 16000)          # 底噪：不是"没人说话"，是流还活着
+    assert s.zero_s == 0.0
+
+
+def test_silent_sessions_ignore_short_silence_pause_and_stopped():
+    live._SESSIONS.clear()
+    live._SESSIONS["a"] = SilentSession("a", zero_s=900.0)
+    live._SESSIONS["b"] = SilentSession("b", zero_s=30.0)
+    live._SESSIONS["c"] = SilentSession("c", zero_s=900.0, paused=True)
+    live._SESSIONS["d"] = SilentSession("d", zero_s=900.0, running=False)
+    try:
+        out = live.silent_sessions(600.0)
+        assert [x["id"] for x in out] == ["a"]
+        assert out[0]["zero_s"] == 900.0
+    finally:
+        live._SESSIONS.clear()
+
+
+def test_watch_silent_closes_each_session_once(monkeypatch):
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(server, "_auto_close_session",
+                        lambda sid, reason: calls.append((sid, reason)))
+    with server._STALL_LOCK:
+        server._STALL_CLOSING.clear()
+    live._SESSIONS.clear()
+    live._SESSIONS["z"] = SilentSession("z", zero_s=900.0)
+    try:
+        assert server._watch_silent(zero_s=600) == ["z"]
+        assert server._watch_silent(zero_s=600) == []
+        assert [c[0] for c in calls] == ["z"]
+        # 直取代理靠「音频块」这个子串判断"断流收尾后要不要重新拉起"。
+        # 静音收尾不是断流，理由里不能出现它，否则会立刻把场次重新拉起来。
+        assert "音频块" not in calls[0][1]
+        assert "分钟音频全零" in calls[0][1]
+    finally:
+        live._SESSIONS.clear()
+        with server._STALL_LOCK:
+            server._STALL_CLOSING.clear()
+
+
+def test_watch_silent_warn_only_nudges_the_room(db, tmp_path, roomstore):
+    """预警只改房间提示，不结束场次；同一分钟不重复写库。"""
+    room = _room_with_session(db, tmp_path)
+    live._SESSIONS.clear()
+    live._SESSIONS["S1"] = SilentSession("S1", zero_s=200.0)
+    try:
+        assert server._watch_silent_warn(warn_s=120) == ["S1"]
+        r = rooms.get(room["id"])
+        assert r["state"] == "live"
+        assert "音频已连续静音" in r["stage_note"]
+        assert server._watch_silent_warn(warn_s=120) == []
+    finally:
+        live._SESSIONS.clear()
+
+
+def test_clear_silent_note_when_audio_returns(db, tmp_path, roomstore):
+    room = _room_with_session(db, tmp_path)
+    rooms.update(room["id"],
+                 stage_note="音频已连续静音 3 分钟（流还在推，但没有任何声音）")
+    live._SESSIONS.clear()
+    live._SESSIONS["S1"] = SilentSession("S1", zero_s=1.0)
+    try:
+        server._clear_silent_notes()
+        assert rooms.get(room["id"])["stage_note"] == "音频已恢复"
+    finally:
+        live._SESSIONS.clear()
+
+
+def test_watch_silent_can_be_disabled(monkeypatch):
+    monkeypatch.setattr(server, "_auto_close_session",
+                        lambda sid, reason: (_ for _ in ()).throw(AssertionError("不该收")))
+    live._SESSIONS.clear()
+    live._SESSIONS["z"] = SilentSession("z", zero_s=900.0)
+    try:
+        assert server._watch_silent(zero_s=0) == []
+    finally:
+        live._SESSIONS.clear()

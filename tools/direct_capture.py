@@ -60,6 +60,13 @@ DIRECT_RETRY_S = 10.0                 # 解析/启动失败后的退避
 DIRECT_MAX_RESTARTS = 3
 FIRST_CHUNK_WAIT_S = 8.0
 RESOLVE_TIMEOUT_S = 20.0
+# 静音探针：块照推、但内容连续全零时，定期抓一次直播间页面确认还在不在播。
+# 抖音下播后连接常常还挂着，ffmpeg 持续按实时速率吐静音帧——这时"有没有块"
+# 和 ffmpeg 退没退出都说明不了问题，只有页面状态能给答案。
+DIRECT_ZERO_RMS = 0.0001              # 与 app.config.LIVE_ZERO_RMS 同口径
+DIRECT_ZERO_PROBE_AFTER_S = 120.0     # 连续全零这么久才值得去问一次页面
+DIRECT_ZERO_PROBE_EVERY_S = 60.0      # 两次探测的最小间隔，别把抖音页面当轮询接口
+PROBE_TIMEOUT_S = 8.0
 
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
@@ -284,6 +291,39 @@ def _resolve_live_page(web_rid: str, timeout: float) -> tuple[str, str]:
         if mark in text:
             raise ResolveError("直播间当前没有开播（页面显示「%s」）" % mark)
     raise ResolveError("直播间页面里没有找到直播流地址（可能需要登录/验证）")
+
+
+def probe_room_live(room: dict,
+                    timeout: float = PROBE_TIMEOUT_S) -> tuple[bool, str]:
+    """抓一次直播间页面，判断这一场还在不在播。返回 (online, why)。
+
+    只认页面里明确的「直播已结束」这类文案（_OFFLINE_MARKS）。抓不到、反爬、
+    页面改版、需要登录，一律按「还在播」处理——宁可多录一会儿，也不能凭一次
+    HTTP 失败把用户还在等的场次收掉。online=False 时 why 是给人看的原因。
+    """
+    url = str((room or {}).get("resolved_url")
+              or (room or {}).get("url") or "").strip()
+    m = _LIVE_RE.match(url)
+    web_rid = m.group(1) if m else ""
+    if not web_rid:
+        try:
+            live_url = canonical_douyin_url(url, timeout)
+        except Exception:
+            live_url = ""
+        web_rid = live_url.rsplit("/", 1)[-1] if live_url else ""
+    if not web_rid:
+        return True, ""            # 不是抖音 / 没有可探的房号：不下结论
+    try:
+        _resolve_live_page(web_rid, timeout)
+    except ResolveError as e:
+        msg = str(e)
+        for mark in _OFFLINE_MARKS:
+            if mark in msg:
+                return False, "直播间已下播（页面显示「%s」）" % mark
+        return True, ""            # 页面异常/需要登录：不据此收尾
+    except Exception:
+        return True, ""
+    return True, ""                # 还能解析出流地址：页面认为在播，继续录
 
 
 # ---------------------------------------------------------------- 房间名
@@ -673,6 +713,8 @@ class DirectAgent(Agent):
             "warned": False,
             "retry_at": 0.0, "renew_at": 0.0, "send_errors": 0,
             "adopted": adopted, "fallback": False, "rms": 0.0,
+            # 全零音频的起点（墙钟，0 = 当前有声）；probed_at 是上次页面探针时间。
+            "zero_since": 0.0, "probed_at": 0.0, "probing": False, "ended": False,
             "gen": 0, "recovering": False, "renewing": False,
             "eof": False, "stderr_tail": "",
         }
@@ -839,6 +881,12 @@ class DirectAgent(Agent):
         info["rms"] = pcm_rms(chunk)
         info["chunks"] = int(info.get("chunks") or 0) + 1
         info["last_chunk_at"] = time.time()
+        # 全零不是"主播安静"：安静的直播间有底噪，只有断掉的流才是精确的 0。
+        if info["rms"] < DIRECT_ZERO_RMS:
+            if not info.get("zero_since"):
+                info["zero_since"] = info["last_chunk_at"]
+        else:
+            info["zero_since"] = 0.0
         if not info["first_chunk"].is_set():
             info["first_audio_ms"] = int(
                 (time.time() - float(info.get("started") or time.time())) * 1000)
@@ -959,6 +1007,43 @@ class DirectAgent(Agent):
                         engine="direct", session_id=info.get("sid"))
         elif idle < 5:
             info["warned"] = False
+        # 块照来但内容全零：链路和 ffmpeg 都"正常"，去页面问一次到底还在不在播。
+        zero_since = float(info.get("zero_since") or 0.0)
+        if (zero_since and not info.get("ended")
+                and now - zero_since >= DIRECT_ZERO_PROBE_AFTER_S
+                and now - float(info.get("probed_at") or 0.0) >= DIRECT_ZERO_PROBE_EVERY_S):
+            info["probed_at"] = now
+            threading.Thread(target=self._probe_zero_room, args=(room, info),
+                             name="direct-probe-" + rid, daemon=True).start()
+
+    def _probe_zero_room(self, room: dict, info: dict) -> None:
+        """静音持续太久：抓页面确认是不是已经下播。
+
+        探不到（网络/反爬/页面改版）一律当还在播，绝不因为一次 HTTP 失败就把
+        场次收掉；真下播了才落 stopped 并停会话，WAV/总结/回顾走正常收尾。
+        """
+        rid = room["id"]
+        if info.get("probing") or info.get("ended"):
+            return
+        info["probing"] = True
+        try:
+            online, why = probe_room_live(room)
+            if online or not why:
+                return
+            info["ended"] = True
+            print("[%s] 静音判下播，自动收尾：%s" % (rid, why), flush=True)
+            self._capture_event(rid, "ended", reason=why[:200])
+            self.report(rid, "stopped", stage=6, note="自动收尾：" + why,
+                        auto_stopped=True, auto_stop_reason=why,
+                        engine="direct", session_id=info.get("sid"))
+            sid = str(info.get("sid") or "")
+            if sid:
+                threading.Thread(target=self._stop_session, args=(sid,),
+                                 name="end-" + rid, daemon=True).start()
+        except Exception:
+            traceback.print_exc()
+        finally:
+            info["probing"] = False
 
     def _recover(self, room: dict, info: dict, reason: str,
                  gone: bool = False) -> None:
@@ -987,6 +1072,11 @@ class DirectAgent(Agent):
             info["first_chunk"].clear()
             info["chunks"] = 0
             info["last_ok_at"] = time.time()
+            # 重建出来的是一路新流：静音计时和探针节流都从头开始，
+            # 但 ended 不清——已经判过下播就不再探第二次。
+            info["zero_since"] = 0.0
+            info["probed_at"] = 0.0
+            info["probing"] = False
             _kill_proc(old)
 
             try:

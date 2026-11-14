@@ -43,8 +43,14 @@ h1{font-size:22px;line-height:1.45;margin:0 0 8px}
 .b-live{color:#a4430c;background:#fdf0e3}
 .b-info{color:#1d3ea8;background:#eaf0ff}
 .b-manual{color:#8a5a00;background:#fff4d6}
+.b-tag{color:#8a5a00;background:#fff4d6}
 .p0{color:#b3261e;background:#fdeceb;border:1px solid #f6cfcb}
 .who{font-size:12.5px;font-weight:700}
+.hook{font-size:16px;font-weight:700;line-height:1.55;margin:0 0 7px;color:#1d2330}
+.scene{margin:7px 0 0;font-size:12px;color:var(--muted)}
+.scene summary{cursor:pointer;color:var(--accent);font-size:11.5px}
+.scene .ln{margin:6px 0 0;line-height:1.65}
+.scene .ln b{color:var(--ink);font-weight:600}
 .t{font-size:11.5px;color:var(--faint);font-variant-numeric:tabular-nums;cursor:pointer;
   padding:2px 6px;border-radius:6px;border:1px solid transparent}
 .t:hover{border-color:#d8dde6;color:var(--accent)}
@@ -159,9 +165,9 @@ function api(path, opt){
 function render(){
   var list = $('#list');
   var rows = S.data.slice();
-  if (S.order === 'time') rows.sort(function(a,b){ return a.peak_t - b.peak_t; });
+  if (S.order === 'time') rows.sort(function(a,b){ return a.t_start - b.t_start; });
   if (!rows.length){
-    list.innerHTML = '<div class="empty">这场还没分析过<br>点下面的按钮，算一遍「最值得听的是哪几段」' +
+    list.innerHTML = '<div class="empty">这场还没切过场面<br>点下面的按钮，挑出「最值得回听的 3 段」' +
       '<br><button id="goBuild">开始分析</button></div>';
     var gb = $('#goBuild'); if (gb) gb.onclick = build;
     return;
@@ -169,11 +175,22 @@ function render(){
   var kindName = { both:'双高', live:'有戏', info:'干货', manual:'手动' };
   list.innerHTML = rows.map(function(h, i){
     var kind = h.kind || 'info';
+    var tag = h.tag || '';
+    var hook = h.hook || '';
+    var quote = h.quote || h.text || '';
+    var scene = h.scene || [];
+    var sceneHtml = '';
+    if (scene.length > 1){
+      sceneHtml = '<details class="scene"><summary>展开这段 ' + (h.n_utts || scene.length) + ' 句</summary>' +
+        scene.map(function(x){
+          return '<div class="ln"><b>' + esc(x.speaker || '') + '</b> · ' + ts(x.t) + '<br>' + esc(x.text || '') + '</div>';
+        }).join('') + '</details>';
+    }
     return '<div class="card ' + kind + (S.cur===i?' on':'') + '" data-i="' + i + '">' +
       '<div class="hd">' +
         '<span class="rank">' + (i+1) + '</span>' +
-        '<span class="badge b-' + kind + '">' + (kindName[kind]||kind) + '</span>' +
-
+        (tag ? '<span class="badge b-tag">' + esc(tag) + '</span>'
+             : '<span class="badge b-' + kind + '">' + (kindName[kind]||kind) + '</span>') +
         '<span class="who">' + esc(h.speaker_label || '—') + '</span>' +
         '<span class="t" data-t="' + h.peak_t + '" title="' + esc(wallTitle(h.peak_t)) + '">' + ts(h.peak_t) + '</span>' +
         '<span class="score">' + (h.n_utts > 1 ? h.n_utts + ' 句 · ' : '') +
@@ -181,11 +198,13 @@ function render(){
           ' · 情绪 ' + Number(h.arousal_z).toFixed(1) +
           ' · 总分 <b>' + Number(h.score).toFixed(1) + '</b></span>' +
       '</div>' +
-      '<div class="why">' + esc(h.why || '综合得分靠前') + '</div>' +
-      '<p class="txt">' + esc(h.text) + '</p>' +
+      (hook ? '<div class="hook">' + esc(hook) + '</div>' : '') +
+      '<p class="txt">「' + esc(quote) + '」</p>' +
+      '<div class="why">' + esc(h.why || '') + '</div>' +
+      sceneHtml +
       '<div class="acts">' +
         '<button data-play="' + i + '">▶ 试听这一段</button>' +
-        '<a href="/reader?session=' + encodeURIComponent(S.sid) + '&t=' + h.peak_t + '">去原文定位</a>' +
+        '<a href="/reader?session=' + encodeURIComponent(S.sid) + '&t=' + (h.t_start || h.peak_t) + '">去原文定位</a>' +
         '<span class="fb">' +
           '<button data-fb="1" data-id="' + h.id + '" class="' + (h.feedback > 0 ? 'on' : '') + '">👍 有用</button>' +
           '<button data-fb="-1" data-id="' + h.id + '" class="dn ' + (h.feedback < 0 ? 'on' : '') + '">👎 没用</button>' +
@@ -225,9 +244,9 @@ function load(){
     var note = $('#note');
     if (S.data.length){
       note.style.display = '';
-      note.innerHTML = '<b>这两列分数都是相对本场基线</b>的 z 值，不是绝对好坏：<br>' +
-        '「信息」看金额/数字、结论句、答疑、长段陈述；「情绪」看语速陡增、抢麦、短句连发。<br>' +
-        '一个安静的访谈和一个喊麦房，音量基线差 20dB，所以只有相对本场才有意义。';
+      note.innerHTML = '<b>每条是一个 30~90 秒的场面</b>：先看钩子，再听原声。<br>' +
+        '标签（金句 / 冲突 / 干货 / 反转 / 问答 / 故事）由编辑给出；' +
+        '「信息」「情绪」是相对本场基线的 z 值，只用来排序，不是绝对好坏。';
     } else {
       note.style.display = 'none';
     }

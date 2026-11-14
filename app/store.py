@@ -173,6 +173,12 @@ CREATE TABLE IF NOT EXISTS highlights (
     feedback_at  TEXT,
     -- 人工标记的那一句；算法高光为 0。重算高光时靠它把人工标记原样保留。
     utterance_id INTEGER DEFAULT 0,
+    -- 场面化之后的可读层：钩子 / 标签 / 最值得听的原声 / 整段台词。
+    -- text 仍保留峰值句，老卡片和反馈归因不用改。
+    hook         TEXT DEFAULT '',
+    tag          TEXT DEFAULT '',
+    quote        TEXT DEFAULT '',
+    scene_json   TEXT DEFAULT '[]',
     created_at   TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_h_session ON highlights(session_id, score DESC);
@@ -388,6 +394,13 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if hcols and "utterance_id" not in hcols:
         conn.execute(
             "ALTER TABLE highlights ADD COLUMN utterance_id INTEGER DEFAULT 0")
+    # 场面化：老库补四列。hook/tag/quote 是"可读层"，scene_json 是整段台词，
+    # 老的高光行留空即可，前端自动退回 text。
+    for _col, _ddl in (("hook", "TEXT DEFAULT ''"), ("tag", "TEXT DEFAULT ''"),
+                       ("quote", "TEXT DEFAULT ''"),
+                       ("scene_json", "TEXT DEFAULT '[]'")):
+        if hcols and _col not in hcols:
+            conn.execute("ALTER TABLE highlights ADD COLUMN %s %s" % (_col, _ddl))
     # 上一次进程被杀 / 崩溃时留下的"还在跑"的任务：启动时一律收尾成 interrupted。
     # 后台线程已经不在了，留着 running 会让前端永远转圈，也让新任务以为"有一场在跑"。
     conn.execute(
@@ -1412,12 +1425,14 @@ def list_summaries(conn: sqlite3.Connection, sid: str, limit: int = 20) -> list[
 
 _H_COLS = ("session_id", "t_start", "t_end", "peak_t", "kind", "level", "score",
            "info_z", "arousal_z", "why", "speaker_label", "text", "n_utts",
-           "features_json", "feedback", "feedback_at", "utterance_id")
+           "features_json", "feedback", "feedback_at", "utterance_id",
+           "hook", "tag", "quote", "scene_json")
 _H_DEFAULTS = {
     "session_id": "", "t_start": 0.0, "t_end": 0.0, "peak_t": 0.0,
     "kind": "info", "level": "P1", "score": 0.0, "info_z": 0.0, "arousal_z": 0.0,
     "why": "", "speaker_label": "", "text": "", "n_utts": 0, "features_json": "{}",
     "feedback": 0, "feedback_at": None, "utterance_id": 0,
+    "hook": "", "tag": "", "quote": "", "scene_json": "[]",
 }
 
 
@@ -1510,7 +1525,7 @@ def toggle_manual_highlight(conn: sqlite3.Connection, sid: str,
         "INSERT INTO highlights (" + ",".join(_H_COLS) + ",created_at) VALUES ("
         + ",".join("?" for _ in _H_COLS) + ",?)",
         (sid, t0, t1, t0, "manual", "P0", 1000.0, 0.0, 0.0, "手动标记",
-         who, body, 1, "{}", 0, None, uid, now()))
+         who, body, 1, "{}", 0, None, uid, body[:60], "手动", body, "[]", now()))
     conn.commit()
     return {"ok": True, "highlighted": True, "id": int(cur.lastrowid),
             "kind": "manual"}
@@ -1537,6 +1552,10 @@ def list_highlights(conn: sqlite3.Connection, sid: str, limit: int = 50) -> list
             r["features"] = json.loads(r.pop("features_json") or "{}")
         except ValueError:
             r["features"] = {}
+        try:
+            r["scene"] = json.loads(r.pop("scene_json") or "[]")
+        except ValueError:
+            r["scene"] = []
     return rows
 
 

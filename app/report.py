@@ -22,7 +22,7 @@ from collections import OrderedDict
 from datetime import date, timedelta
 from pathlib import Path
 
-from . import store, timefmt
+from . import highlight, llm, settings, store, timefmt
 from .config import REPORTS_DIR
 from .models import category_label
 
@@ -33,10 +33,15 @@ MAX_QUOTE = 120
 MAX_SESSIONS = 30
 DETAIL_MIN_S = 180       # 短于 3 分钟且没生成过总结的场次只列标题，不展开
 REPORT_RETENTION_DAYS = 30
+MAX_STORYLINES = 5
+MAX_GOLDEN_QUOTES = 3
 
 _WEEKDAYS = "一二三四五六日"
+_CN_NUMS = "一二三四五六七八九十"
 _RANGE_SEP = re.compile(r"\s*(?:~|～|至|到|—|－)\s*")
 _GENERIC_TOPICS = {"", "综合", "综合/未归类", "未归类", "其他", "其它"}
+_NORM_RE = re.compile(r"[\s，。！？；：、,.!?;:\"'“”‘’（）()《》「」【】…—\-]+")
+_NUM_RE = re.compile(r"\d+(?:\.\d+)?")
 
 
 def _day(raw) -> date | None:
@@ -147,6 +152,14 @@ def _clean(text, limit: int = 0) -> str:
     return s[:limit] if limit and len(s) > limit else s
 
 
+def _norm(text) -> str:
+    return _NORM_RE.sub("", str(text or ""))
+
+
+def _nums(text) -> set[str]:
+    return set(_NUM_RE.findall(str(text or "")))
+
+
 def _point_title(text, limit: int = 30) -> str:
     t = _clean(text, limit)
     if t in _GENERIC_TOPICS or t.startswith("话题：综合"):
@@ -245,26 +258,40 @@ def _points_from_summary(payload: dict) -> list[dict]:
     return out
 
 
-def _points_from_highlights(conn, sid: str) -> list[dict]:
+def _scenes_for(conn, sid: str) -> list[dict]:
+    """取一场的高光场面（钩子 / 标签 / 原声）。
+
+    优先用库里已经算过的；没有就现算一遍文本特征（不读音频、不调模型）。
+    周报不该因为用户没点过「重新分析」就掉回逐字稿。
+    """
+    rows = store.list_highlights(conn, sid, limit=MAX_POINTS)
+    if not rows:
+        try:
+            rows = highlight.score_session(conn, sid, limit=MAX_POINTS)
+        except Exception:
+            rows = []
     out: list[dict] = []
     seen: set[str] = set()
-    for h in store.list_highlights(conn, sid, limit=MAX_POINTS * 2):
-        quote = _clean(h.get("text"), MAX_QUOTE)
-        if not quote or quote.lower() in seen:
+    for h in rows:
+        quote = _clean(h.get("quote") or h.get("text"), MAX_QUOTE)
+        if not quote or _norm(quote) in seen:
             continue
-        seen.add(quote.lower())
+        seen.add(_norm(quote))
         out.append({
-            "title": _clean(h.get("why") or "高光片段", 20),
-            "gist": "",
+            "title": _clean(h.get("hook") or h.get("tag") or "高光片段", 30),
+            "gist": _clean(h.get("why"), 120),
             "quote": quote,
             "speaker": _clean(h.get("speaker_label"), 24),
+            "tag": _clean(h.get("tag"), 8),
             "t_from": float(h.get("t_start") or h.get("peak_t") or 0),
             "t_to": float(h.get("t_end") or 0) or None,
-            "quote_t": float(h.get("t_start") or h.get("peak_t") or 0),
+            "quote_t": float(h.get("peak_t") or h.get("t_start") or 0),
         })
-        if len(out) >= MAX_POINTS:
-            break
     return out
+
+
+def _points_from_highlights(scenes: list[dict]) -> list[dict]:
+    return [dict(s) for s in scenes[:MAX_POINTS]]
 
 
 def _points_from_utterances(conn, sid: str) -> list[dict]:
@@ -273,6 +300,7 @@ def _points_from_utterances(conn, sid: str) -> list[dict]:
         "SELECT t_start,t_end,speaker_label,text,topic,category,importance "
         "FROM utterances WHERE session_id=? AND COALESCE(overlap,0)=0 "
         "AND COALESCE(category,'') IN ('substantive','question_consult') "
+        "AND COALESCE(importance,0)>=0.35 "
         "AND LENGTH(COALESCE(text,''))>=8 "
         "ORDER BY importance DESC, LENGTH(text) DESC LIMIT ?",
         (sid, MAX_POINTS * 3))]
@@ -312,9 +340,10 @@ def _material(conn, session: dict) -> dict:
     sid = str(session.get("id") or "")
     payload = _whole_summary(conn, sid)
     points = _points_from_summary(payload)
+    scenes = _scenes_for(conn, sid)
     source = "总结"
     if not points:
-        points = _points_from_highlights(conn, sid)
+        points = _points_from_highlights(scenes)
         source = "高光"
     if not points:
         points = _points_from_utterances(conn, sid)
@@ -334,6 +363,7 @@ def _material(conn, session: dict) -> dict:
         "overview": overview,
         "topics": topics,
         "points": points,
+        "scenes": scenes,
         "source": source if points else "",
         "has_summary": bool(payload),
     }
@@ -461,10 +491,12 @@ def _session_head(m: dict) -> list[str]:
 def _session_body(m: dict) -> list[str]:
     lines = ["", "**概述**：%s" % m["overview"], ""]
     if m["points"]:
-        if m["source"] in ("高光", "原句"):
-            why = ("本场没有已生成总结" if not m["has_summary"]
-                   else "总结里没有可用的要点")
-            lines.append("**关键内容**（%s，以下为自动提取）" % why)
+        why = ("本场没有已生成总结" if not m["has_summary"]
+               else "总结里没有可用的要点")
+        if m["source"] == "高光":
+            lines.append("**关键片段**（%s，按场面挑选）" % why)
+        elif m["source"] == "原句":
+            lines.append("**关键内容**（%s，以下为原句摘录）" % why)
         else:
             lines.append("**关键内容**")
         lines += [_point_line(p) for p in m["points"]]
@@ -473,50 +505,409 @@ def _session_body(m: dict) -> list[str]:
     return lines
 
 
-def render_weekly(materials: list[dict], since: date, until: date,
-                  stats: dict) -> str:
-    title = "%s · %s" % (KINDS["weekly"], range_label(since, until))
+# ---------------------------------------------------------------- 主线叙事
+
+_PROMPT = """你在给一档中文直播的团队编辑一期周报。输入是一周里各场直播的要点、
+高光片段和话题；你要做的是跨场编辑，不是把每场总结再列一遍。
+
+输入：
+- range: 日期范围；stats: 场次、总时长、天数、高频话题；
+- sessions: 每场的标题、日期、时长；
+- evidence: 可引用的原话与要点，每条有 id（整数）、场次、说话人、时间、原文。
+
+输出严格 JSON（不要 markdown 代码块）：
+{"lead":"一到两句话，不超过80字",
+ "storylines":[{"title":"12~18个汉字的判断句","body":"80~140字","evidence_ids":[0,1]}],
+ "quotes":[{"evidence_id":2},{"evidence_id":5}],
+ "questions":["还没答案的问题，不超过30字"]}
+
+硬性规则：
+1. 3~5 条主线。主线必须是跨场出现的判断、变化或矛盾，不是「某场说了什么」；
+   title 不能是「薪资与谈判」「副业与变现」这种话题标签，要写成一句有信息的话；
+2. 每条主线至少引用 2 条 evidence，且尽量来自不同场次；body 只能用 evidence 支持的内容；
+3. 不许编造 evidence 里没有的人物、数字、公司、结论；提到数字时，数字必须能在被引用的原文里找到；
+4. quotes 选 3 条最像「金句」的原话，只给 evidence_id，不要自己改写；
+5. questions 只写材料里确实没有答案的问题，没有就返回空数组；
+6. 不要「本期」「这周直播」「干货满满」这类空话。
+"""
+
+
+def _json_obj(text: str) -> dict:
+    s = re.sub(r"^```(?:json)?|```$", "", (text or "").strip(), flags=re.M).strip()
+    try:
+        data = json.loads(s)
+    except ValueError:
+        m = re.search(r"\{.*\}", s, re.S)
+        if not m:
+            return {}
+        try:
+            data = json.loads(m.group(0))
+        except ValueError:
+            return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _stats_pack(stats: dict) -> dict:
+    return {
+        "sessions": stats["sessions"],
+        "days": stats["days"],
+        "duration": duration_text(stats["duration_s"]),
+        "topics": [[t, len(ms)] for t, ms in (stats.get("topics") or [])],
+    }
+
+
+def _evidence_pool(materials: list[dict]) -> list[dict]:
+    """把所有场次的要点和高光压成一份可引用的证据池。"""
+    pool: list[dict] = []
+    seen: set[str] = set()
+    for m in materials:
+        topics = [t for t in (m.get("topics") or []) if t not in _GENERIC_TOPICS]
+        items = [("要点", p) for p in m.get("points") or []]
+        items += [("高光", s) for s in m.get("scenes") or []]
+        for kind, p in items:
+            quote = _clean(p.get("quote"), MAX_QUOTE)
+            if not quote:
+                continue
+            key = _norm(quote)[:80]
+            if key in seen:
+                continue
+            seen.add(key)
+            pool.append({
+                "id": len(pool),
+                "session_id": m["session_id"],
+                "session": m["title"],
+                "day": m["day"].isoformat() if m.get("day") else "",
+                "kind": kind,
+                "source": m.get("source") or "",
+                "topics": topics,
+                "topic": topics[0] if topics else "",
+                "title": _clean(p.get("title"), 40),
+                "quote": quote,
+                "speaker": _clean(p.get("speaker"), 24),
+                "t_from": float(p.get("t_from") or 0),
+                "t_to": p.get("t_to"),
+                "tag": _clean(p.get("tag"), 8),
+            })
+    return pool
+
+
+_SOURCE_RANK = {"总结": 0, "高光": 1, "原句": 2}
+
+
+def _rank(e: dict) -> tuple:
+    return (_SOURCE_RANK.get(e.get("source") or "", 9),
+            -min(90, len(e.get("quote") or "")), e.get("t_from") or 0)
+
+
+def _pick_evidence(items: list[dict], limit: int = 3) -> list[dict]:
+    """先保证每条主线里尽量有不同的场次，再按来源/原话长度补足。"""
+    out: list[dict] = []
+    seen: set[str] = set()
+    for e in sorted(items, key=_rank):
+        if e["session_id"] in seen:
+            continue
+        out.append(e)
+        seen.add(e["session_id"])
+        if len(out) >= limit:
+            return out
+    for e in sorted(items, key=_rank):
+        if e not in out:
+            out.append(e)
+            if len(out) >= limit:
+                break
+    return out
+
+
+def _golden_ok(e: dict) -> bool:
+    q = str(e.get("quote") or "").rstrip()
+    # ASR 常把问号吃掉，句尾的「吗/呢」也可当问句。
+    return not re.search(r"[？?]$|[吗呢]$", q)
+
+
+def _pick_quotes(pool: list[dict], limit: int) -> list[dict]:
+    pool = [e for e in pool if _golden_ok(e)] or pool
+    out: list[dict] = []
+    seen: set[str] = set()
+    for e in sorted(pool, key=_rank):
+        if e["session_id"] in seen:
+            continue
+        out.append(e)
+        seen.add(e["session_id"])
+        if len(out) >= limit:
+            return out
+    for e in sorted(pool, key=_rank):
+        if e not in out:
+            out.append(e)
+            if len(out) >= limit:
+                break
+    return out[:limit]
+
+
+def _questions_from_pool(pool: list[dict]) -> list[str]:
+    rx = re.compile(r"[？?]|(?:吗|呢|怎么办|要不要|如何|怎么|是不是)")
+    out: list[str] = []
+    for e in pool:
+        if not rx.search(e["quote"]):
+            continue
+        q = _clean(e["quote"], 40)
+        if 6 <= len(q) <= 40 and q not in out:
+            out.append(q)
+        if len(out) >= 3:
+            break
+    return out
+
+
+def _fallback_narrative(materials: list[dict], pool: list[dict], stats: dict,
+                        reason: str = "") -> dict:
+    groups: dict[str, list[dict]] = {}
+    for e in pool:
+        for t in e.get("topics") or []:
+            if t in _GENERIC_TOPICS:
+                continue
+            groups.setdefault(t, []).append(e)
+
+    storylines: list[dict] = []
+    used: set[int] = set()
+    for key, items in sorted(groups.items(), key=lambda kv: -len(kv[1])):
+        items = [e for e in items if e["id"] not in used]
+        sessions = {e["session_id"] for e in items}
+        if len(sessions) < 2:
+            continue
+        ev = _pick_evidence(items, 3)
+        if len(ev) < 2:
+            continue
+        for e in ev:
+            used.add(e["id"])
+        # 兜底也要像编辑写的：用组里最具体的一句做标题，而不是「话题被提到」。
+        claim = _clean(ev[0].get("title"), 22)
+        storylines.append({
+            "title": _clean("%s：%s" % (key, claim), 30) if claim
+            else "这周反复聊到「%s」" % key,
+            "body": ("这周有 %d 场都聊到了「%s」。观点散在各场里，"
+                     "下面挑出几条能点回原话的。" % (len(sessions), key)),
+            "evidence": ev,
+        })
+        if len(storylines) >= MAX_STORYLINES:
+            break
+    if not storylines:
+        storylines = [{
+            "title": "本周最值得回看的三段",
+            "body": "这一周的内容比较分散，没有形成连续主线；先看这三段，能快速抓到这周的状态。",
+            "evidence": _pick_evidence(pool, 3),
+        }]
+    used = {e["id"] for s in storylines for e in s["evidence"]}
+    quote_pool = [e for e in pool if e["id"] not in used] or pool
+    quotes = _pick_quotes(quote_pool, MAX_GOLDEN_QUOTES)
+    quoted = {_norm(e["quote"]) for e in quotes}
+    questions = [q for q in _questions_from_pool(pool)
+                 if _norm(q) not in quoted]
+    return {
+        "lead": "本周 %d 场、%s。下面按 %d 条主线整理，每条都能点回原话。" % (
+            stats["sessions"], duration_text(stats["duration_s"]), len(storylines)),
+        "storylines": storylines,
+        "quotes": quotes,
+        "questions": questions,
+        "engine": "rules", "reason": reason,
+    }
+
+
+def _gate_narrative(data: dict, pool: list[dict], stats: dict,
+                    since: date, until: date) -> dict:
+    """证据闸门：主线必须能落到 2 条原话、跨场、数字不超纲。"""
+    if not isinstance(data, dict):
+        return {}
+    by_id = {e["id"]: e for e in pool}
+    allowed = _nums(range_label(since, until))
+    allowed |= _nums(json.dumps(_stats_pack(stats), ensure_ascii=False))
+    # 小整数多是「三条主线」这类结构性数字，不该按编造处理。
+    allowed |= {str(i) for i in range(0, 11)}
+    for e in pool:
+        allowed |= _nums(e["quote"]) | _nums(e["title"])
+    n_sessions = stats["sessions"]
+
+    storylines: list[dict] = []
+    for s in data.get("storylines") or []:
+        if not isinstance(s, dict):
+            continue
+        title = _clean(s.get("title"), 30)
+        body = _clean(s.get("body"), 220)
+        if not title or not body:
+            continue
+        ids: list[int] = []
+        for x in s.get("evidence_ids") or []:
+            try:
+                i = int(x)
+            except (TypeError, ValueError):
+                continue
+            if i in by_id and i not in ids:
+                ids.append(i)
+        ev = [by_id[i] for i in ids]
+        if len(ev) < 2:
+            continue
+        # 多场周报不能只引用同一场：那就还是"某场说了什么"。
+        if n_sessions >= 2 and len({e["session_id"] for e in ev}) < 2:
+            continue
+        if _nums(title + body) - allowed:
+            continue
+        storylines.append({"title": title, "body": body, "evidence": ev})
+        if len(storylines) >= MAX_STORYLINES:
+            break
+    if not storylines:
+        return {}
+
+    quotes: list[dict] = []
+    for q in data.get("quotes") or []:
+        try:
+            i = int(q.get("evidence_id") if isinstance(q, dict) else q)
+        except (TypeError, ValueError):
+            continue
+        ev = by_id.get(i)
+        if ev and ev not in quotes:
+            quotes.append(ev)
+    # 「金句」读到问句会泄气；有陈述句就先用陈述句。
+    quotes = [e for e in quotes if _golden_ok(e)] or quotes
+
+    questions: list[str] = []
+    for q in data.get("questions") or []:
+        q = _clean(q, 40)
+        if 4 <= len(q) <= 40 and not (_nums(q) - allowed):
+            questions.append(q)
+    # 已经当金句展示过的原话，不要再当「还没答案的问题」重复一遍。
+    quoted = {_norm(e["quote"]) for e in quotes}
+    questions = [q for q in questions if _norm(q) not in quoted]
+
+    return {"lead": _clean(data.get("lead"), 100),
+            "storylines": storylines,
+            "quotes": quotes[:MAX_GOLDEN_QUOTES],
+            "questions": questions[:3], "engine": "llm"}
+
+
+def _llm_narrative(materials: list[dict], pool: list[dict], stats: dict,
+                   since: date, until: date) -> dict:
+    cfg = settings.resolve()
+    if not cfg["configured"] or not pool:
+        return {}
+    packed = {
+        "range": range_label(since, until),
+        "stats": _stats_pack(stats),
+        "sessions": [{"title": m["title"], "day": _day_label(m["day"]),
+                      "duration": duration_text(m["duration_s"]),
+                      "topics": m["topics"][:4]} for m in materials],
+        "evidence": [{"id": e["id"], "session": e["session"], "kind": e["kind"],
+                      "title": e["title"], "speaker": e["speaker"],
+                      "t": timefmt.offset(e["t_from"]), "quote": e["quote"]}
+                     for e in pool],
+    }
+    content = llm.chat([
+        {"role": "system", "content": _PROMPT},
+        {"role": "user", "content": json.dumps(packed, ensure_ascii=False)},
+    ], temperature=0.4, timeout=120, max_tokens=1600, task="report")
+    return _gate_narrative(_json_obj(content), pool, stats, since, until)
+
+
+def _narrative(materials: list[dict], pool: list[dict], stats: dict,
+               since: date, until: date, use_llm: bool = True) -> dict:
+    if not pool:
+        return {"lead": "这一周没有可用的发言内容。", "storylines": [],
+                "quotes": [], "questions": [], "engine": "rules",
+                "reason": "没有可用发言"}
+    if not use_llm:
+        return _fallback_narrative(materials, pool, stats, "未启用模型")
+    cfg = settings.resolve()
+    if not cfg["configured"]:
+        return _fallback_narrative(materials, pool, stats, "未配置大模型")
+    try:
+        got = _llm_narrative(materials, pool, stats, since, until)
+        if got:
+            return got
+        reason = "模型结果未过证据闸门（证据不足或数字对不上）"
+    except Exception as e:                   # 网络/预算/格式失败：回退规则版
+        reason = "模型调用失败：%s" % (str(e)[:80] or type(e).__name__)
+    return _fallback_narrative(materials, pool, stats, reason)
+
+
+def _who_tail(ev: dict, with_session: bool = True) -> str:
+    who = _clean(ev.get("speaker"), 24)
+    sess = _clean(ev.get("session"), 80)
+    t = timefmt.offset(float(ev.get("t_from") or 0))
+    parts = [who]
+    if with_session and sess:
+        parts.append("《%s》" % sess)
+    parts.append(t)
+    parts = [p for p in parts if p]
+    return (" —— " + " · ".join(parts)) if parts else ""
+
+
+def _evidence_line(ev: dict) -> str:
+    return "- 「%s」%s" % (_clean(ev.get("quote"), MAX_QUOTE), _who_tail(ev))
+
+
+def _render_narrative(materials: list[dict], since: date, until: date,
+                      stats: dict, narrative: dict) -> str:
     lines = [
-        "# " + title, "",
+        "# %s · %s" % (KINDS["weekly"], range_label(since, until)), "",
         "> %s，共 %d 场、%s。" % (
             _date_span(since, until), stats["sessions"],
-            duration_text(stats["duration_s"])),
-        "> 内容来自逐字稿与已生成总结；时间码为录音内偏移，回放请用各场妙记链接。",
-        "", "## 概览", "",
-        "- 场次：%d 场，分布在 %d 天" % (stats["sessions"], stats["days"]),
-        "- 总时长：%s（平均每场 %s）" % (
-            duration_text(stats["duration_s"]),
-            duration_text(stats["duration_s"] / max(1, stats["sessions"]))),
-        "- 素材：%d 场有已生成总结，%d 场有妙记回放" % (
-            stats["with_summary"], stats["with_minutes"]),
-        "- 高频话题：%s" % _topic_summary(stats["topics"]),
+            duration_text(stats["duration_s"])), "",
     ]
-    cov = _coverage_lines(stats)
+    lead = _clean(narrative.get("lead"), 160)
+    if not lead:
+        lead = "本周 %d 场、%s。" % (stats["sessions"],
+                                     duration_text(stats["duration_s"]))
+    lines += [lead, ""]
+
+    lines += ["## 本周主线", ""]
+    for i, s in enumerate(narrative.get("storylines") or []):
+        num = _CN_NUMS[i] if i < len(_CN_NUMS) else str(i + 1)
+        lines += ["### %s、%s" % (num, s["title"]), "", s["body"], ""]
+        for ev in s.get("evidence") or []:
+            lines.append(_evidence_line(ev))
+        lines.append("")
+
+    quotes = narrative.get("quotes") or []
+    if quotes:
+        lines += ["## 本周金句", ""]
+        for i, ev in enumerate(quotes, 1):
+            lines.append("%d. 「%s」%s" % (
+                i, _clean(ev.get("quote"), MAX_QUOTE),
+                _who_tail(ev, with_session=True)))
+        lines.append("")
+
+    questions = narrative.get("questions") or []
+    if questions:
+        lines += ["## 还没答案的问题", ""]
+        lines += ["- " + q for q in questions]
+        lines.append("")
+
+    lines += ["## 场次与回放", ""]
+    for m in materials:
+        tail = " · [妙记](%s)" % m["minutes_url"] if m["minutes_url"] else ""
+        topics = "、".join(m["topics"][:3])
+        topic_tail = (" · " + topics) if topics else ""
+        lines.append("- %s · 《%s》 · %s%s%s" % (
+            _day_label(m["day"]), m["title"], duration_text(m["duration_s"]),
+            topic_tail, tail))
+
+    lines += ["", "## 本周数字", "",
+              "- 场次：%d 场，分布在 %d 天" % (stats["sessions"], stats["days"]),
+              "- 总时长：%s（平均每场 %s）" % (
+                  duration_text(stats["duration_s"]),
+                  duration_text(stats["duration_s"] / max(1, stats["sessions"]))),
+              "- 素材：%d 场有已生成总结，%d 场有妙记回放" % (
+                  stats["with_summary"], stats["with_minutes"]),
+              "- 高频话题：%s" % _topic_summary(stats["topics"])]
+    cov = [ln for ln in _coverage_lines(stats)
+           if ln.startswith("- 未生成总结") or ln.startswith("- 未回填妙记")]
     if cov:
         lines += cov
-    lines += ["", "## 重点场次", ""]
-    detail = [m for m in materials if m.get("detail")]
-    if not detail:
-        lines.append("（没有超过 3 分钟或生成过总结的场次）")
-    for m in detail:
-        tail = " · [妙记](%s)" % m["minutes_url"] if m["minutes_url"] else ""
-        lines.append("- %s · 《%s》 · %s%s" % (
-            _day_label(m["day"]), m["title"], duration_text(m["duration_s"]), tail))
-    for d, group in _group_days(materials).items():
-        lines += ["", "## " + _day_label(d), ""]
-        shown = [m for m in group if m.get("detail")]
-        rest = [m for m in group if not m.get("detail")]
-        for i, m in enumerate(shown):
-            if i:
-                lines.append("")
-            lines += _session_head(m) + _session_body(m)
-        if rest:
-            if shown:
-                lines.append("")
-            lines.append(_short_line(rest))
-    lines += ["", "## 跨场观察", "",
-              "- 重复话题：%s" % _topic_summary(stats["topics"])]
     return "\n".join(lines).rstrip() + "\n"
+
+
+def render_weekly(materials: list[dict], since: date, until: date,
+                  stats: dict, narrative: dict | None = None) -> str:
+    if narrative is None:
+        narrative = _fallback_narrative(materials, _evidence_pool(materials), stats)
+    return _render_narrative(materials, since, until, stats, narrative)
 
 
 def render_retro(materials: list[dict], since: date, until: date,
@@ -562,8 +953,12 @@ def render_retro(materials: list[dict], since: date, until: date,
 
 def build(conn, kind: str = "weekly", since: date | None = None,
           until: date | None = None, out_dir: Path | str | None = None,
-          write: bool = True) -> dict:
-    """生成报告，返回 {kind,title,since,until,markdown,path,sessions,stats}。"""
+          write: bool = True, use_llm: bool = True) -> dict:
+    """生成报告，返回 {kind,title,since,until,markdown,path,sessions,stats}。
+
+    weekly 会先做一次跨场「主线」编辑（模型可用时），失败自动回退规则版；
+    retro 仍是原来的逐场模板，结论与行动留给人填。
+    """
     kind = (kind or "weekly").lower()
     if kind not in KINDS:
         raise ValueError("未知报告类型：%s" % kind)
@@ -591,8 +986,14 @@ def build(conn, kind: str = "weekly", since: date | None = None,
                 m["compact_reason"] = "cap"
     stats = _material_stats(materials)
     stats["truncated"] = truncated
-    markdown = (render_retro if kind == "retro" else render_weekly)(
-        materials, since, until, stats)
+    narrative = None
+    if kind == "weekly":
+        pool = _evidence_pool(materials)
+        narrative = _narrative(materials, pool, stats, since, until,
+                               use_llm=use_llm)
+        markdown = _render_narrative(materials, since, until, stats, narrative)
+    else:
+        markdown = render_retro(materials, since, until, stats)
     path = None
     if write:
         out = Path(out_dir) if out_dir else REPORTS_DIR
@@ -603,7 +1004,7 @@ def build(conn, kind: str = "weekly", since: date | None = None,
         "kind": kind,
         "title": "%s · %s" % (KINDS[kind], range_label(since, until)),
         "since": since, "until": until,
-        "markdown": markdown, "path": path,
+        "markdown": markdown, "path": path, "narrative": narrative,
         "sessions": materials, "stats": stats,
     }
 

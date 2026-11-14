@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import io
+import threading
+import time
 
 import pytest
 
@@ -962,3 +964,126 @@ def test_bring_up_still_starts_when_name_probe_breaks(api_calls, fake_media, mon
         a.shutdown()
     assert [b for p, b in api_calls
             if p == "/api/rooms/state" and b.get("state") == "live"]
+
+
+# ---------------------------------------------------------------- 静音探针
+class ProbeHarness:
+    def __init__(self) -> None:
+        self.reports: list[dict] = []
+        self.stopped: list[str] = []
+
+    def _capture_event(self, rid, kind, **extra):
+        self.reports.append({"id": rid, "event": kind})
+
+    def report(self, rid, state=None, **kw):
+        self.reports.append(dict(kw, id=rid, state=state))
+
+    def _stop_session(self, sid):
+        self.stopped.append(sid)
+
+
+def test_probe_room_live_recognizes_explicit_offline(monkeypatch):
+    def offline(web_rid, timeout):
+        raise direct_capture.ResolveError("直播间当前没有开播（页面显示「直播已结束」）")
+
+    monkeypatch.setattr(direct_capture, "_resolve_live_page", offline)
+    online, why = direct_capture.probe_room_live(
+        {"url": "https://live.douyin.com/123456"})
+    assert online is False and "直播已结束" in why
+
+
+def test_probe_room_live_stays_online_when_uncertain(monkeypatch):
+    """抓不到页面 ≠ 下播：宁可多录，也不能凭一次 HTTP 失败收尾。"""
+    def boom(*a, **kw):
+        raise direct_capture.ResolveError("抓取直播间页面失败：timed out")
+
+    monkeypatch.setattr(direct_capture, "_resolve_live_page", boom)
+    assert direct_capture.probe_room_live(
+        {"url": "https://live.douyin.com/123456"}) == (True, "")
+
+
+def test_probe_room_live_stays_online_while_stream_resolves(monkeypatch):
+    monkeypatch.setattr(direct_capture, "_resolve_live_page",
+                        lambda *a, **kw: ("http://cdn/x.flv", "live"))
+    assert direct_capture.probe_room_live(
+        {"url": "https://live.douyin.com/123456"}) == (True, "")
+
+
+def test_probe_room_live_ignores_non_douyin(monkeypatch):
+    monkeypatch.setattr(direct_capture, "_resolve_live_page",
+                        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("不该探")))
+    monkeypatch.setattr(direct_capture, "canonical_douyin_url",
+                        lambda *a, **kw: "")
+    other = {"url": "https://live.bilibili.com/1"}
+    assert direct_capture.probe_room_live(other) == (True, "")
+
+
+def test_silent_room_probe_stops_session(monkeypatch):
+    monkeypatch.setattr(direct_capture, "probe_room_live",
+                        lambda room, timeout=8.0:
+                        (False, "直播间已下播（页面显示「直播已结束」）"))
+    h = ProbeHarness()
+    info = {"sid": "S1"}
+    direct_capture.DirectAgent._probe_zero_room(h, _room(), info)
+    assert info["ended"] is True
+    stopped = [r for r in h.reports if r.get("state") == "stopped"]
+    assert stopped and stopped[0]["auto_stopped"] is True
+    assert "已下播" in stopped[0]["auto_stop_reason"]
+    # 理由里不能出现「音频块」：直取代理会据此把场次重新拉起来。
+    assert "音频块" not in stopped[0]["auto_stop_reason"]
+    for _ in range(100):
+        if h.stopped:
+            break
+        time.sleep(0.01)
+    assert h.stopped == ["S1"]
+
+
+def test_probe_uncertain_keeps_recording(monkeypatch):
+    monkeypatch.setattr(direct_capture, "probe_room_live",
+                        lambda room, timeout=8.0: (True, ""))
+    h = ProbeHarness()
+    info = {"sid": "S1"}
+    direct_capture.DirectAgent._probe_zero_room(h, _room(), info)
+    assert not info.get("ended")
+    assert h.reports == [] and h.stopped == []
+
+
+def test_check_probes_room_after_long_zero_audio(monkeypatch):
+    seen: list[str] = []
+    monkeypatch.setattr(direct_capture, "probe_room_live",
+                        lambda room, timeout=8.0: (seen.append(room["id"]) or (True, "")))
+    a = direct_capture.DirectAgent("http://127.0.0.1:8765")
+    info = {"proc": None, "eof": False, "last_ok_at": time.time(),
+            "warned": False, "zero_since": time.time() - 200.0,
+            "probed_at": 0.0, "ended": False, "sid": "S1"}
+    try:
+        a._check(_room(state="live"), info)
+        for _ in range(100):
+            if seen:
+                break
+            time.sleep(0.01)
+        assert seen == ["rm1"]
+        assert info["probed_at"] > 0
+        # 刚探过就压住节流，不能每个 tick 都去抓抖音页面
+        a._check(_room(state="live"), info)
+        time.sleep(0.05)
+        assert seen == ["rm1"]
+    finally:
+        a.shutdown()
+
+
+def test_on_chunk_tracks_zero_audio(monkeypatch):
+    monkeypatch.setattr(direct_capture, "post_chunk", lambda *a, **kw: None)
+    a = direct_capture.DirectAgent("http://127.0.0.1:8765")
+    first = threading.Event()
+    first.set()
+    info = {"sid": "S1", "first_chunk": first, "live_reported": True, "rms": 0.0}
+    try:
+        a._on_chunk("rm1", _room(), info,
+                    b"\0\0" * direct_capture.CHUNK_SAMPLES)
+        assert info["zero_since"] > 0
+        a._on_chunk("rm1", _room(), info,
+                    b"\x10\0" * direct_capture.CHUNK_SAMPLES)
+        assert info["zero_since"] == 0.0
+    finally:
+        a.shutdown()
