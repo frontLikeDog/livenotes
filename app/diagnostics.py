@@ -86,6 +86,7 @@ def _live() -> list[dict]:
             "paused": bool(v.get("paused", False)),
             "elapsed": v.get("elapsed"),
             "n_utterances": v.get("n_utterances"),
+            "n_speakers": v.get("n_speakers"),
             "queued": v.get("queued"),
             "dropped": v.get("dropped"),
             "error": v.get("error") or "",

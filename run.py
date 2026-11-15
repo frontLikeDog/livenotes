@@ -93,7 +93,7 @@ if _overlay is not None:
         raise SystemExit("--web-overlay 目录不存在：%s" % _overlay_path)
     os.environ["LIVENOTES_WEB_OVERLAY"] = str(_overlay_path)
 
-from app import live, logs, metrics, scheduler, seed_demo, store, runtime  # noqa: E402
+from app import live, logs, metrics, notify, scheduler, seed_demo, store, runtime  # noqa: E402
 from app import audio, lan  # noqa: E402
 from app.config import (HOST, METRICS_SAMPLE_S, PORT, RESUME_ROOMS,  # noqa: E402
                         ensure_dirs)
@@ -392,6 +392,11 @@ def main() -> int:
     print(f"[init] 已有 {len(n) + (1 if seeded else 0)} 个场次；"
           f"FTS5 trigram = {store.FTS_TRIGRAM}", flush=True)
     conn.close()
+    # 磁盘不足不该等到第一次断流才发现：启动时先看一眼，同一天只提醒一次。
+    try:
+        notify.check_disk()
+    except Exception:
+        pass
     # 启动全局 LLM 调度器：把上次进程退出时没跑完的任务标成 failed（可重试），
     # 同时起固定数量的 worker。之后所有总结/润色/分类/收尾都排队走它。
     scheduler.SCHEDULER.start()

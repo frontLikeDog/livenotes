@@ -6,7 +6,7 @@ import time
 
 import pytest
 
-from app import live, rooms, server
+from app import live, notify, rooms, server
 from tests import helpers
 
 
@@ -126,7 +126,8 @@ def test_auto_close_ignores_room_that_is_gone(db, tmp_path, roomstore, monkeypat
 
 def test_watch_stalled_can_be_disabled(monkeypatch):
     monkeypatch.setattr(server, "_auto_close_session",
-                        lambda sid, reason: (_ for _ in ()).throw(AssertionError("不该收")))
+                        lambda sid, reason, down=False: (_ for _ in ()).throw(
+                            AssertionError("不该收")))
     live._SESSIONS["x"] = FakeSession("x", started=0.0, last_chunk=0.0)
     assert server._watch_stalled(idle_s=0) == []
 
@@ -149,6 +150,39 @@ def test_watch_stalled_warn_alerts_once(monkeypatch):
             break
         time.sleep(0.01)
     assert alerts and alerts[0][0] == "w" and alerts[0][1] >= 99.0
+
+
+def test_stalled_warning_writes_one_notification(db, monkeypatch):
+    """断流预警除了飞书，还要落一条应用内通知；同一 episode 不重复。"""
+    live._SESSIONS.clear()
+    stale = time.monotonic() - 100.0
+    live._SESSIONS["w"] = FakeSession("w", started=stale, last_chunk=stale)
+    monkeypatch.setattr(server.rooms, "get_by_session", lambda sid: None)
+    monkeypatch.setattr(live, "push_capture_lost", lambda *a: True)
+
+    assert server._watch_stalled_warn(warn_s=30) == ["w"]
+    assert server._watch_stalled_warn(warn_s=30) == []
+    items = notify.feed()["items"]
+    assert [x["kind"] for x in items] == ["stream_stalled"]
+    assert items[0]["action"]["view"] == "hud"
+
+
+def test_recovered_writes_one_notification(db):
+    """恢复只由看门狗取走一次 episode，晚几秒也要说，且不重复。"""
+    class Recovered(FakeSession):
+        def __init__(self):
+            super().__init__("r", started=0.0, last_chunk=0.0)
+            self._chunk_recovered_episode = 2
+
+        def take_chunk_recovered(self):
+            ep, self._chunk_recovered_episode = self._chunk_recovered_episode, 0
+            return ep
+
+    live._SESSIONS.clear()
+    live._SESSIONS["r"] = Recovered()
+    assert server._notify_recovered() == ["r"]
+    assert server._notify_recovered() == []
+    assert [x["kind"] for x in notify.feed()["items"]] == ["stream_recovered"]
 
 
 def test_watch_stalled_warn_ignores_fresh_chunks(monkeypatch):
@@ -228,9 +262,9 @@ def test_silent_sessions_ignore_short_silence_pause_and_stopped():
 
 
 def test_watch_silent_closes_each_session_once(monkeypatch):
-    calls: list[tuple[str, str]] = []
+    calls: list[tuple[str, str, bool]] = []
     monkeypatch.setattr(server, "_auto_close_session",
-                        lambda sid, reason: calls.append((sid, reason)))
+                        lambda sid, reason, down=False: calls.append((sid, reason, down)))
     with server._STALL_LOCK:
         server._STALL_CLOSING.clear()
     live._SESSIONS.clear()
@@ -239,6 +273,8 @@ def test_watch_silent_closes_each_session_once(monkeypatch):
         assert server._watch_silent(zero_s=600) == ["z"]
         assert server._watch_silent(zero_s=600) == []
         assert [c[0] for c in calls] == ["z"]
+        # 静音收尾更像「主播下播」；断流收尾要说「已停止记录」，不能混用。
+        assert calls[0][2] is True
         # 直取代理靠「音频块」这个子串判断"断流收尾后要不要重新拉起"。
         # 静音收尾不是断流，理由里不能出现它，否则会立刻把场次重新拉起来。
         assert "音频块" not in calls[0][1]
@@ -279,7 +315,8 @@ def test_clear_silent_note_when_audio_returns(db, tmp_path, roomstore):
 
 def test_watch_silent_can_be_disabled(monkeypatch):
     monkeypatch.setattr(server, "_auto_close_session",
-                        lambda sid, reason: (_ for _ in ()).throw(AssertionError("不该收")))
+                        lambda sid, reason, down=False: (_ for _ in ()).throw(
+                            AssertionError("不该收")))
     live._SESSIONS.clear()
     live._SESSIONS["z"] = SilentSession("z", zero_s=900.0)
     try:

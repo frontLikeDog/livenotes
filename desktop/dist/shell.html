@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>LiveNotes · 直播语记</title>
 <link rel="stylesheet" href="/shell.css">
+<link rel="stylesheet" href="/hud.css">
 </head>
 <body>
 <div class="app">
@@ -20,6 +21,10 @@
       <kbd>Ctrl K</kbd>
     </button>
     <div class="top-right">
+      <button class="icon-btn notif-btn" id="notifBtn" title="通知" aria-label="通知">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M6 9a6 6 0 0 1 12 0c0 4 1.5 5.5 1.5 5.5H4.5S6 13 6 9z"/><path d="M10 18a2 2 0 0 0 4 0"/></svg>
+        <i class="notif-dot" id="notifDot" hidden>0</i>
+      </button>
       <button class="rec-pill idle" id="recPill" title="正在采集的直播间">
         <span class="dot" id="recDot"></span><b id="liveCount">0</b> 路在听
       </button>
@@ -56,6 +61,10 @@
 
   <div class="body" id="body">
     <nav class="rail" id="rail" aria-label="主导航">
+      <button class="rail-item" data-view="hud" title="记录卡">
+        <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3M9 21h6"/></svg>
+        <span>记录</span><i class="badge rec" id="railRec" hidden>REC</i>
+      </button>
       <button class="rail-item on" data-view="listen" title="收听">
         <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M3 12h2.5l2-5 3 10 2.5-7 2 4H21"/></svg>
         <span>收听</span><i class="badge" id="railBadge" hidden>0</i>
@@ -196,6 +205,60 @@
         </div>
       </section>
 
+      <section class="hud-view" id="hudView" hidden>
+        <div class="hud-card" id="hudCard">
+          <div class="hud-status-row">
+            <div class="hud-state" id="hudState" aria-live="polite"><i></i><b>正在记录</b></div>
+            <div class="hud-room" id="hudRoom"></div>
+          </div>
+          <div class="hud-timer" id="hudTimer" aria-label="已记录时长">00:00:00</div>
+          <div class="hud-stats" id="hudStats"></div>
+          <div class="hud-actions">
+            <button class="btn hud-secondary" id="hudPause">暂停</button>
+            <button class="btn hud-secondary" id="hudMark">标记此刻</button>
+            <button class="btn primary hud-main" id="hudFinish">结束并生成笔记</button>
+          </div>
+          <div class="hud-alert" id="hudAlert" hidden></div>
+          <div class="hud-recent" id="hudRecent">
+            <div class="hud-label">最近在说</div>
+            <div class="hud-lines" id="hudLines"></div>
+            <div class="hud-partial" id="hudPartial" hidden></div>
+            <div class="hud-empty" id="hudEmpty">还在等第一句。开始出声后，这里会一条条出现。</div>
+          </div>
+          <div class="hud-marks" id="hudMarks" hidden></div>
+          <div class="hud-foot">
+            <span>关掉窗口也会继续记录</span><i>·</i><span>音频只存本机</span>
+            <span class="grow"></span>
+            <button class="hud-more" id="hudMulti" hidden></button>
+          </div>
+        </div>
+
+        <div class="hud-idle" id="hudIdle" hidden>
+          <div class="hud-idle-mark">LN</div>
+          <h2>还没有在记录</h2>
+          <p>把直播间链接粘进来，开始后会进入这张记录卡。<br>关掉窗口也会继续录，音频只存在这台电脑上。</p>
+          <button class="btn primary" id="hudStart">开始记录</button>
+        </div>
+
+        <div class="finish-card" id="finishCard" hidden>
+          <div class="fc-kicker">收尾</div>
+          <h2 id="fcTitle">正在生成笔记</h2>
+          <p id="fcSub">录音和逐字稿会先保存好，可以关掉窗口。</p>
+          <ol class="fc-steps" id="fcSteps">
+            <li data-fc="save"><i></i><b>保存录音</b><span>等待中</span></li>
+            <li data-fc="tidy"><i></i><b>整理说话人</b><span>等待中</span></li>
+            <li data-fc="note"><i></i><b>生成笔记</b><span>等待中</span></li>
+          </ol>
+          <div class="fc-note" id="fcNote" hidden></div>
+          <div class="fc-actions">
+            <button class="btn" id="fcRaw" hidden>先看原文</button>
+            <button class="btn" id="fcRetry" hidden>重试生成</button>
+            <button class="btn primary" id="fcOpen" hidden>打开笔记</button>
+            <button class="btn" id="fcLater" hidden>再记一场</button>
+          </div>
+        </div>
+      </section>
+
       <section class="frame-view no-head" id="frameView" hidden>
         <div class="frame-head">
           <button class="icon-btn" id="frameBack" title="返回">
@@ -233,6 +296,27 @@
     <span class="hint" id="statHint">关窗后继续录音 · Ctrl K 命令</span>
   </footer>
 </div>
+
+<div class="notif-drawer" id="notifDrawer" hidden role="dialog" aria-label="通知">
+  <div class="notif-head">
+    <b>通知</b>
+    <span class="notif-unread" id="notifUnread" hidden>0 条未读</span>
+    <span class="grow"></span>
+    <button class="notif-link" id="notifReadAll">全部已读</button>
+    <button class="icon-btn" id="notifClose" title="关闭通知" aria-label="关闭通知">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+    </button>
+  </div>
+  <div class="notif-list" id="notifList"></div>
+  <div class="notif-foot">
+    <details class="notif-prefs" id="notifPrefs">
+      <summary>通知设置</summary>
+      <div class="np-body" id="npBody"></div>
+    </details>
+  </div>
+</div>
+
+<div class="notice-stack" id="noticeStack" aria-live="polite"></div>
 
 <div class="toast" id="toast" hidden role="status" aria-live="polite"></div>
 

@@ -21,8 +21,9 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from . import (analysis, analysis_job, audio, classify, coach, diagnostics, export,
                feedback, glossary, highlight, lan, live, livebrief, llm, logs,
-               metrics, polish, profile, reader, rooms, runtime, scheduler, seed_demo,
-               settings, share, store, tasks, timefmt, titles, voiceprint, webroot)
+               metrics, notify, polish, profile, reader, rooms, runtime, scheduler,
+               seed_demo, settings, share, store, tasks, timefmt, titles, voiceprint,
+               webroot)
 from .config import (AUDIO_DIR, HOST, LIVE_STALL_STOP_S, LIVE_STALL_WARN_S,
                      LIVE_ZERO_STOP_S, LIVE_ZERO_WARN_S, PORT, WEB_DIR)
 
@@ -55,6 +56,16 @@ def _list(v: Any) -> list[str]:
     if isinstance(v, list):
         v = ",".join(str(x) for x in v)
     return [x.strip() for x in str(v).split(",") if x.strip()]
+
+
+def _int_list(v: Any) -> list[int]:
+    out: list[int] = []
+    for x in (v if isinstance(v, (list, tuple)) else []):
+        try:
+            out.append(int(x))
+        except (TypeError, ValueError):
+            continue
+    return out
 
 
 def parse_filters(d: dict) -> dict:
@@ -291,6 +302,7 @@ _STALL_LOCK = threading.Lock()
 _LIVE_START_LOCK = threading.Lock()
 _STALL_CLOSING: set[str] = set()      # 正在收尾的会话，防止每轮重复触发
 _WATCHDOG: threading.Thread | None = None
+_LAST_DISK_CHECK = 0.0
 
 
 def _stall_reason(item: dict) -> str:
@@ -337,6 +349,12 @@ def _watch_stalled_warn(warn_s: float | None = None) -> list[str]:
         if not live.mark_chunk_stall_warned(sid):
             continue
         warned.append(sid)
+        try:
+            notify.stream_stalled(sid, item.get("title") or "",
+                                  live.stall_episode(sid) or 1,
+                                  float(item.get("idle_s") or 0))
+        except Exception:
+            traceback.print_exc()
         threading.Thread(target=_warn_capture_lost, args=(sid, item),
                          name="watchdog-warn-" + sid, daemon=True).start()
     return warned
@@ -362,6 +380,12 @@ def _watch_silent_warn(warn_s: float | None = None) -> list[str]:
         if str(room.get("stage_note") or "") == note:
             continue          # 同一分钟不重复写库
         rooms.update(room["id"], stage_note=note)
+        try:
+            notify.silent(sid, room.get("name") or item.get("title") or "",
+                          live.silent_episode(sid) or 1,
+                          float(item.get("zero_s") or 0))
+        except Exception:
+            traceback.print_exc()
         out.append(sid)
     return out
 
@@ -392,7 +416,21 @@ def _clear_recovered_notes() -> None:
             rooms.update(room["id"], stage_note="采集已恢复")
 
 
-def _auto_close_session(sid: str, reason: str) -> None:
+def _notify_recovered() -> list[str]:
+    """断流恢复通知。由看门狗取走 episode，晚几秒不影响「声音恢复了」的价值。"""
+    out: list[str] = []
+    for item in live.take_recovered_sessions():
+        sid = item["id"]
+        try:
+            notify.stream_recovered(sid, item.get("title") or "",
+                                    int(item.get("episode") or 1))
+            out.append(sid)
+        except Exception:
+            traceback.print_exc()
+    return out
+
+
+def _auto_close_session(sid: str, reason: str, down: bool = False) -> None:
     """断流场次收尾：先把房间落到 stopped，再停会话（落盘 + 排队总结 + 发回顾）。
 
     顺序有讲究：采集页每 5 秒看一次房间状态，先落 stopped 它就会自己收手，
@@ -430,6 +468,10 @@ def _auto_close_session(sid: str, reason: str) -> None:
     except Exception:
         traceback.print_exc()
     finally:
+        try:
+            notify.live_ended(sid, room.get("name") or "", down=down)
+        except Exception:
+            traceback.print_exc()
         with _STALL_LOCK:
             _STALL_CLOSING.discard(sid)
 
@@ -470,7 +512,8 @@ def _watch_silent(zero_s: float | None = None) -> list[str]:
                 continue
             _STALL_CLOSING.add(sid)
         started.append(sid)
-        threading.Thread(target=_auto_close_session, args=(sid, _silent_reason(item)),
+        threading.Thread(target=_auto_close_session,
+                         args=(sid, _silent_reason(item), True),
                          name="watchdog-silent-" + sid, daemon=True).start()
     return started
 
@@ -483,6 +526,7 @@ def start_watchdog(interval_s: float = 10.0) -> threading.Thread | None:
             return _WATCHDOG
 
         def loop() -> None:
+            global _LAST_DISK_CHECK
             while True:
                 time.sleep(interval_s)
                 try:
@@ -495,6 +539,12 @@ def start_watchdog(interval_s: float = 10.0) -> threading.Thread | None:
                     _watch_silent()
                     _clear_recovered_notes()
                     _clear_silent_notes()
+                    _notify_recovered()
+                    # 磁盘检查 10 分钟一次就够；发不发由「同一天只发一次」去重。
+                    now = time.monotonic()
+                    if now - _LAST_DISK_CHECK >= 600:
+                        _LAST_DISK_CHECK = now
+                        notify.check_disk()
                 except Exception:
                     traceback.print_exc()
 
@@ -1017,6 +1067,12 @@ p{font-size:14px;line-height:1.75;margin:8px 0}
             return self._json(diagnostics.summary(
                 event_limit=int(_num(q.get("events"), 80) or 80),
                 log_limit=int(_num(q.get("log"), 30) or 30)))
+        if p == "/api/notifications":
+            return self._json(notify.feed(
+                since_id=int(_num(q.get("since_id"), 0) or 0),
+                limit=int(_num(q.get("limit"), 50) or 50)))
+        if p == "/api/notifications/settings":
+            return self._json(notify.settings_view())
         if p == "/api/metrics":
             return self._get_metrics(q)
         if p == "/api/metrics/events":
@@ -2004,6 +2060,20 @@ p{font-size:14px;line-height:1.75;margin:8px 0}
                 out = lan.status()
                 out["error"] = str(e)
                 return self._json(out, 400)
+        if p == "/api/notifications/read":
+            return self._json(notify.mark_read(
+                ids=_int_list(b.get("ids")), all_=bool(b.get("all"))))
+        if p == "/api/notifications/delivered":
+            return self._json({"ok": True, "changed": notify.mark_delivered(
+                _int_list(b.get("ids")))})
+        if p == "/api/notifications/settings":
+            return self._json(notify.update_settings(b if isinstance(b, dict) else {}))
+        if p == "/api/notifications/tray_hint":
+            return self._json({"ok": True, "item": notify.tray_hint()})
+        if p == "/api/notifications/test":
+            return self._json({"ok": True, "item": notify.test_notification()})
+        if p == "/api/notifications/clear":
+            return self._json({"ok": True, "removed": notify.clear()})
         if p == "/api/settings/prefs":
             return self._json(settings.set_prefs(b if isinstance(b, dict) else {}))
         if p == "/api/settings":

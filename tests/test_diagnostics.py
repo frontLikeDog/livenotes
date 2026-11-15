@@ -32,7 +32,8 @@ def test_summary_shape_and_room_url_redaction(db, monkeypatch):
     assert out["live"] == [{
         "id": "S1", "title": "抖音直播", "idle_s": 42.5, "never": False,
         "running": True, "paused": False, "elapsed": 120.0,
-        "n_utterances": 8, "queued": 0, "dropped": 0, "error": "",
+        "n_utterances": 8, "n_speakers": None, "queued": 0, "dropped": 0,
+        "error": "",
         "started_at": "2026-11-10T10:00:00",
     }]
     assert out["rooms"][0]["url"] == "https://live.douyin.com/123"

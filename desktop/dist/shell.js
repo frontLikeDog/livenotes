@@ -65,6 +65,18 @@ const S = {
   workbenchSid: '',
   frameLoads: 0,
   frameKind: '',
+  /* 记录卡：当前盯住的这一路，以及结束后的三步收尾。 */
+  hudSid: '',
+  hudRoomId: '',
+  hudClock: { elapsed: 0, at: 0, paused: false, sid: '' },
+  finish: null,
+  finishTimer: null,
+  /* 通知：应用内中心 + 系统 toast。booted 之前只填充中心，不重播。 */
+  notif: {
+    items: [], unread: 0, latestId: 0, settings: null,
+    booted: false, busy: false, open: false, sysDenied: false,
+    lastPresent: null, lastOs: null,
+  },
 };
 
 /* ================================================================ utils */
@@ -380,6 +392,23 @@ function liveRooms() {
 function selectedRoom() {
   return S.rooms.find((r) => r.id === S.selectedId) || null;
 }
+/* 记录卡盯住的那一路。和左侧选中项解耦：HUD 里不需要用户先在列表里点。 */
+function hudRoom() {
+  if (S.hudRoomId) {
+    const r = S.rooms.find((x) => x.id === S.hudRoomId);
+    if (r) return r;
+  }
+  if (S.hudSid) {
+    const r = S.rooms.find((x) => x.session_id === S.hudSid);
+    if (r) return r;
+  }
+  const live = liveRooms();
+  if (live.length === 1) return live[0];
+  return live.length ? live[live.length - 1] : null;
+}
+function activeRoom() {
+  return S.view === 'hud' ? hudRoom() : selectedRoom();
+}
 function ensureSelection() {
   if (S.selectedId && S.rooms.some((r) => r.id === S.selectedId)) return;
   const first = S.rooms.find((r) => stateInfo(r).k === 'live') || S.rooms[0] || null;
@@ -413,6 +442,13 @@ async function refreshRooms() {
   const room = selectedRoom();
   const sid = room ? (room.session_id || '') : '';
   if (sid !== S.selectedSid) { S.selectedSid = sid; S.lines = []; }
+  if (S.view === 'hud') {
+    const hr = hudRoom();
+    if (hr) {
+      S.hudRoomId = hr.id;
+      if (hr.session_id) S.hudSid = hr.session_id;
+    }
+  }
   renderAll();
 }
 
@@ -484,8 +520,8 @@ async function refreshTrashCount() {
 
 let txBusy = false;
 async function pollTranscript() {
-  const room = selectedRoom();
-  if (S.view !== 'listen' || !room || !room.session_id) return;
+  const room = activeRoom();
+  if (!['listen', 'hud'].includes(S.view) || !room || !room.session_id) return;
   // 标注模式里页面是打开的，但字幕必须继续轮询；只有普通页面模式才停。
   if (S.pageOpen && S.stage !== 'annotate') return;
   if (txBusy) return;
@@ -523,6 +559,7 @@ async function pollTranscript() {
     S.health = S.health || {};
     if (S.stage === 'annotate') renderAnnot();
     renderInspector();
+    if (S.view === 'hud') renderHud();
   } catch (e) {
     /* 会话可能刚结束；下一次 rooms 轮询会修正 */
   } finally {
@@ -546,7 +583,7 @@ async function pollSessionsLoop() {
 /* ================================================================ views */
 // 方案 B：整窗换肤。监听/实时字幕是暗色工作室，工作台/资料是暖纸阅读面。
 const VIEW_THEME = {
-  listen: 'studio', live: 'studio',
+  hud: 'studio', listen: 'studio', live: 'studio',
   workbench: 'paper', files: 'paper', people: 'paper', settings: 'paper', frame: 'paper',
 };
 function applyTheme() {
@@ -562,6 +599,7 @@ function withTheme(url) {
 }
 
 const VIEW_META = {
+  hud: { title: '记录', sub: '录音与收尾', side: false, insp: false },
   listen: { title: '收听', sub: '全部直播间', side: true, insp: true },
   workbench: { title: '工作台', sub: '场次与字幕', side: true, insp: false },
   files: { title: '文件中心', sub: '录音与回放', side: false, insp: false },
@@ -573,11 +611,17 @@ const VIEW_META = {
 
 function switchView(view, opts) {
   opts = opts || {};
+  // 多路时 HUD 不抢岗位：设计上 2 路以上留在收听多路视图，用户选一路再进记录卡。
+  if (view === 'hud' && !opts.force && !S.finish && liveRooms().length > 1) {
+    view = 'listen';
+    toast('有 ' + liveRooms().length + ' 个直播间在记录，先在这里选一路。');
+  }
   if (S.view === 'listen' && view !== 'listen') closeStageView();
   if (S.paletteOpen) closePalette();
   S.view = view;
   S.stage = view === 'listen' ? S.stage : 'signal';
   applyTheme();
+  document.body.classList.toggle('hud-mode', view === 'hud');
 
   const meta = VIEW_META[view] || VIEW_META.listen;
   const body = $('#body');
@@ -586,9 +630,19 @@ function switchView(view, opts) {
   body.classList.toggle('no-insp', !(view === 'listen' ? S.panes.insp : meta.insp));
   applyPaneButtons();
   $('#listenView').hidden = view !== 'listen';
-  $('#frameView').hidden = view === 'listen';
+  $('#hudView').hidden = view !== 'hud';
+  $('#frameView').hidden = view === 'listen' || view === 'hud';
 
-  if (view === 'workbench') {
+  if (view === 'hud') {
+    if (opts.room) S.hudRoomId = opts.room;
+    if (opts.session) S.hudSid = opts.session;
+    const r = hudRoom();
+    if (r) {
+      S.hudRoomId = r.id;
+      if (r.session_id) S.hudSid = r.session_id;
+    }
+    renderHud();
+  } else if (view === 'workbench') {
     const sid = opts.session || S.selectedSession || '';
     S.selectedSession = sid;
     setWorkbenchFrame(sid, opts.autoplay, opts.t);
@@ -624,6 +678,7 @@ function switchView(view, opts) {
   renderSidebar();
   renderStage();
   renderInspector();
+  renderHud();
   renderStatus();
 }
 
@@ -649,6 +704,7 @@ function renderAll() {
   renderSidebar();
   renderStage();
   renderInspector();
+  renderHud();
   renderStatus();
 }
 
@@ -659,6 +715,8 @@ function renderRail() {
   const badge = $('#railBadge');
   badge.hidden = !n;
   badge.textContent = String(n);
+  const rec = $('#railRec');
+  if (rec) rec.hidden = n === 0;
 }
 
 function renderSidebar() {
@@ -1347,25 +1405,33 @@ async function handleSpkAction(act, id, el) {
 }
 
 async function markMoment() {
-  const room = selectedRoom();
+  const room = activeRoom();
   if (!room || !room.session_id) { toast('这一路还没有会话。'); return; }
   try {
-    await post('/api/live/mark', { session_id: room.session_id, note: '标注模式打点' });
-    toast('已打点，可在工作台的时间轴上找到。');
+    await post('/api/live/mark', {
+      session_id: room.session_id,
+      note: S.view === 'hud' ? '记录卡打点' : '标注模式打点',
+    });
+    const s = sessionFor(room);
+    const t = s && Array.isArray(s.marks) && s.marks.length
+      ? s.marks[s.marks.length - 1].t : null;
+    toast(t != null ? ('已标记 ' + fmtDur(t)) : '已标记，可在工作台的时间轴上找到。');
+    if (S.view === 'hud') await pollTranscript();
   } catch (e) {
     toast('打点失败：' + e.message);
   }
 }
 
 async function togglePause() {
-  const room = selectedRoom();
+  const room = activeRoom();
   if (!room || !room.session_id) return;
   const s = S.sessInfo || sessionFor(room) || {};
   const paused = !s.paused;
   try {
     await post('/api/live/pause', { session_id: room.session_id, paused });
-    toast(paused ? '已暂停转写，采集继续。' : '已恢复转写。');
-    await refreshAnnot();
+    toast(paused ? '已暂停，这段不会被记录。' : '已继续记录。');
+    if (S.view === 'hud') await pollTranscript();
+    else await refreshAnnot();
   } catch (e) {
     toast('操作失败：' + e.message);
   }
@@ -1457,10 +1523,389 @@ function renderStatus() {
   const dot = $('#recDot');
   dot.classList.toggle('pulse', liveRooms().length > 0);
   $('#statHint').textContent = S.online
-    ? (S.view === 'listen' && S.stage === 'annotate'
-      ? '标注模式 · 已认领 ' + annotStats().claimed + '/' + annotStats().n + ' 人 · 关窗后继续录音'
-      : '关窗后继续录音 · Ctrl K 命令')
+    ? (S.view === 'hud'
+      ? '关窗后继续录 · 托盘可以暂停 / 结束'
+      : (S.view === 'listen' && S.stage === 'annotate'
+        ? '标注模式 · 已认领 ' + annotStats().claimed + '/' + annotStats().n + ' 人 · 关窗后继续录音'
+        : '关窗后继续录音 · Ctrl K 命令'))
     : '检查引擎日志或托盘诊断';
+  if (S.view === 'hud') {
+    const hr = hudRoom();
+    const sub = S.finish ? '正在收尾'
+      : (!hr ? '未在记录' : (liveRooms().length > 1 ? liveRooms().length + ' 路在记录' : '正在记录'));
+    $('#crumb').innerHTML = '<b>记录</b><i>/</i><span>' + esc(sub) + '</span>';
+    document.title = 'LiveNotes · ' + (S.finish ? '正在收尾' : (hr ? '记录中' : '记录'));
+  }
+}
+
+/* ================================================================ 记录 HUD */
+const HUD_STATE = {
+  starting: { label: '正在打开直播间…', tone: 'starting' },
+  recording: { label: '正在记录', tone: '' },
+  paused: { label: '已暂停', tone: 'paused' },
+  quiet: { label: '正在记录', tone: 'quiet' },
+  stalled: { label: '听不到声音了', tone: 'stalled' },
+  silent: { label: '直播可能静音了', tone: 'silent' },
+  error: { label: '录音可能中断了', tone: 'error' },
+  stopped: { label: '记录已结束', tone: 'stopped' },
+};
+function fmtHudTimer(sec) {
+  sec = Math.max(0, Math.floor(Number(sec) || 0));
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+  return pad(h) + ':' + pad(m) + ':' + pad(s);
+}
+function hudSpeakers() {
+  return (S.speakersSid && S.speakersSid === S.hudSid)
+    ? (S.speakers || []).map(normSpeaker).filter((x) => x.id)
+    : [];
+}
+function hudStateOf(room, s) {
+  if (!room) return 'idle';
+  const st = stateInfo(room);
+  if (st.k === 'failed') return 'error';
+  if (st.k === 'stopped') return 'stopped';
+  if (st.k === 'pending') return 'starting';
+  if (s && s.paused) return 'paused';
+  if (s && s.last_chunk_ago_s != null && Number(s.last_chunk_ago_s) > 30) return 'stalled';
+  if (s && Number(s.zero_s || 0) >= 120) return 'silent';
+  if (s && Number(s.idle_s || 0) > 30) return 'quiet';
+  return 'recording';
+}
+function hudTitle(room, s) {
+  if (s && s.title && s.title !== roomName(room)) return s.title;
+  return roomName(room);
+}
+
+function renderHud() {
+  const room = hudRoom();
+  const s = sessionFor(room) || (S.sessInfo && S.sessInfo.id === S.hudSid ? S.sessInfo : null);
+  const hasFinish = !!S.finish;
+  $('#finishCard').hidden = !hasFinish;
+  $('#hudCard').hidden = hasFinish || !room;
+  $('#hudIdle').hidden = hasFinish || !!room;
+
+  if (hasFinish) { renderFinish(); return; }
+  if (!room) {
+    S.hudClock = { elapsed: 0, at: 0, paused: false, sid: '' };
+    return;
+  }
+
+  const sid = room.session_id || '';
+  if (sid && sid !== S.hudSid) S.hudSid = sid;
+  const st = stateInfo(room);
+  // 看门狗/采集页把这一路停了：不把用户丢回空态，直接进入收尾进度。
+  if (st.k === 'stopped' && sid && !S.finish) {
+    const age = Date.now() - (Date.parse(room.updated_at || '') || 0);
+    if (age >= 0 && age < 30 * 60 * 1000) {
+      startFinishWatch(room, true);
+      return;
+    }
+  }
+
+  const k = hudStateOf(room, s);
+  const info = HUD_STATE[k] || HUD_STATE.recording;
+  const card = $('#hudCard');
+  card.dataset.state = info.tone || k;
+  $('#hudState').innerHTML = '<i></i><b>' + esc(info.label) + '</b>';
+  $('#hudRoom').textContent = hudTitle(room, s);
+
+  const elapsed = Number(s ? s.elapsed : 0) || 0;
+  S.hudClock = { elapsed, at: performance.now(), paused: !!((s || {}).paused), sid };
+  $('#hudTimer').textContent = fmtHudTimer(elapsed);
+
+  const people = hudSpeakers().length;
+  const utts = Number((s && s.n_utterances) || 0);
+  const bits = [];
+  if (k === 'starting') {
+    bits.push('正在连接声音…');
+  } else {
+    if (people) bits.push(people + ' 位说话人');
+    bits.push('已转写 ' + utts + ' 句');
+  }
+  $('#hudStats').textContent = bits.join(' · ');
+
+  const sPaused = !!(s && s.paused);
+  $('#hudPause').textContent = sPaused ? '继续' : '暂停';
+  $('#hudPause').disabled = !sid || st.k !== 'live';
+  $('#hudMark').disabled = !sid || st.k === 'pending';
+  $('#hudFinish').disabled = !sid;
+
+  // 最近字幕：只留定稿，末句临时结果单独一行。
+  const rows = (S.lines || []).filter((r) => r && r.text).slice(-8);
+  $('#hudEmpty').hidden = rows.length > 0 || !!S.partial;
+  $('#hudLines').innerHTML = rows.map((r) => {
+    const t = r.t_start != null ? fmtDur(r.t_start) : (r.t != null ? fmtDur(r.t) : '');
+    const label = r.speaker_label || r.speaker || '说话人';
+    return '<div class="hud-line"><i style="background:' + spkColor(r.speaker_id || label) + '"></i>' +
+      '<span class="who">' + esc(label) + '</span>' +
+      '<span class="say">' + esc(r.text) +
+      (t ? '<span class="at">' + esc(t) + '</span>' : '') + '</span></div>';
+  }).join('');
+  const part = S.partial && (S.partial.text || S.partial.transcript || '');
+  $('#hudPartial').hidden = !part;
+  $('#hudPartial').textContent = part ? ('识别中… ' + part) : '';
+
+  const marks = (s && Array.isArray(s.marks)) ? s.marks : [];
+  $('#hudMarks').hidden = marks.length === 0;
+  if (marks.length) {
+    $('#hudMarks').innerHTML = '<span class="hm-label">已标记 ' + marks.length + ' 处</span>' +
+      marks.slice(-3).map((m) =>
+        '<button data-hud-mark="' + Number(m.t || 0) + '" title="从这一秒开始回听">' +
+        esc(fmtDur(m.t)) + '</button>').join('');
+  }
+
+  const multi = liveRooms().length;
+  $('#hudMulti').hidden = multi <= 1;
+  $('#hudMulti').textContent = '还有 ' + Math.max(0, multi - 1) + ' 个直播间在记录 · 切换到多路';
+
+  const alert = $('#hudAlert');
+  let alertHtml = '';
+  if (k === 'starting') {
+    alertHtml = '<b>正在连接声音…</b><span>第一次打开直播页会多等几秒。如果一直停在这里，可以去收听页看看采集状态。</span>' +
+      '<span class="grow"></span><button data-hud-act="listen">打开收听</button>';
+  } else if (k === 'stalled') {
+    alertHtml = '<b>听不到声音了</b><span>已经 ' + Math.round(Number(s.last_chunk_ago_s) || 0) +
+      ' 秒没有收到声音，可能浏览器关了或网络断了。录音里这一段是空的。</span>' +
+      '<span class="grow"></span>' +
+      '<button data-hud-act="retry">重新连接</button>' +
+      '<button data-hud-act="finish">结束并保存</button>';
+  } else if (k === 'silent') {
+    alertHtml = '<b>连续没有声音</b><span>已经 ' + Math.max(1, Math.round(Number(s.zero_s) / 60)) +
+      ' 分钟没有声音。直播可能已经结束，看门狗会在更久没声音后自动收尾。</span>' +
+      '<span class="grow"></span><button data-hud-act="live">看画面</button>' +
+      '<button data-hud-act="finish">结束并保存</button>';
+  } else if (k === 'quiet') {
+    alertHtml = '<b>已经 ' + Math.floor(Number(s.idle_s) || 0) +
+      ' 秒没听到人说话</b><span>直播还开着吗？如果只是安静，可以继续记录。</span>' +
+      '<span class="grow"></span><button data-hud-act="live">看画面</button>';
+  } else if (k === 'error') {
+    alertHtml = '<b>这一路没有在采集</b><span>' +
+      esc(String(room.error || '采集链路断了。').slice(0, 120)) +
+      '</span><span class="grow"></span>' +
+      '<button data-hud-act="retry">重试</button>' +
+      '<button data-hud-act="finish">结束并保存</button>';
+  }
+  alert.hidden = !alertHtml;
+  alert.className = 'hud-alert' + (k === 'quiet' ? ' calm' : '');
+  alert.innerHTML = alertHtml;
+}
+
+function hudTick() {
+  if (S.view !== 'hud' || S.finish) return;
+  const c = S.hudClock;
+  if (!c || !c.sid || !c.at) return;
+  const extra = c.paused ? 0 : Math.max(0, (performance.now() - c.at) / 1000);
+  $('#hudTimer').textContent = fmtHudTimer(c.elapsed + extra);
+}
+
+function confirmFinish(room) {
+  if (!room || !room.session_id) { toast('这一路还没有可保存的内容。'); return; }
+  const s = sessionFor(room);
+  const short = s && Number(s.elapsed) < 60;
+  openModal(
+    '<h3>结束这场记录？</h3>' +
+    '<p>结束后会自动整理成笔记。录音和逐字稿会先保存好，不会丢。' +
+    (short ? '<br><span style="color:var(--amber)">这场比较短，可能生成不了要点。</span>' : '') +
+    '</p>' +
+    '<div class="sheet-actions"><button class="btn" data-mkeep>继续记录</button>' +
+    '<button class="btn primary" data-mfinish>结束并生成笔记</button></div>',
+    (sheet) => {
+      const keep = sheet.querySelector('[data-mkeep]');
+      // 默认焦点给「继续记录」：长直播里误按 Enter 不该结束。
+      setTimeout(() => { try { keep.focus(); } catch (e) {} }, 30);
+      keep.onclick = closeModal;
+      sheet.querySelector('[data-mfinish]').onclick = () => {
+        closeModal();
+        startFinish(room);
+      };
+    }
+  );
+}
+
+function startFinish(room, alreadyStopped) {
+  const sid = room && room.session_id;
+  if (!sid) { toast('这一路还没有可保存的内容。'); return; }
+  if (S.finish) return;
+  S.hudRoomId = room.id;
+  S.hudSid = sid;
+  S.finish = {
+    sid, roomId: room.id, saveDone: !!alreadyStopped, step: alreadyStopped ? 'tidy' : 'save',
+    started: Date.now(), job: null, jobId: '', failed: '', error: '', done: false,
+    polling: false, autoOpened: false,
+  };
+  renderHud();
+  if (!alreadyStopped) {
+    post('/api/rooms/close', { id: room.id })
+      .then(() => {
+        if (!S.finish || S.finish.sid !== sid) return;
+        S.finish.saveDone = true;
+        S.finish.step = 'tidy';
+        renderFinish();
+        pollFinish();
+      })
+      .catch((e) => {
+        if (!S.finish || S.finish.sid !== sid) return;
+        // 房间可能已经被看门狗停了；确认一下再决定是不是「保存失败」。
+        const r = S.rooms.find((x) => x.id === room.id);
+        if (r && stateInfo(r).k === 'stopped') {
+          S.finish.saveDone = true;
+          S.finish.step = 'tidy';
+        } else {
+          S.finish.failed = 'save';
+          S.finish.error = '保存录音时出了点问题：' + (e.message || '请稍后重试');
+        }
+        renderFinish();
+        pollFinish();
+      });
+  } else {
+    pollFinish();
+  }
+  refreshRooms();
+}
+
+function startFinishWatch(room, alreadyStopped) {
+  if (S.finish) return;
+  startFinish(room, alreadyStopped);
+}
+
+function finishStepState(f, key) {
+  if (f.failed === 'save' && key === 'save') return 'fail';
+  if (f.failed && key !== 'save') {
+    if (key === 'note') return 'fail';
+    if (key === 'tidy') return 'done';
+  }
+  if (key === 'save') return f.saveDone ? 'done' : 'on';
+  if (key === 'tidy') {
+    if (!f.saveDone) return '';
+    if (f.done) return 'done';
+    return 'on';
+  }
+  if (key === 'note') {
+    if (f.done) return 'done';
+    if (f.failed) return 'fail';
+    if (f.job && f.job.status === 'running') return 'on';
+    if (f.job && f.job.status === 'queued') return '';
+    return f.saveDone ? '' : '';
+  }
+  return '';
+}
+function renderFinish() {
+  const f = S.finish;
+  if (!f) { $('#finishCard').hidden = true; renderHud(); return; }
+  $('#finishCard').hidden = false;
+  $('#hudCard').hidden = true;
+  $('#hudIdle').hidden = true;
+
+  const done = f.done;
+  const failed = !!f.failed;
+  $('#fcTitle').textContent = done ? '笔记已生成' : (failed ? '笔记没生成成功' : '正在生成笔记');
+  $('#fcSub').textContent = done
+    ? '录音、逐字稿和这次生成的笔记都已经保存好。'
+    : (failed
+      ? '录音和逐字稿都在。可以重试生成，或先看原文。'
+      : '录音和逐字稿会先保存好，可以关掉窗口去做别的。');
+  const statusText = {
+    save: ['正在保存', '已保存', '没保存成功'],
+    tidy: ['正在整理', '已整理', ''],
+    note: ['正在生成', '已生成', '生成失败'],
+  };
+  $$('#fcSteps li').forEach((li) => {
+    const key = li.dataset.fc;
+    const state = finishStepState(f, key);
+    li.className = state;
+    const span = li.querySelector('span');
+    const texts = statusText[key] || ['', '', ''];
+    span.textContent = state === 'done' ? texts[1]
+      : (state === 'fail' ? texts[2] : (state === 'on' ? texts[0] : '等待中'));
+  });
+  const note = $('#fcNote');
+  note.hidden = !f.error;
+  note.textContent = f.error || '';
+  $('#fcOpen').hidden = !done;
+  $('#fcRetry').hidden = !(failed && f.saveDone);
+  $('#fcRaw').hidden = !(failed && f.saveDone);
+  $('#fcLater').hidden = !(done || failed);
+  // 完成后「打开笔记」是唯一主操作；失败时把「重试生成」顶上来。
+  // 「再记一场 / 先留在记录卡」只是退出收尾卡，不该抢实心按钮。
+  $('#fcOpen').classList.toggle('primary', done);
+  $('#fcRetry').classList.toggle('primary', !!failed && f.saveDone);
+  $('#fcLater').textContent = done ? '再记一场' : '稍后再看';
+}
+
+async function pollFinish() {
+  const f = S.finish;
+  if (!f || f.polling) return;
+  f.polling = true;
+  const tick = async () => {
+    if (!S.finish || S.finish.sid !== f.sid) return;
+    try {
+      const d = await api('/api/jobs?session_id=' + encodeURIComponent(f.sid) + '&limit=30');
+      const jobs = Array.isArray(d.jobs) ? d.jobs : [];
+      const job = jobs.find((j) => j.kind === 'summary') || null;
+      if (job && job.id !== f.jobId) f.jobId = job.id;
+      f.job = job;
+      if (job && job.status === 'succeeded') {
+        f.done = true;
+        f.failed = '';
+        f.error = '';
+      } else if (job && job.status === 'failed') {
+        f.failed = 'note';
+        f.error = '笔记没有生成成功：' + String(job.error || '模型或任务出了点问题').slice(0, 160);
+      }
+      renderFinish();
+      if (f.done || f.failed) {
+        f.polling = false;
+        if (f.done && !f.autoOpened && document.hasFocus()) {
+          f.autoOpened = true;
+          setTimeout(() => {
+            if (S.finish && S.finish.sid === f.sid && S.view === 'hud') openNoteFor(f.sid);
+          }, 1600);
+        }
+        return;
+      }
+      if (f.saveDone && !job && Date.now() - f.started > 120000) {
+        f.failed = 'note';
+        f.error = '笔记任务迟迟没有开始，可以重试。录音和逐字稿都在。';
+        f.polling = false;
+        renderFinish();
+        return;
+      }
+      if (Date.now() - f.started > 15 * 60 * 1000) {
+        f.failed = 'note';
+        f.error = '生成笔记花的时间有点长，可以稍后重试。录音和逐字稿都在。';
+        f.polling = false;
+        renderFinish();
+        return;
+      }
+    } catch (e) {
+      /* 引擎刚重启/网络抖一下：下一拍再试 */
+    }
+    setTimeout(tick, 2000);
+  };
+  setTimeout(tick, 1200);
+}
+
+function openNoteFor(sid) {
+  if (!sid) { switchView('workbench'); return; }
+  // 笔记页还没交付前，工作台就是这场笔记的可读页；路由保持一致，后面只换落点。
+  S.selectedSession = sid;
+  switchView('workbench', { session: sid });
+}
+
+function dismissFinish() {
+  S.finish = null;
+  S.finishTimer = null;
+  // 不要留住刚停下的房间：hudRoom() 会把它当成「刚被看门狗停掉」，
+  // 立刻又触发一次收尾卡。清掉房间焦点，回到「还没有在记录」的空态。
+  S.hudRoomId = '';
+  S.hudSid = '';
+  S.hudClock = { elapsed: 0, at: 0, paused: false, sid: '' };
+  S.lines = [];
+  S.speakers = [];
+  S.speakersSid = '';
+  S.partial = null;
+  renderHud();
+  refreshRooms();
 }
 
 /* ================================================================ room ops */
@@ -1510,6 +1955,12 @@ async function addRoom() {
     if (r.room && r.room.id) {
       S.selectedId = r.room.id;
       renderSidebar(); renderStage(); renderInspector();
+    }
+    // 只有一路时直接进记录卡；多路仍留在收听，避免 HUD 里还要先选人。
+    const active = S.rooms.filter((x) => ['pending', 'live'].includes(stateInfo(x).k));
+    if (active.length === 1) {
+      focusHudRoom(active[0]);
+      switchView('hud', { force: true, room: active[0].id });
     }
   } catch (e) {
     toast('加不进去：' + e.message);
@@ -1860,8 +2311,13 @@ function hideToTray() {
   const first = !localStorage.getItem('ln.trayHint');
   if (first) {
     localStorage.setItem('ln.trayHint', '1');
-    toast('已最小化到托盘，录音继续。退出请用托盘菜单「退出 LiveNotes」。');
-    setTimeout(() => { invoke('shell_hide').catch(() => {}); }, 1800);
+    // 首次收起：由引擎记一条终身一次的通知，托盘被收进 ^ 也能在通知中心回看。
+    post('/api/notifications/tray_hint', {}).then(() => {
+      pollNotifications();
+    }).catch(() => {
+      toast('已最小化到托盘，录音继续。右键托盘图标可以暂停或结束。');
+    });
+    setTimeout(() => { invoke('shell_hide').catch(() => {}); }, 3200);
     return;
   }
   invoke('shell_hide').catch(() => {});
@@ -1881,23 +2337,6 @@ async function stopRoomsAndQuit(rooms) {
     try { await post('/api/rooms/close', { id: r.id }); } catch (e) {}
   }
   await quitNow();
-}
-
-function openCloseModal(rooms) {
-  openModal(
-    '<h3>还有 ' + rooms.length + ' 路在录音</h3>' +
-    '<p>关闭窗口不会停止录音。要让它在托盘继续跑，还是停止采集并退出？</p>' +
-    '<ul class="modal-list">' + rooms.slice(0, 8).map((r) =>
-      '<li><span class="ch">' + roomCh(r) + '</span><span>' + esc(roomName(r)) + '</span></li>').join('') +
-    (rooms.length > 8 ? '<li>… 还有 ' + (rooms.length - 8) + ' 路</li>' : '') + '</ul>' +
-    '<div class="sheet-actions"><button class="btn" data-mclose>取消</button>' +
-    '<button class="btn" data-mact="tray">最小化到托盘</button>' +
-    '<button class="btn danger" data-mact="quit">停止并退出</button></div>',
-    (sheet) => {
-      sheet.querySelector('[data-mact="tray"]').onclick = () => { closeModal(); hideToTray(); };
-      sheet.querySelector('[data-mact="quit"]').onclick = () => { closeModal(); stopRoomsAndQuit(rooms); };
-    }
-  );
 }
 
 function openQuitModal(n) {
@@ -1920,9 +2359,10 @@ function openQuitModal(n) {
 }
 
 async function requestClose() {
-  const rooms = activeRooms();
-  if (rooms.length) {
-    openCloseModal(rooms);
+  // 记录中 / 收尾中关窗一律收进托盘，不弹询问：关闭窗口不是结束记录。
+  // 想真正退出的人走托盘「退出 LiveNotes」，那里才有停止/退出确认。
+  if (S.finish || activeRooms().length) {
+    hideToTray();
     return;
   }
   const action = await fetchCloseAction();
@@ -2087,6 +2527,8 @@ function closeModal() {
 function paletteActions() {
   const room = selectedRoom();
   const list = [
+    { id: 'hud', label: '打开记录卡', hint: '在录吗、录了多久、最近说了什么', key: '0', icon: '●', run: () => switchView('hud') },
+    { id: 'notif', label: '打开通知', hint: '断流、恢复、笔记生成', icon: '◔', run: () => { toggleNotifDrawer(true); } },
     { id: 'listen', label: '收听工作区', hint: '看所有在听、切换直播间', key: '1', icon: '◉', run: () => switchView('listen') },
     { id: 'workbench', label: '工作台', hint: '场次、字幕、AI 总结', key: '2', icon: '▤', run: () => switchView('workbench') },
     { id: 'files', label: '文件中心', hint: '录音、回放、导出', key: '3', icon: '▧', run: () => switchView('files') },
@@ -2277,8 +2719,341 @@ function navigateToUrl(href) {
 }
 
 /* ================================================================ bind */
+/* ================================================================ 通知
+   引擎产事件，壳决定展示：前台用应用内提示，后台才发 Windows toast。
+   同一行数据也进通知中心；重启后旧通知只留在中心，不再弹一遍。 */
+function notifClock(iso) {
+  const m = String(iso || '').match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})/);
+  if (!m) return '';
+  const today = new Date();
+  const sameDay = Number(m[2]) === today.getMonth() + 1 && Number(m[3]) === today.getDate();
+  return sameDay ? (m[4] + ':' + m[5]) : (m[2] + '-' + m[3] + ' ' + m[4] + ':' + m[5]);
+}
+function notifActionLabel(item) {
+  const v = (item.action || {}).view;
+  return { hud: '打开记录卡', note: '打开笔记', storage: '打开存储设置', diagnostics: '检查问题' }[v]
+    || '查看';
+}
+function renderNotifBadge() {
+  const n = Number(S.notif.unread) || 0;
+  const dot = $('#notifDot');
+  dot.hidden = n <= 0;
+  dot.textContent = n > 9 ? '9+' : String(n);
+  $('#notifBtn').title = n ? (n + ' 条未读通知') : '通知';
+  const un = $('#notifUnread');
+  un.hidden = n <= 0;
+  un.textContent = n + ' 条未读';
+}
+function renderNotifDrawer() {
+  if (!S.notif.open) return;
+  const list = $('#notifList');
+  const items = (S.notif.items || []).slice().sort((a, b) => b.id - a.id);
+  if (!items.length) {
+    list.innerHTML = '<div class="notif-empty">还没有通知。<br>断流、恢复、笔记生成都会记在这里。</div>';
+  } else {
+    list.innerHTML = items.map((x) => {
+      const cls = [x.read ? 'read' : 'unread', x.level || 'info'].join(' ');
+      return '<button class="notif-item ' + cls + '" data-nid="' + x.id + '">' +
+        '<span class="nt">' + esc(x.title) + '</span>' +
+        (x.body ? '<span class="nb">' + esc(x.body) + '</span>' : '') +
+        '<span class="nm"><i></i>' + esc(notifClock(x.created_at)) +
+        '<span>·</span><span>' + esc(notifActionLabel(x)) + '</span></span></button>';
+    }).join('');
+  }
+  renderNotifBadge();
+  renderNotifPrefs();
+}
+function renderNotifPrefs() {
+  const box = $('#npBody');
+  if (!box) return;
+  const st = S.notif.settings;
+  if (!st) { box.innerHTML = '<div class="np-row"><span>正在读取通知设置…</span></div>'; return; }
+  const muted = new Set(st.muted || []);
+  const rows = [
+    '<label class="np-row"><input type="checkbox" data-np="enabled"' +
+      (st.enabled ? ' checked' : '') + '><span class="grow"><b>允许通知</b><br><span>关掉后不再产生新通知，历史仍保留</span></span></label>',
+    '<label class="np-row"><input type="checkbox" data-np="system"' +
+      (st.system ? ' checked' : '') + (st.enabled ? '' : ' disabled') +
+      '><span class="grow"><b>后台用系统通知</b><br><span>窗口不在前台时弹 Windows 通知</span></span></label>',
+  ];
+  if (S.notif.sysDenied) {
+    rows.push('<div class="np-row"><span style="color:var(--amber)">系统通知权限被关闭了，应用内通知中心仍然完整。</span></div>');
+  }
+  rows.push('<div class="np-sep"></div>');
+  (st.kinds || []).forEach((k) => {
+    rows.push('<label class="np-row"><input type="checkbox" data-np="kind" data-kind="' +
+      esc(k.kind) + '"' + (muted.has(k.kind) ? '' : ' checked') +
+      (st.enabled ? '' : ' disabled') + '><span class="grow"><b>' + esc(k.label) +
+      '</b><br><span>' + esc(k.desc) + '</span></span></label>');
+  });
+  rows.push('<button class="btn np-test" id="npTest">发一条测试通知</button>');
+  box.innerHTML = rows.join('');
+}
+async function pollNotifications() {
+  if (S.notif.busy) return;
+  if (!API || !S.online) { setTimeout(pollNotifications, 5000); return; }
+  S.notif.busy = true;
+  const first = !S.notif.booted;
+  try {
+    const d = await api('/api/notifications?since_id=' +
+      encodeURIComponent(first ? 0 : S.notif.latestId) + '&limit=50');
+    S.notif.settings = d.settings || S.notif.settings;
+    const items = Array.isArray(d.items) ? d.items : [];
+    const seen = new Set((S.notif.items || []).map((x) => x.id));
+    const fresh = [];
+    items.forEach((x) => {
+      if (!seen.has(x.id)) { S.notif.items.push(x); seen.add(x.id); }
+      if (!x.delivered) fresh.push(x);
+    });
+    S.notif.items = S.notif.items.slice(-100);
+    S.notif.latestId = Math.max(Number(S.notif.latestId) || 0, Number(d.latest_id) || 0);
+    S.notif.unread = Number(d.unread) || 0;
+
+    if (first) {
+      // 应用启动：只填中心，不把历史通知重播成系统 toast。
+      const ids = items.map((x) => x.id);
+      if (ids.length) post('/api/notifications/delivered', { ids }).catch(() => {});
+      items.forEach((x) => { x.delivered = true; });
+      S.notif.booted = true;
+    } else {
+      const shown = [];
+      for (const x of fresh) {
+        const ok = await presentNotification(x);
+        if (ok) shown.push(x.id);
+      }
+      if (shown.length) post('/api/notifications/delivered', { ids: shown }).catch(() => {});
+    }
+    renderNotifBadge();
+    if (S.notif.open) renderNotifDrawer();
+  } catch (e) {
+    /* 引擎重启/网络抖动：下一拍再试 */
+  } finally {
+    S.notif.busy = false;
+    setTimeout(pollNotifications, S.online ? 4000 : 6000);
+  }
+}
+async function presentNotification(item) {
+  const foreground = !document.hidden && document.hasFocus();
+  S.notif.lastPresent = { id: item.id, at: Date.now(), foreground,
+                          hidden: document.hidden, focus: document.hasFocus() };
+  if (foreground) {
+    inAppNotice(item);
+    return true;
+  }
+  if (S.notif.settings && S.notif.settings.system === false) {
+    S.notif.lastPresent.result = 'system-off';
+    return false;
+  }
+  const ok = await osNotify(item);
+  S.notif.lastPresent.result = ok ? 'system' : 'system-failed';
+  return ok;
+}
+function inAppNotice(item) {
+  const stack = $('#noticeStack');
+  const el = document.createElement('div');
+  el.className = 'notice ' + (item.level || 'info');
+  el.innerHTML = '<span class="nt">' + esc(item.title) + '</span>' +
+    (item.body ? '<span class="nb">' + esc(item.body) + '</span>' : '') +
+    '<span class="nx">' + esc(notifActionLabel(item)) + ' →</span>';
+  el.onclick = () => { remove(); routeNotification(item); };
+  const remove = () => { clearTimeout(el._t); el.remove(); };
+  el._t = setTimeout(remove, 5200);
+  stack.appendChild(el);
+  while (stack.children.length > 3) stack.firstElementChild.remove();
+}
+async function osNotify(item) {
+  if (!TAURI || !TAURI.core || !TAURI.core.invoke) {
+    S.notif.lastOs = { id: item.id, result: 'no-ipc' };
+    return false;
+  }
+  try {
+    // 系统 toast 走 Rust 插件 builder：Web Notification 的权限门是给网页
+    // 通知用的，窗口收起时 requestPermission 可能什么也不显示，反而把
+    // 真正能送达的 Windows 通知挡掉。失败（系统关闭通知/无应用标识）由
+    // Rust 命令返回错误，这里只记录状态给设置页看。
+    await invoke('notify_system', {
+      id: Number(item.id) || 0,
+      title: String(item.title || 'LiveNotes'),
+      body: String(item.body || ''),
+    });
+    S.notif.sysDenied = false;
+    S.notif.lastOs = { id: item.id, result: 'sent' };
+    return true;
+  } catch (e) {
+    S.notif.sysDenied = true;
+    S.notif.lastOs = { id: item.id, result: 'error', error: String(e) };
+    if (S.notif.open) renderNotifPrefs();
+    return false;
+  }
+}
+async function markNotifRead(ids, all) {
+  try {
+    const d = await post('/api/notifications/read',
+      all ? { all: true } : { ids: ids || [] });
+    S.notif.unread = Number(d.unread) || 0;
+    const set = new Set(ids || []);
+    S.notif.items.forEach((x) => { if (all || set.has(x.id)) x.read = true; });
+    renderNotifBadge();
+    if (S.notif.open) renderNotifDrawer();
+  } catch (e) {}
+}
+function routeNotification(item) {
+  markNotifRead([item.id], false);
+  closeNotifDrawer();
+  const act = item.action || {};
+  const sid = act.session_id || item.session_id || '';
+  const view = act.view || '';
+  if (view === 'hud') {
+    if (sid) {
+      S.hudSid = sid;
+      const r = S.rooms.find((x) => x.session_id === sid);
+      if (r) S.hudRoomId = r.id;
+    }
+    if (S.finish && (!sid || S.finish.sid === sid)) {
+      switchView('hud', { force: true, session: sid });
+    } else if (sid && !S.rooms.some((x) => x.session_id === sid)) {
+      openNoteFor(sid);
+    } else {
+      switchView('hud', { force: true, session: sid });
+    }
+    return;
+  }
+  if (view === 'note') {
+    if (S.finish && S.finish.sid === sid) switchView('hud', { force: true, session: sid });
+    else if (sid) openNoteFor(sid);
+    else switchView('workbench');
+    return;
+  }
+  if (view === 'storage') {
+    switchView('settings');
+    toast('设置页里可以查看磁盘和存储选项。');
+    return;
+  }
+  if (view === 'diagnostics') {
+    invoke('diag_open').catch(() => switchView('settings'));
+    return;
+  }
+  if (view === 'follow' || view === 'home') { switchView('listen'); return; }
+  if (sid) {
+    if (act.t != null) switchView('workbench', { session: sid, autoplay: true, t: act.t });
+    else openNoteFor(sid);
+  } else {
+    switchView('workbench');
+  }
+}
+async function routeSystemNotification(id) {
+  const nid = Number(id) || 0;
+  if (!nid) return;
+  let item = (S.notif.items || []).find((x) => Number(x.id) === nid) || null;
+  if (!item) {
+    // 应用重启后点击上一轮留在操作中心的 toast：内存里没有，补一次台账。
+    try {
+      const d = await api('/api/notifications?since_id=0&limit=100');
+      S.notif.settings = d.settings || S.notif.settings;
+      S.notif.items = (d.items || []).slice(-100);
+      S.notif.unread = Number(d.unread) || 0;
+      item = S.notif.items.find((x) => Number(x.id) === nid) || null;
+      renderNotifBadge();
+    } catch (e) {}
+  }
+  if (item) routeNotification(item);
+  else switchView('workbench');
+}
+async function toggleNotifDrawer(open) {
+  S.notif.open = open == null ? !S.notif.open : !!open;
+  const el = $('#notifDrawer');
+  el.hidden = !S.notif.open;
+  if (S.notif.open) {
+    renderNotifDrawer();
+    // 打开中心不等于已读：用户还要点具体条目；提供「全部已读」一键处理。
+    try {
+      const d = await api('/api/notifications?since_id=0&limit=50');
+      S.notif.settings = d.settings || S.notif.settings;
+      S.notif.latestId = Math.max(Number(S.notif.latestId) || 0, Number(d.latest_id) || 0);
+      S.notif.unread = Number(d.unread) || 0;
+      const seen = new Set(S.notif.items.map((x) => x.id));
+      (d.items || []).forEach((x) => { if (!seen.has(x.id)) S.notif.items.push(x); });
+      S.notif.items = S.notif.items.slice(-100);
+      renderNotifDrawer();
+    } catch (e) { renderNotifDrawer(); }
+  }
+}
+function closeNotifDrawer() { toggleNotifDrawer(false); }
+async function updateNotifSettings(patch) {
+  try {
+    const st = await post('/api/notifications/settings', patch);
+    S.notif.settings = st;
+    renderNotifPrefs();
+  } catch (e) {
+    toast('通知设置没保存成功：' + e.message);
+  }
+}
+
+/* 托盘菜单动作：Rust 只发意图，真正的 /api/live/* 由壳页调，窗口隐藏时脚本仍活着。 */
+function latestLiveRoom() {
+  const live = liveRooms();
+  return live.length ? live[live.length - 1] : null;
+}
+function focusHudRoom(room) {
+  if (!room) return false;
+  S.hudRoomId = room.id;
+  if (room.session_id) S.hudSid = room.session_id;
+  return true;
+}
+async function handleTrayAction(action) {
+  const room = latestLiveRoom() || hudRoom();
+  if (action === 'hud') {
+    if (room) focusHudRoom(room);
+    switchView('hud', { force: true, room: room ? room.id : undefined });
+    return;
+  }
+  if (action === 'pause' || action === 'resume') {
+    if (!room || !room.session_id) return;
+    try {
+      await post('/api/live/pause', {
+        session_id: room.session_id, paused: action === 'pause',
+      });
+      toast(action === 'pause' ? '已暂停记录。' : '已继续记录。');
+      if (S.view === 'hud') await pollTranscript();
+      else await refreshRooms();
+    } catch (e) { toast('操作失败：' + e.message); }
+    return;
+  }
+  if (action === 'mark') {
+    if (!room || !room.session_id) return;
+    try {
+      await post('/api/live/mark', { session_id: room.session_id, note: '托盘打点' });
+      toast('已标记此刻。');
+      if (S.view === 'hud') await pollTranscript();
+    } catch (e) { toast('打点失败：' + e.message); }
+    return;
+  }
+  if (action === 'finish') {
+    if (!room) { toast('现在没有在记录的直播间。'); return; }
+    focusHudRoom(room);
+    switchView('hud', { force: true, room: room.id });
+    confirmFinish(room);
+    return;
+  }
+  if (action === 'recent_note') {
+    await openRecentNote();
+  }
+}
+async function openRecentNote() {
+  try {
+    const d = await api('/api/sessions');
+    const rows = Array.isArray(d.sessions) ? d.sessions : [];
+    const best = rows.find((s) => Number(s.n_utterances) > 0) || rows[0];
+    if (best) openNoteFor(best.id);
+    else { switchView('workbench'); toast('还没有笔记。开始记录一场试试。'); }
+  } catch (e) {
+    switchView('workbench');
+  }
+}
+
 function bind() {
   document.addEventListener('click', (e) => {
+    if (S.notif.open && !e.target.closest('#notifDrawer, #notifBtn')) closeNotifDrawer();
     const rail = e.target.closest('.rail-item');
     if (rail) {
       const v = rail.dataset.view;
@@ -2453,6 +3228,78 @@ function bind() {
     if (act === 'remove') return confirmRemoveRoom(room);
     if (act === 'stop') return $('#btnStop').click();
   });
+
+  /* 记录卡：暂停 / 标记 / 结束，以及断流时的补救动作。 */
+  $('#hudPause').onclick = () => togglePause();
+  $('#hudMark').onclick = () => markMoment();
+  $('#hudFinish').onclick = () => confirmFinish(hudRoom());
+  $('#hudMulti').onclick = () => switchView('listen');
+  $('#hudStart').onclick = () => { switchView('listen'); openAdd(); };
+  $('#hudAlert').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-hud-act]');
+    if (!b) return;
+    const room = hudRoom();
+    const act = b.dataset.hudAct;
+    if (act === 'retry') return retryRoom(room);
+    if (act === 'finish') return confirmFinish(room);
+    if (act === 'listen') return switchView('listen');
+    if (act === 'live' && room && room.session_id) {
+      return switchView('live', { session: room.session_id, back: 'hud' });
+    }
+  });
+  $('#hudMarks').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-hud-mark]');
+    if (!b || !S.hudSid) return;
+    switchView('workbench', { session: S.hudSid, autoplay: true, t: Number(b.dataset.hudMark) || 0 });
+  });
+  $('#fcOpen').onclick = () => { if (S.finish) openNoteFor(S.finish.sid); };
+  $('#fcRaw').onclick = () => { if (S.finish) openNoteFor(S.finish.sid); };
+  $('#fcLater').onclick = () => dismissFinish();
+  $('#fcRetry').onclick = () => {
+    const f = S.finish;
+    if (!f) return;
+    f.failed = ''; f.error = ''; f.done = false; f.job = null; f.polling = false;
+    renderFinish();
+    if (f.jobId) {
+      post('/api/jobs/retry', { job_id: f.jobId }).catch(() => {});
+    } else {
+      // 收尾任务没排上队（很少见）：重新提交一份自动总结，等它出现在任务列表里。
+      post('/api/summarize', {
+        session_id: f.sid, mode: 'content', filters: {}, engine: 'auto',
+      }).catch(() => {});
+    }
+    pollFinish();
+  };
+
+  /* 通知中心 / 偏好 */
+  $('#notifBtn').onclick = (e) => { e.stopPropagation(); toggleNotifDrawer(); };
+  $('#notifClose').onclick = () => closeNotifDrawer();
+  $('#notifReadAll').onclick = () => markNotifRead(null, true);
+  $('#notifList').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-nid]');
+    if (!b) return;
+    const item = S.notif.items.find((x) => x.id === Number(b.dataset.nid));
+    if (item) routeNotification(item);
+  });
+  $('#npBody').addEventListener('change', (e) => {
+    const el = e.target;
+    if (!el || !el.dataset || !el.dataset.np) return;
+    if (el.dataset.np === 'enabled') return updateNotifSettings({ notify_enabled: !!el.checked });
+    if (el.dataset.np === 'system') return updateNotifSettings({ notify_system: !!el.checked });
+    if (el.dataset.np === 'kind') {
+      const muted = $$('#npBody input[data-np="kind"]')
+        .filter((x) => !x.checked).map((x) => x.dataset.kind);
+      return updateNotifSettings({ notify_muted: muted });
+    }
+  });
+  $('#npBody').addEventListener('click', (e) => {
+    if (!e.target.closest('#npTest')) return;
+    post('/api/notifications/test', {}).then(() => {
+      pollNotifications();
+      toast('测试通知已发出。');
+    }).catch((err) => toast('测试通知失败：' + err.message));
+  });
+  $('#notifPrefs').addEventListener('toggle', () => { if ($('#notifPrefs').open) renderNotifPrefs(); });
   $('#frameBack').onclick = () => switchView(S.frameBackView || 'listen');
   $('#frame').addEventListener('load', () => {
     S.frameLoads += 1;
@@ -2467,8 +3314,16 @@ function bind() {
   $('#cmdkBtn').onclick = openPalette;
   $('#btnSettings').onclick = () => switchView('settings');
   $('#recPill').onclick = () => {
+    const live = liveRooms();
+    if (live.length === 1) {
+      S.hudRoomId = live[0].id;
+      S.hudSid = live[0].session_id || '';
+      switchView('hud', { force: true, room: live[0].id });
+      return;
+    }
     switchView('listen');
-    setStage(S.stage === 'wall' ? 'signal' : 'wall');
+    if (live.length > 1) setStage('wall');
+    else setStage(S.stage === 'wall' ? 'signal' : 'wall');
   };
   $('#palette').addEventListener('click', (e) => { if (e.target === $('#palette')) closePalette(); });
   $('#pInput').addEventListener('input', () => { S.paletteIndex = 0; renderPalette(); });
@@ -2490,6 +3345,11 @@ function bind() {
       S.paletteOpen ? closePalette() : openPalette();
       return;
     }
+    if (mod && e.key === '0') {
+      e.preventDefault();
+      switchView('hud');
+      return;
+    }
     if (mod && ['1', '2', '3', '4', '5'].includes(e.key)) {
       e.preventDefault();
       const v = ['listen', 'workbench', 'files', 'people', 'settings'][Number(e.key) - 1];
@@ -2503,6 +3363,11 @@ function bind() {
       if (e.key === '[') { e.preventDefault(); setPane('side', !S.panes.side); return; }
       if (e.key === ']') { e.preventDefault(); setPane('insp', !S.panes.insp); return; }
       if (e.key === '\\') { e.preventDefault(); setPane('tx', !S.panes.tx); return; }
+      if (e.key === 'm' || e.key === 'M') { e.preventDefault(); markMoment(); return; }
+      if (e.code === 'Space' || e.key === ' ') { e.preventDefault(); togglePause(); return; }
+    }
+    if (!typing && !mod && S.view === 'hud' && !S.finish &&
+        !(e.target && e.target.closest && e.target.closest('button'))) {
       if (e.key === 'm' || e.key === 'M') { e.preventDefault(); markMoment(); return; }
       if (e.code === 'Space' || e.key === ' ') { e.preventDefault(); togglePause(); return; }
     }
@@ -2563,7 +3428,7 @@ function bind() {
     new ResizeObserver(() => { resizeScope(); applyAnnotLayout(); scheduleStageLayout(); }).observe($('#stageWrap'));
   }
   document.addEventListener('visibilitychange', () => {
-    if (!document.hidden) { resizeScope(); refreshRooms(); }
+    if (!document.hidden) { resizeScope(); refreshRooms(); pollNotifications(); }
   });
 
   if (TAURI && TAURI.event && TAURI.event.listen) {
@@ -2579,6 +3444,18 @@ function bind() {
       requestQuit(Number(e && e.payload) || 0);
     });
     TAURI.event.listen('shell_stop_all', () => stopAll());
+    TAURI.event.listen('shell_tray_action', (e) => {
+      let p = e && e.payload;
+      if (typeof p === 'string') {
+        try { p = JSON.parse(p); } catch (err) { p = { action: p }; }
+      }
+      handleTrayAction((p && (p.action || p.act)) || '');
+    });
+    // 系统通知点击：Rust 侧 on_action 只负责把 id 发回来，路由仍在壳里，
+    // 这样通知中心和 toast 的行为完全一致。
+    TAURI.event.listen('shell_notification_action', (e) => {
+      routeSystemNotification(e && e.payload);
+    });
   }
 }
 
@@ -2597,6 +3474,11 @@ window.__LN_SHELL__ = {
       workbenchReady: S.workbenchReady, frameLoads: S.frameLoads,
       trashCount: S.trashCount, batchMode: S.batchMode,
       batchSelected: S.batchSel.size,
+      hudSid: S.hudSid, finish: !!S.finish,
+      finishDone: !!(S.finish && S.finish.done),
+      notifUnread: S.notif.unread, notifOpen: S.notif.open,
+      notifItems: S.notif.items.length,
+      notifLastPresent: S.notif.lastPresent, notifLastOs: S.notif.lastOs,
     };
   },
   report(tag) {
@@ -2809,5 +3691,7 @@ function init() {
   setTimeout(pollRoomsLoop, 300);
   setTimeout(pollTranscriptLoop, 900);
   setTimeout(pollSessionsLoop, 15000);
+  setInterval(hudTick, 1000);
+  setTimeout(pollNotifications, 1400);
 }
 init();

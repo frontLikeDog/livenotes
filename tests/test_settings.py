@@ -42,7 +42,9 @@ def test_empty_corrupt_and_non_dict_file_are_safe(isolated_paths):
     assert settings.state() == {
         "active": "", "profiles": [], "current": None, "configured": False,
         "prefs": {"topics": 10, "direct_fallback": "", "open_mode": "",
-                  "capture_mode": "", "close_action": "tray"},
+                  "capture_mode": "", "close_action": "tray",
+                  "notify_enabled": True, "notify_system": True,
+                  "notify_sound": True, "notify_muted": []},
         "direct_fallback": {"mode": "ask", "stored": "", "source": "default"},
     }
     settings.path().write_text("{oops", encoding="utf-8")
@@ -102,13 +104,17 @@ def test_activate_delete_duplicate(isolated_paths):
 
 def test_prefs_clamping_and_unknown_keys(isolated_paths):
     assert settings.prefs() == {"topics": 10, "direct_fallback": "", "open_mode": "",
-                                "capture_mode": "", "close_action": "tray"}
+                                "capture_mode": "", "close_action": "tray",
+                                "notify_enabled": True, "notify_system": True,
+                                "notify_sound": True, "notify_muted": []}
     assert settings.set_prefs({"topics": 999})["topics"] == 40
     assert settings.set_prefs({"topics": -5})["topics"] == 3
     assert settings.set_prefs({"topics": "abc"})["topics"] == 3      # 非法值忽略
     out = settings.set_prefs({"unknown": 1, "topics": 12})
     assert out == {"topics": 12, "direct_fallback": "", "open_mode": "",
-                   "capture_mode": "", "close_action": "tray"}
+                   "capture_mode": "", "close_action": "tray",
+                   "notify_enabled": True, "notify_system": True,
+                   "notify_sound": True, "notify_muted": []}
     _write({"version": 2, "profiles": {}, "prefs": {"topics": 100}})
     assert settings.prefs()["topics"] == 40
     _write({"version": 2, "profiles": {}, "prefs": {"topics": "x"}})

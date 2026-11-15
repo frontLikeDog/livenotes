@@ -75,15 +75,34 @@ struct CrashInfo {
     epoch: u64,
 }
 
+/// 托盘只需要「还在录吗、录了多久、几个人、暂停没有」。
+/// 数据来自诊断轮询里已有的 /api/diagnostics，不新增轮询源。
+#[derive(Clone, Default)]
+struct RecSnapshot {
+    count: usize,
+    title: String,
+    elapsed: f64,
+    speakers: usize,
+    paused: bool,
+}
+
 struct TrayUi {
     status: MenuItem<Wry>,
     embedded_item: MenuItem<Wry>,
     rooms_item: MenuItem<Wry>,
     browser_item: MenuItem<Wry>,
+    hud_item: MenuItem<Wry>,
+    pause_item: MenuItem<Wry>,
+    mark_item: MenuItem<Wry>,
+    finish_item: MenuItem<Wry>,
+    recent_item: MenuItem<Wry>,
     tray: TrayIcon<Wry>,
     normal_icon: Image<'static>,
     warn_icon: Option<Image<'static>>,
-    warned: bool,
+    record_icon: Option<Image<'static>>,
+    pause_icon: Option<Image<'static>>,
+    /// normal / record / pause / warn，只有变化时才重设图标，避免每 3 秒闪一下。
+    icon_state: String,
 }
 
 pub struct Diag {
@@ -91,6 +110,7 @@ pub struct Diag {
     engine: Mutex<EngineStatus>,
     stalls: Mutex<HashMap<String, StallInfo>>,
     crashes: Mutex<VecDeque<CrashInfo>>,
+    recording: Mutex<Option<RecSnapshot>>,
     tray: Mutex<Option<TrayUi>>,
     last_export: Mutex<Option<(PathBuf, u64)>>,
     flash: Mutex<Option<(String, Instant)>>,
@@ -120,6 +140,7 @@ impl Diag {
             }),
             stalls: Mutex::new(HashMap::new()),
             crashes: Mutex::new(VecDeque::new()),
+            recording: Mutex::new(None),
             tray: Mutex::new(None),
             last_export: Mutex::new(None),
             flash: Mutex::new(None),
@@ -236,6 +257,47 @@ pub fn warning_icon(base: &Image<'_>) -> Option<Image<'static>> {
     Some(Image::new_owned(px, w, h))
 }
 
+/// 在托盘图标右上角画一个纯色圆点：记录中红点、暂停琥珀点。
+/// 16px 下也能看出角标，不依赖图标本身的颜色。
+pub fn dot_icon(base: &Image<'_>, color: [u8; 4]) -> Option<Image<'static>> {
+    let (w, h) = (base.width(), base.height());
+    if w < 10 || h < 10 {
+        return None;
+    }
+    let mut px = base.rgba().to_vec();
+    if px.len() < (w as usize) * (h as usize) * 4 {
+        return None;
+    }
+    let r = ((w.min(h) as f32) * 0.40).round().max(4.0) as i32;
+    let cx = w as i32 - r - 1;
+    let cy = r + 1;
+    for y in 0..h as i32 {
+        for x in 0..w as i32 {
+            let dx = x - cx;
+            let dy = y - cy;
+            let d2 = dx * dx + dy * dy;
+            if d2 <= r * r {
+                let idx = ((y as usize) * (w as usize) + x as usize) * 4;
+                let c = if d2 > (r - 2).max(1) * (r - 2).max(1) {
+                    [255, 255, 255, 255]
+                } else {
+                    color
+                };
+                px[idx..idx + 4].copy_from_slice(&c);
+            }
+        }
+    }
+    Some(Image::new_owned(px, w, h))
+}
+
+pub fn recording_icon(base: &Image<'_>) -> Option<Image<'static>> {
+    dot_icon(base, [204, 51, 43, 255])
+}
+
+pub fn paused_icon(base: &Image<'_>) -> Option<Image<'static>> {
+    dot_icon(base, [214, 158, 63, 255])
+}
+
 pub fn is_shutdown(app: &AppHandle) -> bool {
     app.try_state::<Diag>()
         .map(|d| d.shutdown.load(Ordering::Relaxed))
@@ -325,9 +387,16 @@ pub fn install_tray(
     embedded_item: MenuItem<Wry>,
     rooms_item: MenuItem<Wry>,
     browser_item: MenuItem<Wry>,
+    hud_item: MenuItem<Wry>,
+    pause_item: MenuItem<Wry>,
+    mark_item: MenuItem<Wry>,
+    finish_item: MenuItem<Wry>,
+    recent_item: MenuItem<Wry>,
     tray: TrayIcon<Wry>,
     normal_icon: Image<'static>,
     warn_icon: Option<Image<'static>>,
+    record_icon: Option<Image<'static>>,
+    pause_icon: Option<Image<'static>>,
 ) {
     let Some(d) = app.try_state::<Diag>() else {
         return;
@@ -337,10 +406,17 @@ pub fn install_tray(
         embedded_item,
         rooms_item,
         browser_item,
+        hud_item,
+        pause_item,
+        mark_item,
+        finish_item,
+        recent_item,
         tray,
         normal_icon,
         warn_icon,
-        warned: false,
+        record_icon,
+        pause_icon,
+        icon_state: "normal".into(),
     });
     refresh_tray(app);
 }
@@ -373,8 +449,24 @@ fn compute_status(d: &Diag) -> StatusView {
         .iter()
         .filter(|c| now.saturating_sub(c.epoch) <= RECENT_CRASH_S)
         .count();
+    let rec = d
+        .recording
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
     let flash = d.flash.lock().unwrap_or_else(|e| e.into_inner()).clone();
-    status_view(&engine_state, stall_count, crash_count, flash.as_ref())
+    status_view(
+        &engine_state,
+        stall_count,
+        crash_count,
+        rec.as_ref(),
+        flash.as_ref(),
+    )
+}
+
+fn fmt_elapsed(secs: f64) -> String {
+    let total = secs.max(0.0).round() as u64;
+    format!("{:02}:{:02}:{:02}", total / 3600, (total % 3600) / 60, total % 60)
 }
 
 /// 托盘状态的纯函数：测试不需要构造 `Diag`（它会拖进 MenuItem/TrayIcon 的
@@ -383,6 +475,7 @@ fn status_view(
     engine_state: &str,
     stall_count: usize,
     crash_count: usize,
+    rec: Option<&RecSnapshot>,
     flash: Option<&(String, Instant)>,
 ) -> StatusView {
     let flash_active = flash
@@ -410,18 +503,41 @@ fn status_view(
         }
     } else if stall_count > 0 {
         (
-            format!("⚠ {stall_count} 路断流 · 打开诊断"),
-            format!("LiveNotes · {stall_count} 路断流（右键托盘导出诊断）"),
+            "⚠ 听不到声音 · 右键打开记录卡".to_string(),
+            rec.map(|r| format!("听不到声音 · {}", r.title))
+                .unwrap_or_else(|| format!("LiveNotes · {stall_count} 路断流")),
         )
     } else if crash_count > 0 {
         (
             "⚠ 房间视图异常 · 打开诊断".to_string(),
             "LiveNotes · 房间视图异常（已尝试自动重载）".to_string(),
         )
+    } else if let Some(r) = rec {
+        let t = fmt_elapsed(r.elapsed);
+        if r.paused {
+            (
+                format!("◐ 已暂停 {t} · {}", fallback_title(&r.title)),
+                format!("已暂停 {t} · {}", fallback_title(&r.title)),
+            )
+        } else if r.count > 1 {
+            (
+                format!("● 正在记录 {} 个直播间 · 最近 {t}", r.count),
+                format!("正在记录 {} 个直播间 · 最近 {t}", r.count),
+            )
+        } else {
+            (
+                format!("● 正在记录 {t} · {} 位说话人", r.speakers),
+                format!(
+                    "正在记录 {t} · {} 位说话人 · {}",
+                    r.speakers,
+                    fallback_title(&r.title)
+                ),
+            )
+        }
     } else {
         (
-            "✓ 运行正常 · 打开诊断".to_string(),
-            "LiveNotes · 运行正常".to_string(),
+            "○ 未在记录".to_string(),
+            "LiveNotes · 未在记录".to_string(),
         )
     };
     if flash_active {
@@ -433,8 +549,31 @@ fn status_view(
     StatusView {
         text,
         tooltip,
-        warn: !matches!(engine_state, "ok") || stall_count > 0 || crash_count > 0,
+        warn: !matches!(engine_state, "ok")
+            || stall_count > 0
+            || crash_count > 0,
     }
+}
+
+fn fallback_title(title: &str) -> &str {
+    if title.trim().is_empty() {
+        "这场直播"
+    } else {
+        title
+    }
+}
+
+/// 菜单动作用：当前是否暂停。壳页不在时菜单文字也能说对。
+pub fn recording_paused(app: &AppHandle) -> bool {
+    app.try_state::<Diag>()
+        .and_then(|d| {
+            d.recording
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+                .map(|r| r.paused)
+        })
+        .unwrap_or(false)
 }
 
 pub fn refresh_tray(app: &AppHandle) {
@@ -448,25 +587,66 @@ pub fn refresh_tray(app: &AppHandle) {
         .unwrap_or_else(|e| e.into_inner())
         .state
         == "ok";
+    let rec = d
+        .recording
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    let has_live = rec.as_ref().map(|r| r.count > 0).unwrap_or(false);
+    let paused = rec.as_ref().map(|r| r.paused).unwrap_or(false);
+    let pause_text = if paused { "继续记录" } else { "暂停记录" };
+    let icon_state = if view.warn {
+        "warn"
+    } else if has_live && paused {
+        "pause"
+    } else if has_live {
+        "record"
+    } else {
+        "normal"
+    }
+    .to_string();
     let handles = {
         let mut guard = d.tray.lock().unwrap_or_else(|e| e.into_inner());
         let Some(tray) = guard.as_mut() else {
             return;
         };
-        let changed = tray.warned != view.warn;
-        tray.warned = view.warn;
+        let changed = tray.icon_state != icon_state;
+        tray.icon_state = icon_state.clone();
         (
             tray.status.clone(),
             tray.embedded_item.clone(),
             tray.browser_item.clone(),
+            tray.hud_item.clone(),
+            tray.pause_item.clone(),
+            tray.mark_item.clone(),
+            tray.finish_item.clone(),
+            tray.recent_item.clone(),
             tray.tray.clone(),
             tray.normal_icon.clone(),
             tray.warn_icon.clone(),
+            tray.record_icon.clone(),
+            tray.pause_icon.clone(),
             changed,
-            view.warn,
+            icon_state,
         )
     };
-    let (status, embedded, browser, tray, normal, warn_icon, changed, warn) = handles;
+    let (
+        status,
+        embedded,
+        browser,
+        hud_item,
+        pause_item,
+        mark_item,
+        finish_item,
+        recent_item,
+        tray,
+        normal,
+        warn_icon,
+        record_icon,
+        pause_icon,
+        changed,
+        icon_state,
+    ) = handles;
     let text = view.text.clone();
     let tooltip = view.tooltip.clone();
     let app2 = app.clone();
@@ -475,12 +655,19 @@ pub fn refresh_tray(app: &AppHandle) {
         // 引擎没起来时打开的会是一个连不上的地址/空控制台，和「多房间采集」一起置灰。
         let _ = embedded.set_enabled(engine_ok);
         let _ = browser.set_enabled(engine_ok);
+        let _ = recent_item.set_enabled(engine_ok);
+        let _ = hud_item.set_enabled(engine_ok && has_live);
+        let _ = pause_item.set_enabled(engine_ok && has_live);
+        let _ = pause_item.set_text(pause_text);
+        let _ = mark_item.set_enabled(engine_ok && has_live && !paused);
+        let _ = finish_item.set_enabled(engine_ok && has_live);
         let _ = tray.set_tooltip(Some(tooltip.as_str()));
         if changed {
-            let icon = if warn {
-                warn_icon.unwrap_or(normal)
-            } else {
-                normal
+            let icon = match icon_state.as_str() {
+                "warn" => warn_icon.unwrap_or(normal),
+                "record" => record_icon.unwrap_or(normal),
+                "pause" => pause_icon.unwrap_or(normal),
+                _ => normal,
             };
             let _ = tray.set_icon(Some(icon));
         }
@@ -829,6 +1016,8 @@ fn spawn_live_watch(app: AppHandle) {
                     .map(|d| *d.stall_threshold.lock().unwrap_or_else(|e| e.into_inner()))
                     .unwrap_or(STALL_DEFAULT_S);
                 let mut seen = HashSet::new();
+                let count = sessions.len();
+                let mut rec: Option<RecSnapshot> = None;
                 for item in sessions {
                     let sid = item.get("id").and_then(|x| x.as_str()).unwrap_or("");
                     if sid.is_empty() {
@@ -840,8 +1029,40 @@ fn spawn_live_watch(app: AppHandle) {
                         seen.insert(sid.to_string());
                         update_stall(&app, sid, title, idle, threshold);
                     }
+                    let elapsed = item
+                        .get("elapsed")
+                        .and_then(|x| x.as_f64())
+                        .unwrap_or(0.0);
+                    let speakers = item
+                        .get("n_speakers")
+                        .and_then(|x| x.as_u64())
+                        .unwrap_or(0) as usize;
+                    let paused = item
+                        .get("paused")
+                        .and_then(|x| x.as_bool())
+                        .unwrap_or(false);
+                    let better = rec
+                        .as_ref()
+                        .map(|r| elapsed > r.elapsed)
+                        .unwrap_or(true);
+                    if better {
+                        rec = Some(RecSnapshot {
+                            count,
+                            title: title.to_string(),
+                            elapsed,
+                            speakers,
+                            paused,
+                        });
+                    }
+                }
+                if let Some(r) = rec.as_mut() {
+                    r.count = count;
+                }
+                if let Some(d) = app.try_state::<Diag>() {
+                    *d.recording.lock().unwrap_or_else(|e| e.into_inner()) = rec;
                 }
                 expire_missing_stalls(&app, &seen);
+                refresh_tray(&app);
             }
         });
 }
@@ -882,6 +1103,45 @@ fn update_from_live_list(app: &AppHandle, v: &Value) {
         }
     }
     expire_missing_stalls(app, &busy);
+
+    // 老引擎没有 /api/diagnostics 时，托盘计时退回到 /api/live/list。
+    let rows = v
+        .get("sessions")
+        .and_then(|x| x.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let running: Vec<&Value> = rows
+        .iter()
+        .filter(|r| r.get("running").and_then(|x| x.as_bool()).unwrap_or(false))
+        .collect();
+    let mut rec: Option<RecSnapshot> = None;
+    for row in &running {
+        let elapsed = row.get("elapsed").and_then(|x| x.as_f64()).unwrap_or(0.0);
+        if rec.as_ref().map(|r| elapsed > r.elapsed).unwrap_or(true) {
+            rec = Some(RecSnapshot {
+                count: running.len(),
+                title: row
+                    .get("title")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                elapsed,
+                speakers: row
+                    .get("speakers")
+                    .and_then(|x| x.as_array())
+                    .map(|a| a.len())
+                    .unwrap_or(0),
+                paused: row
+                    .get("paused")
+                    .and_then(|x| x.as_bool())
+                    .unwrap_or(false),
+            });
+        }
+    }
+    if let Some(d) = app.try_state::<Diag>() {
+        *d.recording.lock().unwrap_or_else(|e| e.into_inner()) = rec;
+    }
+    refresh_tray(app);
 }
 
 fn update_stall(app: &AppHandle, sid: &str, title: &str, idle: f64, threshold: f64) {
@@ -1676,14 +1936,39 @@ mod tests {
 
     #[test]
     fn tray_status_puts_engine_before_streams() {
-        let view = status_view("ok", 1, 0, None);
-        assert_eq!(view.text, "⚠ 1 路断流 · 打开诊断");
+        let view = status_view("ok", 1, 0, None, None);
+        assert!(view.text.contains("听不到声音"), "{}", view.text);
         assert!(view.warn);
 
         // 引擎整体挂了比“某一路断流”更严重，必须先显示引擎。
-        let view = status_view("exited", 1, 0, None);
+        let view = status_view("exited", 1, 0, None, None);
         assert!(view.text.contains("引擎已退出"), "{}", view.text);
         assert!(view.tooltip.contains("右键托盘导出诊断"));
+    }
+
+    #[test]
+    fn tray_status_shows_recording_timer_and_speakers() {
+        let rec = RecSnapshot {
+            count: 1,
+            title: "阿哲".into(),
+            elapsed: 2530.0,
+            speakers: 2,
+            paused: false,
+        };
+        let view = status_view("ok", 0, 0, Some(&rec), None);
+        assert_eq!(view.text, "● 正在记录 00:42:10 · 2 位说话人");
+        assert!(view.tooltip.contains("阿哲"));
+        assert!(!view.warn);
+
+        let paused = RecSnapshot {
+            paused: true,
+            ..rec.clone()
+        };
+        let view = status_view("ok", 0, 0, Some(&paused), None);
+        assert!(view.text.starts_with("◐ 已暂停 00:42:10"));
+
+        let empty = status_view("ok", 0, 0, None, None);
+        assert_eq!(empty.text, "○ 未在记录");
     }
 
     #[test]

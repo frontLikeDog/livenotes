@@ -14,6 +14,7 @@ use tauri::{
     webview::NewWindowResponse,
     Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder,
 };
+use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_opener::OpenerExt;
 
 pub struct ShellState {
@@ -175,6 +176,7 @@ pub fn run() {
     };
     let builder = builder
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_notification::init())
         .invoke_handler(tauri::generate_handler![
             rooms::room_open,
             rooms::room_close,
@@ -197,7 +199,9 @@ pub fn run() {
             spike_report,
             shell_close_ack,
             shell_hide,
+            shell_show,
             shell_quit,
+            notify_system,
             diag::diag_snapshot,
             diag::diag_export,
             diag::diag_open_logs,
@@ -431,6 +435,21 @@ pub fn run() {
             let _ = win.set_focus();
             let _ = window.close();
 
+            // 系统通知点击：把通知行 id 发回壳页，由壳决定跳记录卡还是笔记。
+            // 只有 tap 才算「打开」；忽略 dismiss 等动作。
+            {
+                let notify_app = app.handle().clone();
+                let _ = app.notification().on_action(move |action| {
+                    if action.action_id() != "tap" {
+                        return;
+                    }
+                    if let Some(n) = action.notification() {
+                        let _ = notify_app.emit("shell_notification_action", n.id());
+                    }
+                    show_main(&notify_app);
+                });
+            }
+
             // 关主窗口 = 收到托盘，不停止采集。真正退出走托盘「退出 LiveNotes」；
             // 自动化/调试可用 LIVENOTES_CLOSE_TO_TRAY=0 关掉这个拦截。
             // 有录音时壳页会先弹「最小化 / 停止并退出 / 取消」，所以这里不直接
@@ -519,9 +538,18 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
     // 第一项就是状态：正常时显示「运行正常」，失败时变成「引擎已退出 / N 路断流」，
     // 点它直接打开诊断页。托盘菜单是引擎挂了以后仍然可用的唯一 UI。
     let status = MenuItem::with_id(app, "diag", "… 正在启动引擎", true, None::<&str>)?;
+    let sep0 = PredefinedMenuItem::separator(app)?;
+    // 记录向菜单：状态、打开记录卡、暂停、打点、结束。空闲时置灰而不是隐藏，
+    // 用户能看到「现在为什么不能暂停」。
+    let hud = MenuItem::with_id(app, "hud", "打开记录卡", false, None::<&str>)?;
+    let pause = MenuItem::with_id(app, "pause", "暂停记录", false, None::<&str>)?;
+    let mark = MenuItem::with_id(app, "mark", "标记此刻", false, None::<&str>)?;
+    let finish = MenuItem::with_id(app, "finish", "结束并生成笔记…", false, None::<&str>)?;
+    let recent = MenuItem::with_id(app, "recent_note", "打开最近笔记", false, None::<&str>)?;
+    let sep1 = PredefinedMenuItem::separator(app)?;
     let export = MenuItem::with_id(app, "diag_export", "导出诊断包…", true, None::<&str>)?;
     let logs = MenuItem::with_id(app, "diag_logs", "打开日志目录", true, None::<&str>)?;
-    let sep = PredefinedMenuItem::separator(app)?;
+    let sep2 = PredefinedMenuItem::separator(app)?;
     let show = MenuItem::with_id(app, "show", "显示主窗口", true, None::<&str>)?;
     let stopall = MenuItem::with_id(app, "stopall", "停止全部录音", true, None::<&str>)?;
     // 引擎就绪前先禁用：否则点开控制台只会在 JS 里报「状态不存在」。
@@ -529,14 +557,21 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
     let rooms = MenuItem::with_id(app, "rooms", "收听工作区", false, None::<&str>)?;
     // 「在浏览器中打开」保留为兜底：实时监听等依赖真实浏览器标签页的流程走这里。
     let browser = MenuItem::with_id(app, "browser", "在浏览器中打开", false, None::<&str>)?;
+    let sep3 = PredefinedMenuItem::separator(app)?;
     let quit = MenuItem::with_id(app, "quit", "退出 LiveNotes", true, None::<&str>)?;
     let menu = Menu::with_items(
         app,
-        &[&status, &export, &logs, &sep, &show, &stopall, &embedded, &rooms, &browser, &quit],
+        &[
+            &status, &sep0, &hud, &pause, &mark, &finish, &sep1, &recent, &show,
+            &stopall, &sep2, &export, &logs, &embedded, &rooms, &browser, &sep3,
+            &quit,
+        ],
     )?;
 
     let normal_icon = tauri::image::Image::from_bytes(include_bytes!("../icons/32x32.png"))?;
     let warn_icon = diag::warning_icon(&normal_icon);
+    let record_icon = diag::recording_icon(&normal_icon);
+    let pause_icon = diag::paused_icon(&normal_icon);
     let tray = TrayIconBuilder::with_id("main")
         .tooltip("LiveNotes · 正在启动引擎")
         .icon(normal_icon.clone())
@@ -544,6 +579,23 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {
             "show" => show_main(app),
+            "hud" => {
+                show_main(app);
+                emit_tray_action(app, "hud");
+            }
+            "pause" => {
+                let action = if diag::recording_paused(app) { "resume" } else { "pause" };
+                emit_tray_action(app, action);
+            }
+            "mark" => emit_tray_action(app, "mark"),
+            "finish" => {
+                show_main(app);
+                emit_tray_action(app, "finish");
+            }
+            "recent_note" => {
+                show_main(app);
+                emit_tray_action(app, "recent_note");
+            }
             "stopall" => {
                 show_main(app);
                 let _ = app.emit_to("main", "shell_stop_all", ());
@@ -597,11 +649,26 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
         embedded,
         rooms,
         browser,
+        hud,
+        pause,
+        mark,
+        finish,
+        recent,
         tray,
         normal_icon,
         warn_icon,
+        record_icon,
+        pause_icon,
     );
     Ok(())
+}
+
+fn emit_tray_action(app: &tauri::AppHandle, action: &str) {
+    let _ = app.emit_to(
+        "main",
+        "shell_tray_action",
+        serde_json::json!({ "action": action }),
+    );
 }
 
 fn show_main(app: &tauri::AppHandle) {
@@ -666,9 +733,35 @@ fn shell_close_ack() {
 #[tauri::command]
 fn shell_hide(app: tauri::AppHandle) {
     ack_close();
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.hide();
+    match app.get_webview_window("main") {
+        Some(window) => {
+            if let Err(e) = window.hide() {
+                boot_log(&format!("shell_hide failed: {e}"));
+            }
+        }
+        None => boot_log("shell_hide main window not found"),
     }
+}
+
+/// 系统通知点击后把主窗口带回前台。Web Notification API 不保证点通知会
+/// 激活应用；走插件自己的 builder 才能拿到 `tap` 事件。
+#[tauri::command]
+fn shell_show(app: tauri::AppHandle) {
+    show_main(&app);
+}
+
+/// 发一条 Windows 系统通知。`id` 用引擎通知行的主键，点击时原样带回壳，
+/// 壳才能跳到对应的记录卡或笔记，而不是只打开首页。
+#[tauri::command]
+fn notify_system(app: tauri::AppHandle, id: i64, title: String, body: String) -> Result<(), String> {
+    let id = id.clamp(0, i32::MAX as i64) as i32;
+    app.notification()
+        .builder()
+        .id(id)
+        .title(title)
+        .body(body)
+        .show()
+        .map_err(|e| e.to_string())
 }
 
 /// 壳页确认退出后调用；走正常 Exit 事件回收引擎。

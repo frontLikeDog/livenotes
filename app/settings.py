@@ -112,6 +112,12 @@ DEFAULT_PREFS = {
     "open_mode": "",          # 桌面壳新窗口：external / internal；空 = 未选（桌面默认 internal）
     "capture_mode": "",       # 桌面采集：browser / direct / external；空 = 未选（桌面默认 browser）
     "close_action": "tray",   # 桌面壳关窗口：tray = 最小化到托盘 / quit = 退出程序
+    # 通知：总开关、后台系统 toast、声音、按事件关闭（kind 列表）。
+    # 应用内通知中心不受总开关影响 —— 关了通知也该能查到发生过什么。
+    "notify_enabled": True,
+    "notify_system": True,
+    "notify_sound": True,
+    "notify_muted": [],
 }
 
 FALLBACK_MODES = ("ask", "auto", "per_room", "shared", "none")
@@ -140,6 +146,32 @@ def _close_action(v: Any) -> str:
     return s if s in CLOSE_ACTIONS else ""
 
 
+def _notify_muted(v: Any) -> list[str] | None:
+    """按事件关闭通知。只收字符串 kind，去重、截断，别让设置文件里塞进任意结构。"""
+    if not isinstance(v, (list, tuple)):
+        return None
+    out: list[str] = []
+    for x in v:
+        s = str(x or "").strip()[:40]
+        if s and s not in out:
+            out.append(s)
+    return out
+
+
+def _as_bool(v: Any) -> bool | None:
+    """JSON 里应该是 true/false；字符串 "true"/"0" 也认，其他一律忽略。"""
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)) and v in (0, 1):
+        return bool(v)
+    s = str(v or "").strip().lower()
+    if s in ("1", "true", "yes", "on"):
+        return True
+    if s in ("0", "false", "no", "off"):
+        return False
+    return None
+
+
 def prefs() -> dict[str, Any]:
     """与连接档案无关的全局偏好：AI 主题数、direct 失败策略、桌面新窗口方式。"""
     d = load()
@@ -153,6 +185,10 @@ def prefs() -> dict[str, Any]:
     p["open_mode"] = _open_mode(p.get("open_mode"))
     p["capture_mode"] = _capture_mode(p.get("capture_mode"))
     p["close_action"] = _close_action(p.get("close_action")) or "tray"
+    for k in ("notify_enabled", "notify_system", "notify_sound"):
+        b = _as_bool(p.get(k))
+        p[k] = DEFAULT_PREFS[k] if b is None else b
+    p["notify_muted"] = _notify_muted(p.get("notify_muted")) or []
     return p
 
 
@@ -197,6 +233,14 @@ def set_prefs(patch: dict[str, Any]) -> dict[str, Any]:
             elif k == "close_action":
                 v = _close_action(v)
                 if not v:
+                    continue
+            elif k == "notify_muted":
+                v = _notify_muted(v)
+                if v is None:
+                    continue
+            elif k in ("notify_enabled", "notify_system", "notify_sound"):
+                v = _as_bool(v)
+                if v is None:
                     continue
             p[k] = v
         d["prefs"] = p

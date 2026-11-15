@@ -276,6 +276,28 @@ CREATE TABLE IF NOT EXISTS session_metrics (
     created_at  TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_sm_finished ON session_metrics(finished_at);
+
+-- 应用内通知：引擎产事件，壳负责投递（前台应用内提示 / 后台系统 toast）。
+-- dedupe_key 唯一是幂等的核心：看门狗每 10 秒检查一次，不能每轮都弹一遍。
+-- delivered_at 只表示"已经展示过"，read_at 表示"用户看过"；重启后旧通知
+-- 不再弹系统 toast，但未读仍然留在通知中心。
+CREATE TABLE IF NOT EXISTS notifications (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind         TEXT NOT NULL,              -- stream_stalled / note_ready / ...
+    level        TEXT NOT NULL DEFAULT 'info', -- info | warn | error
+    session_id   TEXT NOT NULL DEFAULT '',
+    title        TEXT NOT NULL,
+    body         TEXT NOT NULL DEFAULT '',
+    action_json  TEXT NOT NULL DEFAULT '{}', -- {view, session_id, room_id, t}
+    dedupe_key   TEXT NOT NULL DEFAULT '',
+    created_at   TEXT NOT NULL,
+    delivered_at TEXT,
+    read_at      TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_notif_dedupe
+    ON notifications(dedupe_key) WHERE dedupe_key <> '';
+CREATE INDEX IF NOT EXISTS idx_notif_created ON notifications(created_at);
+CREATE INDEX IF NOT EXISTS idx_notif_read ON notifications(read_at);
 """
 
 _FTS_TRIGGERS = """

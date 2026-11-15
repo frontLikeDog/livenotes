@@ -54,6 +54,9 @@ data/_chrome_probe_*/
 # ---- 结构化日志：本机事实，不进仓库 ----
 data/logs/
 
+# ---- 验收截图：本机运行产物，不进仓库 ----
+docs/prototypes/shots/hud-check/
+
 # ---- desktop shell ----
 desktop/node_modules/
 desktop/.build/

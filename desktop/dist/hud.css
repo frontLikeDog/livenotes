@@ -1,0 +1,194 @@
+/* 记录 HUD + 通知 · 与 shell.css 共用主题 token
+   用户点开始后从监控台切到这张卡：只回答「在录吗 / 录了多久 / 出事了吗」。
+   波形、队列、阶段码、token 全部不进这里；计时取音频累计秒数，暂停会停住。 */
+.hud-view{position:relative;height:100%;min-height:0;overflow:auto;display:flex;
+  flex-direction:column;align-items:center;padding:36px 24px 40px}
+.hud-card{width:min(760px,100%);margin-top:2vh;display:flex;flex-direction:column;align-items:center}
+.hud-status-row{display:flex;align-items:center;gap:12px;width:100%;justify-content:center;
+  min-height:24px;flex-wrap:wrap}
+.hud-state{display:inline-flex;align-items:center;gap:7px;font-size:11.5px;color:var(--muted)}
+.hud-state i{width:7px;height:7px;border-radius:50%;background:var(--red);flex:0 0 auto}
+.hud-state b{font-weight:550;letter-spacing:.2px}
+.hud-card[data-state="recording"] .hud-state i{animation:pulse 1.8s ease-in-out infinite}
+.hud-card[data-state="paused"] .hud-state{color:var(--amber)}
+.hud-card[data-state="paused"] .hud-state i{background:transparent;border:1px solid var(--amber);animation:none}
+.hud-card[data-state="stalled"] .hud-state,
+.hud-card[data-state="silent"] .hud-state,
+.hud-card[data-state="error"] .hud-state{color:var(--red)}
+.hud-card[data-state="stalled"] .hud-state i,
+.hud-card[data-state="silent"] .hud-state i,
+.hud-card[data-state="error"] .hud-state i{background:var(--red);animation:none}
+.hud-room{font-size:11px;color:var(--faint);max-width:min(440px,80vw);overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+.hud-timer{
+  margin:18px 0 6px;font:300 88px/1.05 var(--mono);letter-spacing:-3px;
+  font-variant-numeric:tabular-nums;color:var(--ink);user-select:text;
+}
+.hud-card[data-state="paused"] .hud-timer{opacity:.4}
+.hud-stats{font-size:11.5px;color:var(--muted);font-variant-numeric:tabular-nums;
+  min-height:18px;letter-spacing:.2px}
+.hud-actions{display:flex;align-items:center;gap:8px;margin:24px 0 0;flex-wrap:wrap;
+  justify-content:center}
+.hud-actions .btn{height:34px;padding:0 16px;font-size:12px;border-radius:8px}
+.hud-actions .btn.hud-main{height:38px;padding:0 22px;font-size:12.5px;font-weight:650;
+  box-shadow:0 6px 20px rgba(230,181,102,.14)}
+.hud-alert{margin:20px 0 0;width:100%;padding:10px 13px;border-radius:8px;
+  border:1px solid rgba(232,119,109,.3);background:var(--red-soft);color:var(--red);
+  font-size:11.5px;display:flex;align-items:center;gap:10px}
+.hud-alert b{font-weight:600}
+.hud-alert .grow{flex:1}
+.hud-alert .btn{height:24px;padding:0 9px;font-size:10px;color:var(--red);
+  border-color:rgba(232,119,109,.35)}
+.hud-recent{width:100%;margin-top:34px;border-top:1px solid var(--line);padding-top:16px}
+.hud-label{font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--faint);
+  margin-bottom:9px}
+.hud-lines{max-height:286px;overflow:auto;display:flex;flex-direction:column;gap:2px;
+  padding-right:4px}
+.hud-line{display:grid;grid-template-columns:9px 72px minmax(0,1fr);gap:8px;
+  align-items:baseline;padding:7px 8px;border-radius:7px;animation:hud-in .12s ease-out}
+.hud-line:hover{background:var(--panel-2)}
+.hud-line i{width:7px;height:7px;border-radius:50%;align-self:center}
+.hud-line .who{font-size:10.5px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;
+  white-space:nowrap}
+.hud-line .say{font-size:13.5px;line-height:1.65;color:var(--ink);word-break:break-word}
+.hud-line .at{font-size:9.5px;color:var(--faint);font-variant-numeric:tabular-nums;
+  margin-left:4px;white-space:nowrap}
+@keyframes hud-in{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+.hud-partial{display:flex;gap:8px;align-items:baseline;padding:8px;color:var(--faint);
+  font-size:12.5px;font-style:italic}
+.hud-partial::before{content:"";width:6px;height:6px;border-radius:50%;
+  border:1px solid var(--faint);align-self:center;flex:0 0 auto}
+.hud-empty{padding:22px 8px;color:var(--faint);font-size:11.5px;text-align:center}
+.hud-marks{width:100%;margin-top:12px;display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.hud-marks .hm-label{font-size:9.5px;color:var(--faint);margin-right:2px}
+.hud-marks button{height:22px;padding:0 8px;border:1px solid var(--line);border-radius:5px;
+  color:var(--muted);font-size:9.5px;font-variant-numeric:tabular-nums}
+.hud-marks button:hover{border-color:var(--amber-line);color:var(--amber)}
+.hud-foot{width:100%;margin-top:20px;padding-top:12px;border-top:1px solid var(--line);
+  display:flex;align-items:center;gap:8px;font-size:9.5px;color:var(--faint)}
+.hud-foot i{font-style:normal;color:#3A4652}
+.hud-more{font-size:9.5px;color:var(--muted);border-bottom:1px dashed var(--line-2);
+  padding:0 0 1px}
+.hud-more:hover{color:var(--amber);border-color:var(--amber-line)}
+
+/* 空闲记录卡 */
+.hud-idle{width:min(560px,100%);margin-top:10vh;text-align:center}
+.hud-idle-mark{width:46px;height:46px;border-radius:12px;margin:0 auto 18px;
+  display:flex;align-items:center;justify-content:center;font-weight:800;font-size:15px;
+  color:#1A1306;background:linear-gradient(145deg,#E9BE74,#C98F3B);
+  box-shadow:0 0 0 1px rgba(230,181,102,.25),0 8px 24px rgba(230,181,102,.10)}
+.hud-idle h2{font-size:20px;font-weight:600;margin:0 0 10px}
+.hud-idle p{font-size:12px;line-height:1.9;color:var(--muted);margin:0 0 22px}
+.hud-idle .btn{height:36px;padding:0 20px;font-size:12px}
+
+/* 收尾进度卡：三步，可后台；失败时先保录音和逐字稿 */
+.finish-card{width:min(620px,100%);margin-top:8vh;background:var(--panel);
+  border:1px solid var(--line);border-radius:14px;padding:28px 30px 24px;
+  box-shadow:0 18px 60px rgba(0,0,0,.24)}
+.fc-kicker{font-size:9.5px;letter-spacing:.18em;text-transform:uppercase;color:var(--amber);
+  margin-bottom:8px}
+.finish-card h2{font-size:19px;font-weight:600;margin:0 0 8px}
+.finish-card>p{font-size:11.5px;line-height:1.8;color:var(--muted);margin:0 0 20px}
+.fc-steps{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:2px}
+.fc-steps li{display:grid;grid-template-columns:16px minmax(0,1fr) auto;gap:10px;
+  align-items:center;padding:11px 8px;border-radius:8px;color:var(--faint)}
+.fc-steps li i{width:12px;height:12px;border-radius:50%;border:1px solid var(--line-2)}
+.fc-steps li b{font-size:12px;font-weight:500;color:var(--muted)}
+.fc-steps li span{font-size:10px;color:var(--faint);font-variant-numeric:tabular-nums}
+.fc-steps li.on{background:var(--panel-2)}
+.fc-steps li.on i{border-color:var(--amber);border-top-color:transparent;
+  animation:fc-spin .8s linear infinite}
+.fc-steps li.on b{color:var(--ink)}
+.fc-steps li.done i{border-color:var(--jade);background:var(--jade);position:relative}
+.fc-steps li.done i::after{content:"";position:absolute;left:3px;top:1px;width:3px;height:6px;
+  border:1px solid #0B0F13;border-top:0;border-left:0;transform:rotate(42deg)}
+.fc-steps li.done b{color:var(--muted)}
+.fc-steps li.fail i{border-color:var(--red);background:var(--red)}
+.fc-steps li.fail b{color:var(--red)}
+@keyframes fc-spin{to{transform:rotate(360deg)}}
+.fc-note{margin:14px 0 0;padding:10px 12px;border-radius:8px;background:var(--red-soft);
+  border:1px solid rgba(232,119,109,.25);color:var(--red);font-size:11px;line-height:1.7}
+.fc-actions{display:flex;gap:8px;margin-top:22px;flex-wrap:wrap;align-items:center}
+.fc-actions .btn{height:30px;padding:0 13px;font-size:11px}
+.fc-actions .btn.primary{margin-left:auto}
+
+/* 紧凑 HUD：窗口窄时先保计时和主按钮 */
+@media (max-width:640px){
+  body.hud-mode .rail{display:none}
+  body.hud-mode .body,
+  body.hud-mode .body.no-side,
+  body.hud-mode .body.no-insp{grid-template-columns:0 0 minmax(0,1fr) 0}
+  body.hud-mode .cmdk,
+  body.hud-mode .rec-pill,
+  body.hud-mode .crumb{display:none}
+  .hud-view{padding:20px 14px 28px}
+  .hud-timer{font-size:56px;letter-spacing:-2px;margin-top:10px}
+  .hud-actions .btn{height:32px;padding:0 12px}
+  .hud-actions .btn.hud-main{height:36px;padding:0 16px}
+  .hud-lines{max-height:210px}
+  .hud-line{grid-template-columns:8px 58px minmax(0,1fr)}
+  .finish-card{padding:20px 18px}
+}
+
+/* ================================================================ 通知 */
+.notif-btn{position:relative}
+.notif-dot{position:absolute;top:1px;right:0;min-width:14px;height:14px;padding:0 4px;
+  border-radius:7px;background:var(--red);color:#fff;font-size:9px;font-style:normal;
+  font-weight:700;display:flex;align-items:center;justify-content:center;
+  border:1.5px solid var(--bg);box-sizing:content-box}
+html[data-theme="paper"] .notif-dot{border-color:var(--panel)}
+.notif-drawer{position:fixed;top:48px;right:12px;width:min(390px,calc(100vw - 24px));
+  max-height:calc(100vh - 88px);background:var(--panel);border:1px solid var(--line-2);
+  border-radius:12px;box-shadow:0 18px 60px rgba(0,0,0,.38);z-index:80;
+  display:flex;flex-direction:column;overflow:hidden}
+.notif-head{display:flex;align-items:center;gap:9px;padding:12px 13px;
+  border-bottom:1px solid var(--line)}
+.notif-head b{font-size:12.5px;font-weight:600}
+.notif-unread{font-size:9.5px;color:var(--amber);background:var(--amber-soft);
+  border:1px solid var(--amber-line);border-radius:10px;padding:1px 7px}
+.notif-link{font-size:9.5px;color:var(--faint)}
+.notif-link:hover{color:var(--amber)}
+.notif-list{overflow:auto;min-height:90px;max-height:min(56vh,520px);padding:4px}
+.notif-item{width:100%;text-align:left;padding:10px 10px 10px 12px;border-radius:8px;
+  border-left:2px solid transparent;display:flex;flex-direction:column;gap:3px;position:relative}
+.notif-item:hover{background:var(--panel-2)}
+.notif-item.unread{border-left-color:var(--amber)}
+.notif-item.read{opacity:.62}
+.notif-item .nt{font-size:11.5px;font-weight:550;color:var(--ink);line-height:1.5}
+.notif-item .nb{font-size:10.5px;color:var(--muted);line-height:1.6}
+.notif-item .nm{font-size:9px;color:var(--faint);display:flex;gap:7px;align-items:center;
+  font-variant-numeric:tabular-nums}
+.notif-item .nm i{width:5px;height:5px;border-radius:50%;background:var(--faint)}
+.notif-item.warn .nm i{background:var(--amber)}
+.notif-item.error .nm i{background:var(--red)}
+.notif-empty{padding:34px 18px;text-align:center;color:var(--faint);font-size:10.5px;
+  line-height:1.8}
+.notif-foot{border-top:1px solid var(--line);padding:8px 12px}
+.notif-prefs summary{font-size:10px;color:var(--faint);cursor:pointer;list-style:none}
+.notif-prefs summary::-webkit-details-marker{display:none}
+.notif-prefs summary:hover{color:var(--muted)}
+.np-body{display:flex;flex-direction:column;gap:9px;padding:11px 2px 4px}
+.np-row{display:flex;align-items:center;gap:9px;font-size:10.5px;color:var(--muted)}
+.np-row input{accent-color:var(--amber);width:13px;height:13px}
+.np-row .grow{flex:1}
+.np-row b{font-weight:500;color:var(--ink);font-size:10.5px}
+.np-row span{font-size:9px;color:var(--faint)}
+.np-sep{height:1px;background:var(--line);margin:2px 0}
+.np-test{height:24px;padding:0 9px;font-size:9.5px;align-self:flex-start}
+
+/* 应用内通知 toast：右下角，最多 3 条，点击才跳转，不自动抢焦点 */
+.notice-stack{position:fixed;right:16px;bottom:40px;width:min(342px,calc(100vw - 32px));
+  display:flex;flex-direction:column;gap:8px;z-index:90;pointer-events:none}
+.notice{pointer-events:auto;background:var(--panel);border:1px solid var(--line-2);
+  border-left:2px solid var(--amber);border-radius:9px;padding:10px 11px;
+  box-shadow:0 12px 34px rgba(0,0,0,.32);display:flex;flex-direction:column;gap:3px;
+  animation:notice-in .16s ease-out;cursor:pointer}
+.notice.warn{border-left-color:var(--amber)}
+.notice.error{border-left-color:var(--red)}
+.notice.info{border-left-color:var(--jade)}
+.notice .nt{font-size:11.5px;font-weight:600;color:var(--ink);line-height:1.5}
+.notice .nb{font-size:10px;color:var(--muted);line-height:1.6}
+.notice .nx{font-size:9px;color:var(--faint);margin-top:2px}
+@keyframes notice-in{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+html[data-theme="paper"] .notice,
+html[data-theme="paper"] .notif-drawer{background:#FFFDF8}

@@ -464,6 +464,11 @@ class LiveSession:
         # 和上面的管线停滞（有语音但没定稿）是两件事，不能共用一个标志。
         self._chunk_stall_warned = False
         self._chunk_stall_warned_at = 0.0
+        # 断流/静音的「第几次」：通知去重要按 episode，而不是按场次。
+        # 一场直播断三次就该收到三次提醒，但同一次断流不能每轮看门狗都弹。
+        self._chunk_stall_episode = 0
+        self._chunk_recovered_episode = 0
+        self._silent_episode = 0
         self._last_feed_mono = 0.0
         self.last_feed_at = ""
         # 「这一场从什么时候开始等音频」：断流看门狗要区分「刚建会话、第一块还没到」
@@ -551,6 +556,7 @@ class LiveSession:
             # 块回来了：这次断流的预警作废，下一次再断还能再报一次。
             # 记下缺口秒数，事后能从事件流里还原「哪一段没录到」。
             # prev=0 表示预警发生在「第一块之前」，没有缺口可算，但仍要复位。
+            self._chunk_recovered_episode = self._chunk_stall_episode
             self._chunk_stall_warned = False
             metrics.METRICS.inc("live.capture_resumed", 1, session_id=self.id)
             logs.log_event("live.capture_resumed", session_id=self.id,
@@ -582,7 +588,14 @@ class LiveSession:
             return False
         self._chunk_stall_warned = True
         self._chunk_stall_warned_at = time.monotonic()
+        self._chunk_stall_episode += 1
         return True
+
+    def take_chunk_recovered(self) -> int:
+        """取走「刚恢复」的 episode。服务端看门狗从这里发恢复通知。"""
+        ep = self._chunk_recovered_episode
+        self._chunk_recovered_episode = 0
+        return ep
 
     def stop(self, finalize: bool = True) -> dict:
         with self._stop_lock:
@@ -831,6 +844,8 @@ class LiveSession:
         用采样数换算秒（而不是墙钟）：暂停/积压时时间轴不动，静音时长也不该涨。
         """
         if level < LIVE_ZERO_RMS:
+            if self.zero_s <= 0:
+                self._silent_episode += 1
             self.zero_s += samples / SAMPLE_RATE
         else:
             self.zero_s = 0.0
@@ -1323,6 +1338,14 @@ class LiveSession:
         with self.lock:
             last_line = self.utts[-1]["text"][:60] if self.utts else ""
             n_recent = len(self.utts)
+            n_speakers = 0
+            if self.recluster and self.recluster.get("speakers"):
+                n_speakers = len(self.recluster["speakers"])
+            elif self.clusters:
+                n_speakers = sum(
+                    1 for sid in self.clusters.order()
+                    if self.clusters.counts.get(sid, 0) > 0
+                    or self.clusters.seconds.get(sid, 0.0) > 0)
         return {
             "id": self.id, "title": self.title,
             "state": "running" if self.running else "stopped",
@@ -1332,6 +1355,7 @@ class LiveSession:
             "queued": self.q.qsize(), "dropped": self.dropped,
             "paused": bool(self.paused), "speech": bool(self.speech),
             "n_utterances": self.n_utts, "n_recent_utts": n_recent,
+            "n_speakers": n_speakers,
             "recognized_s": round(self.recognized_s, 1),
             "speech_s": round(min(self.speech_s, elapsed), 1),
             "last_speech_age_s": round(max(0.0, elapsed - self.last_speech_s), 1),
@@ -1820,6 +1844,35 @@ def mark_chunk_stall_warned(sid: str) -> bool:
     """给服务端断流预警用：同一场只发一次，块回来后由 feed() 复位。"""
     s = _SESSIONS.get(sid)
     return bool(s and s.mark_chunk_stall_warned())
+
+
+def stall_episode(sid: str) -> int:
+    s = _SESSIONS.get(sid)
+    return int(getattr(s, "_chunk_stall_episode", 0) or 0)
+
+
+def silent_episode(sid: str) -> int:
+    s = _SESSIONS.get(sid)
+    return int(getattr(s, "_silent_episode", 0) or 0)
+
+
+def take_recovered_sessions() -> list[dict]:
+    """取走所有「断流后恢复」的场次。
+
+    恢复通知不能在 feed() 里同步写库：feed 是每 256ms 一次的热路径，
+    一次 SQLite 写入就够把采集拖慢。看门狗每 10 秒取一次，晚几秒无所谓。
+    """
+    with _LOCK:
+        items = list(_SESSIONS.values())
+    out: list[dict] = []
+    for s in items:
+        take = getattr(s, "take_chunk_recovered", None)
+        if not callable(take):
+            continue
+        ep = int(take() or 0)
+        if ep:
+            out.append({"id": s.id, "title": s.title, "episode": ep})
+    return out
 
 
 def chunk_age(sid: str) -> float | None:
