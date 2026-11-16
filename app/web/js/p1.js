@@ -535,6 +535,7 @@
       api('/api/qa/suggest').then(function (d) {
         if (seq !== S.seq) return;
         body.innerHTML = '';
+        if (d.enabled === false) { loadAskHistory(body, seq); return; }
         body.appendChild(group('可以这样问'));
         var box = document.createElement('div');
         box.className = 'sp-suggests';

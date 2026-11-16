@@ -394,7 +394,10 @@ def main() -> int:
           f"FTS5 trigram = {store.FTS_TRIGRAM}", flush=True)
     # 性能档位：环境变量优先（config 内部处理），否则读设置。
     try:
-        perf = config.apply_perf_mode(settings.prefs().get("perf_mode") or "auto")
+        prefs = settings.prefs()
+        perf = config.apply_perf_mode(
+            prefs.get("perf_mode") or "auto",
+            prefs.get("low_power_pause", True))
         print("[perf] 模式=%s 核数=%s 内存=%sMB" % (
             perf["mode"], (perf.get("detected") or {}).get("cores"),
             (perf.get("detected") or {}).get("ram_mb")), flush=True)

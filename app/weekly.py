@@ -23,6 +23,10 @@ _LOCK = threading.RLock()
 _WORKER: threading.Thread | None = None
 _STOP = threading.Event()
 _LAST_CHECK = 0.0
+_LAST_RUN = 0.0
+
+#: 设置页给出的生成时间 -> (weekday, hour)。周一 = 0。
+WEEKLY_TIMES = {"mon-09": (0, 9), "mon-12": (0, 12), "sun-20": (6, 20)}
 
 
 def week_range(period: str = "") -> tuple[date, date, str]:
@@ -112,9 +116,22 @@ def build(period: str = "", use_llm: bool = True,
     return row
 
 
-def _should_notify() -> bool:
-    """周三之后不再补发，只在周报页显示（docs/36 §7.3）。"""
-    return date.today().weekday() <= 2
+def scheduled_at(now: datetime | None = None) -> datetime:
+    """最近一次应该生成周报的时刻（按设置里的周一/周日与小时）。"""
+    now = now or datetime.now()
+    key = str(settings.prefs().get("weekly_time") or "mon-09")
+    weekday, hour = WEEKLY_TIMES.get(key, WEEKLY_TIMES["mon-09"])
+    target = now.replace(hour=hour, minute=0, second=0, microsecond=0)
+    target -= timedelta(days=(now.weekday() - weekday) % 7)
+    if target > now:
+        target -= timedelta(days=7)
+    return target
+
+
+def _should_notify(now: datetime | None = None) -> bool:
+    """生成后三天内补发通知，之后只在周报页显示（docs/36 §7.3）。"""
+    now = now or datetime.now()
+    return 0 <= (now - scheduled_at(now)).total_seconds() <= 3 * 86400
 
 
 def ensure(period: str = "", notify_user: bool | None = None) -> dict | None:
@@ -218,18 +235,20 @@ def migrate_old_files() -> int:
 
 
 def _loop() -> None:
-    global _LAST_CHECK
+    global _LAST_CHECK, _LAST_RUN
     # 启动后等 20 秒，让 migrations / 索引先跑完。
     if _STOP.wait(20.0):
         return
     while not _STOP.is_set():
         try:
             now = datetime.now()
-            # 每天 09:00 之后检查一次；进程一直开着也不会重复生成。
-            today9 = now.replace(hour=9, minute=0, second=0, microsecond=0)
-            if now >= today9 and (time.time() - _LAST_CHECK) > 6 * 3600:
+            target = scheduled_at(now)
+            # 到点后检查一次；同一周的生成时刻只触发一次，进程一直开着也不会重复。
+            if target.timestamp() > _LAST_RUN and now >= target \
+                    and (time.time() - _LAST_CHECK) > 6 * 3600:
                 _LAST_CHECK = time.time()
                 ensure()
+                _LAST_RUN = target.timestamp()
         except Exception:
             logs.log_event("weekly.tick_failed", level="warn")
         _STOP.wait(1800.0)

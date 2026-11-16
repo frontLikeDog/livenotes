@@ -2,7 +2,7 @@
 """P1 后端单元与轻量集成：二维码、偏好、关注、笔记库、书签、问答、周报、导出。"""
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 
 import pytest
 
@@ -102,18 +102,34 @@ def test_p1_prefs_defaults_and_bounds():
     assert p["perf_mode"] == "auto"
     assert p["follow_interval_s"] == 120
     assert p["weekly_enabled"] is True
+    assert p["weekly_time"] == "mon-09"
     assert p["qa_enabled"] is True
+    assert p["qa_suggest_enabled"] is True
+    assert p["auto_record_enabled"] is False
+    assert p["max_rooms"] == 5
+    assert p["low_power_pause"] is True
 
     settings.set_prefs({"perf_mode": "turbo", "follow_interval_s": 5,
-                        "weekly_enabled": False, "qa_enabled": "off"})
+                        "weekly_enabled": False, "qa_enabled": "off",
+                        "qa_suggest_enabled": "off", "auto_record_enabled": "on",
+                        "weekly_time": "tue-10", "max_rooms": 7,
+                        "low_power_pause": "off"})
     p = settings.prefs()
     assert p["perf_mode"] == "auto"          # 非法枚举不落盘
     assert p["follow_interval_s"] == 60      # 下限
     assert p["weekly_enabled"] is False
+    assert p["weekly_time"] == "mon-09"      # 非法时间不落盘
     assert p["qa_enabled"] is False
+    assert p["qa_suggest_enabled"] is False
+    assert p["auto_record_enabled"] is True
+    assert p["max_rooms"] == 5               # 只接受 3 / 5 / 8
+    assert p["low_power_pause"] is False
 
     settings.set_prefs({"follow_interval_s": 999})
-    assert settings.prefs()["follow_interval_s"] == 300
+    assert settings.prefs()["follow_interval_s"] == 600
+    settings.set_prefs({"weekly_time": "sun-20", "max_rooms": 8})
+    assert settings.prefs()["weekly_time"] == "sun-20"
+    assert settings.prefs()["max_rooms"] == 8
 
 
 def test_notify_p1_kinds_and_groups():
@@ -177,6 +193,44 @@ def test_follows_interval_uses_prefs_and_lite_floor(monkeypatch):
     assert follows.interval_s() == 180    # 低配不低于 180
     settings.set_prefs({"follow_interval_s": 240})
     assert follows.interval_s() == 240
+    settings.set_prefs({"follow_interval_s": 600})
+    assert follows.interval_s() == 600
+
+
+def test_follows_max_rooms_uses_pref(db):
+    settings.set_prefs({"max_rooms": 8})
+    assert follows.max_rooms() == 8
+    active = [{"state": "live"} for _ in range(8)]
+    assert follows._auto_capacity_left(active) is False
+    assert follows._auto_capacity_left(active[:7]) is True
+
+
+def test_auto_record_master_switch_off_falls_back_to_notice(db, monkeypatch):
+    row = store.add_follow(db, "douyin", "room2",
+                           "https://live.douyin.com/room2", "小北")
+    fid = int(row["id"])
+    store.update_follow(db, fid, notify=True, auto_record=True)
+    row = store.get_follow(db, fid)
+    settings.set_prefs({"auto_record_enabled": False})
+
+    started, notified = [], []
+    monkeypatch.setattr(follows, "_start_auto_record",
+                        lambda *a, **k: started.append(1) or {"ok": True})
+    monkeypatch.setattr(follows.notify, "follow_live",
+                        lambda *a, **k: notified.append(a))
+    follows.apply_probe(row, {"state": "live", "name": "小北",
+                              "live_started_at": "2026-11-17T20:00:00"},
+                        active=[])
+    assert started == []
+    assert notified
+
+    settings.set_prefs({"auto_record_enabled": True})
+    follows.apply_probe(store.get_follow(db, fid),
+                        {"state": "offline"}, active=[])
+    follows.apply_probe(store.get_follow(db, fid),
+                        {"state": "live", "name": "小北",
+                         "live_started_at": "2026-11-18T20:00:00"}, active=[])
+    assert started == [1]
 
 
 # ---------------------------------------------------------------- 笔记库
@@ -321,6 +375,18 @@ def test_weekly_disabled_does_not_write(db):
     assert store.report_get(db, period="2026-W46") is None
 
 
+def test_weekly_schedule_follows_pref():
+    settings.set_prefs({"weekly_time": "sun-20"})
+    assert weekly.scheduled_at(datetime(2026, 11, 15, 21, 0)) == \
+        datetime(2026, 11, 15, 20, 0)
+    assert weekly._should_notify(datetime(2026, 11, 17, 9, 0)) is True
+    assert weekly._should_notify(datetime(2026, 11, 19, 9, 0)) is False
+
+    settings.set_prefs({"weekly_time": "mon-09"})
+    assert weekly.scheduled_at(datetime(2026, 11, 17, 10, 0)) == \
+        datetime(2026, 11, 16, 9, 0)
+
+
 # ---------------------------------------------------------------- 导出
 
 def test_export_note_md_includes_bookmarks_not_transcript(db, tmp_path):
@@ -353,7 +419,9 @@ def test_export_note_md_includes_bookmarks_not_transcript(db, tmp_path):
 
 # ---------------------------------------------------------------- 性能
 
-def test_perf_lite_changes_runtime_flags():
+def test_perf_lite_changes_runtime_flags(monkeypatch):
+    monkeypatch.setattr(config, "system_power", lambda: {
+        "supported": False, "on_battery": False, "percent": -1, "charging": False})
     try:
         config.apply_perf_mode("lite")
         p = config.perf()
@@ -375,3 +443,26 @@ def test_perf_lite_changes_runtime_flags():
         assert p["effective"]["animations"] is True
     finally:
         config.apply_perf_mode("auto")
+
+
+def test_low_power_pauses_realtime_only_when_enabled(monkeypatch):
+    monkeypatch.setattr(config, "system_power", lambda: {
+        "supported": True, "on_battery": True, "percent": 15, "charging": False})
+    try:
+        config.apply_perf_mode("full", True)
+        assert config.low_power() is True
+        assert config.partials_enabled() is False
+        assert config.perf()["effective"]["live_highlight_card"] is False
+
+        config.apply_perf_mode("full", False)
+        assert config.low_power() is False
+        assert config.partials_enabled() is True
+
+        config.apply_perf_mode("full", True)
+        monkeypatch.setattr(config, "system_power", lambda: {
+            "supported": True, "on_battery": True, "percent": 55,
+            "charging": False})
+        assert config.low_power() is False
+        assert config.partials_enabled() is True
+    finally:
+        config.apply_perf_mode("auto", True)

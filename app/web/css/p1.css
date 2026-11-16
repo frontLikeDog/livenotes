@@ -631,6 +631,13 @@ dialog.p1-dialog[open]{animation:dialogIn .2s var(--ease)}
   .bm-row{grid-template-columns:44px minmax(0,1fr) auto}
 }
 
+/* 关注页：自动记录总开关关着时的提示 */
+.follow-auto-hint{
+  margin:0 0 12px;padding:9px 12px;border:1px solid var(--amber-line);
+  border-radius:8px;background:var(--amber-soft);color:var(--amber);
+  font-size:11px;line-height:1.6;
+}
+
 /* 从搜索 / 周报定位到原话时的短暂高亮 */
 .is-target{outline:2px solid var(--amber-line);outline-offset:2px;
   box-shadow:0 0 0 5px var(--amber-soft);transition:box-shadow .3s var(--ease)}

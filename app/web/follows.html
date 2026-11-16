@@ -73,6 +73,8 @@ try{var _t=new URLSearchParams(location.search).get('theme');if(_t)document.docu
       </label>
     </div>
 
+    <p class="follow-auto-hint" id="followAutoHint" hidden>自动记录总开关关着。到「设置 → 回访」打开后，勾选「自动记录」的主播才会在开播时自动开始。</p>
+
     <div class="follow-page-list" id="followList" role="list" aria-label="关注的主播列表"></div>
 
     <div class="page-empty" id="followEmpty" hidden>
@@ -82,7 +84,7 @@ try{var _t=new URLSearchParams(location.search).get('theme');if(_t)document.docu
       <button class="btn btn-primary" type="button" id="followEmptyAdd">添加第一个关注</button>
     </div>
 
-    <p class="page-footnote">移除关注不会删除历史笔记；自动记录只对设为「自动」的主播生效。检测与提醒都在本机完成。</p>
+    <p class="page-footnote">移除关注不会删除历史笔记；自动记录只对设为「自动」的主播生效，并受「设置 → 回访」总开关与同时记录上限约束。检测与提醒都在本机完成。</p>
   </div>
 </main>
 
@@ -132,7 +134,8 @@ try{var _t=new URLSearchParams(location.search).get('theme');if(_t)document.docu
 (function () {
   'use strict';
   var S = { items: [], stats: {}, filter: 'all', interval: 120, maxRooms: 5,
-    checking: false, previewOk: false, previewPlatform: '', preview: null, seq: 0 };
+    autoRecordEnabled: true, checking: false, previewOk: false,
+    previewPlatform: '', preview: null, seq: 0 };
 
   function visible() {
     return S.items.filter(function (item) {
@@ -233,7 +236,9 @@ try{var _t=new URLSearchParams(location.search).get('theme');if(_t)document.docu
           box.disabled = false;
           if (d.error) { box.checked = !box.checked; P1.toast(d.error); return; }
           item.auto_record = box.checked;
-          P1.toast(box.checked ? '开播后会自动开始记录' : '开播后只提醒，不自动记录');
+          P1.toast(box.checked && !S.autoRecordEnabled
+            ? '已设为自动；还需在 设置 → 回访 里打开「开播后自动记录」'
+            : box.checked ? '开播后会自动开始记录' : '开播后只提醒，不自动记录');
         }).catch(function () { box.disabled = false; box.checked = !box.checked; });
     });
     auto.appendChild(box);
@@ -296,6 +301,12 @@ try{var _t=new URLSearchParams(location.search).get('theme');if(_t)document.docu
     notify.indeterminate = on > 0 && on < S.items.length;
     notify.disabled = !S.items.length;
     P1.$('#followCheckAll').disabled = S.checking || !S.items.length;
+
+    var autoHint = P1.$('#followAutoHint');
+    if (autoHint) {
+      autoHint.hidden = S.autoRecordEnabled ||
+        !S.items.some(function (i) { return i.auto_record; });
+    }
   }
 
   function apply(d) {
@@ -303,6 +314,7 @@ try{var _t=new URLSearchParams(location.search).get('theme');if(_t)document.docu
     S.stats = d.stats || {};
     if (d.interval_s) S.interval = d.interval_s;
     if (d.max_rooms) S.maxRooms = d.max_rooms;
+    if (d.auto_record_enabled != null) S.autoRecordEnabled = !!d.auto_record_enabled;
     render();
   }
 

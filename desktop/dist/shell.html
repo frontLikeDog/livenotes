@@ -372,17 +372,22 @@
             <button data-setpane="appearance" class="on">外观</button>
             <button data-setpane="capture">采集</button>
             <button data-setpane="desktop">桌面版</button>
-            <button data-setpane="perf">性能</button>
             <button data-setpane="mobile">手机访问</button>
             <button data-setpane="model">模型与连接</button>
             <button data-setpane="analysis">AI 分析</button>
+            <button data-setpane="revisit">回访</button>
+            <button data-setpane="perf">性能</button>
             <button data-setpane="about">关于</button>
           </nav>
           <div class="set-content" id="setContent">
             <section class="set-pane on" data-pane="appearance">
+              <header class="set-pane-head">
+                <h2>外观</h2>
+                <p>选择界面主题，立即应用到所有窗口。</p>
+              </header>
               <div class="set-group">
                 <div class="set-row set-row-top">
-                  <div class="set-label"><span>主题</span><p>跟随系统时，会随 macOS / Windows 的明暗设置切换。</p></div>
+                  <div class="set-label"><span>主题</span><p>暗色适合长时间监听，亮色适合白天阅读与整理。选择「跟随系统」会随系统外观自动切换。</p></div>
                   <div class="theme-grid">
                     <label class="theme-card" data-theme-choice="light">
                       <input type="radio" name="themeChoice" value="light">
@@ -401,11 +406,15 @@
                     </label>
                   </div>
                 </div>
-                <p class="set-note">顶栏右侧的太阳 / 月亮可以随时快速切换。设置只影响这台电脑。</p>
               </div>
+              <p class="set-note">主题会记录在本机，下次打开仍然生效。顶栏右侧也提供了日间 / 夜间快捷切换。</p>
             </section>
 
             <section class="set-pane" data-pane="capture">
+              <header class="set-pane-head">
+                <h2>采集</h2>
+                <p>抖音直取失败后的处理方式。改完立即生效，不用重启采集代理。</p>
+              </header>
               <div class="set-group">
                 <div class="set-row">
                   <div class="set-label"><span>采集回退方式</span><p>直取失败时怎么继续录。</p></div>
@@ -419,11 +428,15 @@
                     </select>
                   </div>
                 </div>
-                <p class="set-note" id="fallbackHint">直取失败时会先问你。</p>
               </div>
+              <p class="set-note" id="fallbackHint">直取失败时会先问你。</p>
             </section>
 
             <section class="set-pane" data-pane="desktop">
+              <header class="set-pane-head">
+                <h2>桌面版</h2>
+                <p>窗口与采集行为，只影响桌面客户端。</p>
+              </header>
               <div class="set-group">
                 <div class="set-row">
                   <div class="set-label"><span>打开方式</span><p>点击直播链接、打开页面时用哪边。</p></div>
@@ -450,33 +463,93 @@
               </div>
             </section>
 
+            <section class="set-pane" data-pane="revisit">
+              <header class="set-pane-head">
+                <h2>回访</h2>
+                <p>决定开播提醒、自动记录和周报的节奏。都只在本机生效。</p>
+              </header>
+              <div class="set-group">
+                <div class="set-row">
+                  <div class="set-label"><span>关注检测频率</span><p>每隔多久检查一次关注的主播是否开播。频率越高越及时，也更占资源。</p></div>
+                  <div class="ctrl">
+                    <select id="prefFollowInterval" aria-label="关注检测频率">
+                      <option value="1">每 1 分钟</option>
+                      <option value="2" selected>每 2 分钟（推荐）</option>
+                      <option value="5">每 5 分钟</option>
+                      <option value="10">每 10 分钟</option>
+                    </select>
+                  </div>
+                </div>
+                <div class="set-row">
+                  <div class="set-label"><span>开播后自动记录</span><p>只对勾选了「自动」的主播生效。开始前仍会留一条通知，可以随时停下。</p></div>
+                  <label class="switch"><input type="checkbox" id="prefAutoRecord" aria-label="开播后自动记录"><span class="switch-track"></span></label>
+                </div>
+                <div class="set-row">
+                  <div class="set-label"><span>每周回看</span><p>把这一周的笔记收成一页周报，列出反复出现的主题和下周三件事。</p></div>
+                  <div class="ctrl ctrl-inline">
+                    <label class="switch"><input type="checkbox" id="prefWeekly" aria-label="每周回看"><span class="switch-track"></span></label>
+                    <select id="prefWeeklyTime" aria-label="周报生成时间">
+                      <option value="mon-09">周一 09:00</option>
+                      <option value="mon-12">周一 12:00</option>
+                      <option value="sun-20">周日 20:00</option>
+                    </select>
+                  </div>
+                </div>
+                <div class="set-row">
+                  <div class="set-label"><span>桌面通知</span><p>开播、笔记生成完成、周报准备好时，在系统通知里提醒一次。</p></div>
+                  <label class="switch"><input type="checkbox" id="prefNotify" aria-label="桌面通知"><span class="switch-track"></span></label>
+                </div>
+                <div class="set-row">
+                  <div class="set-label"><span>搜索里的「问笔记」建议</span><p>打开搜索面板时，根据最近笔记给出几个可以追问的问题。</p></div>
+                  <label class="switch"><input type="checkbox" id="prefAskSuggest" aria-label="搜索里的问笔记建议"><span class="switch-track"></span></label>
+                </div>
+              </div>
+              <p class="set-note">关注最多 50 个。自动记录仍然受同时记录上限约束，超出时会先发通知。</p>
+            </section>
+
             <section class="set-pane" data-pane="perf">
+              <header class="set-pane-head">
+                <h2>性能</h2>
+                <p>在及时性和资源占用之间选一个平衡。切换后从下一场记录开始生效。</p>
+              </header>
               <div class="set-group">
-                <div class="set-row">
-                  <div class="set-label"><span>性能档位</span><p>低配会关掉实时高光卡、降低轮询频率；录音和笔记不受影响。</p></div>
-                  <div class="ctrl"><select id="prefPerfMode">
-                    <option value="auto">自动（按这台电脑判断）</option>
-                    <option value="full">流畅</option>
-                    <option value="lite">低配</option>
-                  </select></div>
+                <div class="perf-grid" role="radiogroup" aria-label="性能模式">
+                  <label class="perf-card" data-perf-choice="lite">
+                    <input type="radio" name="perfMode" value="lite">
+                    <span class="perf-name">省电</span>
+                    <span class="perf-desc">转写延迟到结束后再跑，适合长时间挂机。</span>
+                    <span class="perf-meta">约 0.6× CPU</span>
+                  </label>
+                  <label class="perf-card" data-perf-choice="auto">
+                    <input type="radio" name="perfMode" value="auto" checked>
+                    <span class="perf-name">均衡 <em>推荐</em></span>
+                    <span class="perf-desc">实时转写 + 结束后总结，日常默认。</span>
+                    <span class="perf-meta">约 1× CPU</span>
+                  </label>
+                  <label class="perf-card" data-perf-choice="full">
+                    <input type="radio" name="perfMode" value="full">
+                    <span class="perf-name">高性能</span>
+                    <span class="perf-desc">更快的实时字幕与高光识别，多路时更吃资源。</span>
+                    <span class="perf-meta">约 1.8× CPU</span>
+                  </label>
                 </div>
                 <div class="set-row">
-                  <div class="set-label"><span>关注检测间隔</span><p>多久检查一次关注的直播间是否开播。</p></div>
-                  <div class="ctrl unit-ctrl"><input type="number" id="prefFollowInterval" min="60" max="300" step="10" value="120"><span class="unit">秒</span></div>
+                  <div class="set-label"><span>同时记录上限</span><p>超出的直播间只会提醒，不会自动开始。</p></div>
+                  <div class="ctrl">
+                    <select id="prefMaxRooms" aria-label="同时记录上限">
+                      <option value="3">3 个</option>
+                      <option value="5" selected>5 个</option>
+                      <option value="8">8 个</option>
+                    </select>
+                  </div>
                 </div>
-                <p class="set-note">录音参数在下一场记录生效；界面与轮询立即生效。</p>
+                <div class="set-row">
+                  <div class="set-label"><span>低电量时暂停转写</span><p>电量低于 20% 且未接电源时，先停实时字幕与高光，录音继续保留。</p></div>
+                  <label class="switch"><input type="checkbox" id="prefLowPower" aria-label="低电量时暂停转写"><span class="switch-track"></span></label>
+                </div>
               </div>
-              <div class="set-group">
-                <div class="set-row">
-                  <div class="set-label"><span>自动生成周报</span><p>每周一整理上一周的回看。</p></div>
-                  <label class="switch"><input type="checkbox" id="prefWeekly"><span class="switch-track"></span></label>
-                </div>
-                <div class="set-row">
-                  <div class="set-label"><span>问笔记</span><p>在搜索面板里用自然语言提问，只根据你的笔记回答。</p></div>
-                  <label class="switch"><input type="checkbox" id="prefQa"><span class="switch-track"></span></label>
-                </div>
-              </div>
-              <div class="set-group">
+              <p class="set-note">性能设置只影响本机转写与界面刷新，不会改变已保存的音频和笔记。</p>
+              <div class="set-group set-group-sub">
                 <div class="set-row set-row-top">
                   <div class="set-label"><span>性能自检</span><p id="perfAdvice">看看这台电脑建议用哪一档，以及实际生效的参数。</p></div>
                   <div class="ctrl"><button class="btn sm" id="perfCheckBtn">检查一次</button></div>
@@ -486,10 +559,14 @@
             </section>
 
             <section class="set-pane" data-pane="mobile">
+              <header class="set-pane-head">
+                <h2>手机访问</h2>
+                <p>同一 Wi-Fi 下，用手机打开收听页与回听链接。</p>
+              </header>
               <div class="set-group">
                 <div class="set-row">
                   <div class="set-label"><span>手机访问</span><p>在同一个局域网里，用手机打开实时字幕和纪要。</p></div>
-                  <label class="switch"><input type="checkbox" id="prefLan"><span class="switch-track"></span></label>
+                  <label class="switch"><input type="checkbox" id="prefLan" aria-label="手机访问"><span class="switch-track"></span></label>
                 </div>
                 <div class="set-lan" id="lanDetails" hidden>
                   <div class="lan-url" id="lanUrl">—</div>
@@ -500,6 +577,10 @@
             </section>
 
             <section class="set-pane" data-pane="model">
+              <header class="set-pane-head">
+                <h2>模型与连接</h2>
+                <p>用于总结、自动标题与逐句分类。Key 只保存在本机。</p>
+              </header>
               <div class="set-group">
                 <div class="set-row set-row-top">
                   <div class="set-label"><span>已保存的连接</span><p>选中一个作为当前使用的模型。</p></div>
@@ -549,16 +630,24 @@
             </section>
 
             <section class="set-pane" data-pane="analysis">
+              <header class="set-pane-head">
+                <h2>AI 分析</h2>
+                <p>控制总结与分类的方式，与连接档案无关。</p>
+              </header>
               <div class="set-group">
                 <div class="set-row">
                   <div class="set-label"><span>话题数量</span><p>生成纪要时，最多整理多少个话题。</p></div>
                   <div class="ctrl unit-ctrl"><input type="number" id="prefTopics" min="3" max="40" step="1" value="10"><span class="unit">个</span></div>
                 </div>
-                <p class="set-note">AI 总结会优先使用已配置的模型；没配置时用本地摘要，内容仍可回溯到原文。</p>
               </div>
+              <p class="set-note">AI 总结会优先使用已配置的模型；没配置时用本地摘要，内容仍可回溯到原文。</p>
             </section>
 
             <section class="set-pane" data-pane="about">
+              <header class="set-pane-head">
+                <h2>关于</h2>
+                <p>本地运行，录音与转写不离开这台电脑。</p>
+              </header>
               <div class="about-card">
                 <div class="brand-mark-lg">LN</div>
                 <h3>LiveNotes 实时语记</h3>

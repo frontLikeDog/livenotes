@@ -9,7 +9,7 @@ import urllib.request
 
 import pytest
 
-from app import live, server, store
+from app import live, server, settings, store
 
 
 @pytest.fixture
@@ -56,6 +56,22 @@ def test_p1_pages_keep_base_anchors(http_base):
         assert marker in text, path
         assert 'data-ln-region="topbar"' in text, path
         assert 'data-ln-region="stage"' in text, path
+
+
+def test_qa_suggest_can_be_disabled(http_base):
+    settings.set_prefs({"qa_suggest_enabled": False})
+    assert _json(http_base, "/api/qa/suggest") == {"items": [], "enabled": False}
+    settings.set_prefs({"qa_suggest_enabled": True})
+    data = _json(http_base, "/api/qa/suggest")
+    assert data["enabled"] is True
+    assert "items" in data
+
+
+def test_perf_endpoint_reports_power_state(http_base):
+    data = _json(http_base, "/api/perf")
+    assert "low_power" in data
+    assert "power" in data
+    assert "partials" in data["effective"]
 
 
 def test_qr_endpoint_returns_matrix(http_base):

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 
 APP_DIR = Path(__file__).resolve().parent
@@ -177,6 +178,8 @@ def asr_threads() -> int:
 # apply_perf_mode()，环境变量始终优先。
 _PERF_MODE = "full"          # 未应用前的默认：按现有流畅参数跑
 _PERF_DETECTED: dict = {}
+_LOW_POWER_PAUSE = True      # 设置页「低电量时暂停实时转写」
+_POWER_CACHE = (0.0, None)   # (monotonic, 结果)；电池状态不必每句话都问系统
 
 
 def _ram_mb() -> int:
@@ -211,6 +214,71 @@ def detect_hardware() -> dict:
     return dict(_PERF_DETECTED)
 
 
+def system_power() -> dict:
+    """电源状态。Windows 用 GetSystemPowerStatus，其他平台尽量读 sysfs。
+
+    返回 ``supported / on_battery / percent / charging``；读不到时 supported=False，
+    调用方按「没有低电量这回事」处理，不能因为读不到电池就停转写。
+    """
+    global _POWER_CACHE
+    now = time.monotonic()
+    cached_at, cached = _POWER_CACHE
+    if cached is not None and now - cached_at < 15.0:
+        return dict(cached)
+    out = {"supported": False, "on_battery": False, "percent": -1,
+           "charging": False}
+    try:
+        if os.name == "nt":
+            import ctypes
+
+            class _Power(ctypes.Structure):
+                _fields_ = [("ACLineStatus", ctypes.c_ubyte),
+                            ("BatteryFlag", ctypes.c_ubyte),
+                            ("BatteryLifePercent", ctypes.c_ubyte),
+                            ("SystemStatusFlag", ctypes.c_ubyte),
+                            ("BatteryLifeTime", ctypes.c_ulong),
+                            ("BatteryFullLifeTime", ctypes.c_ulong)]
+
+            st = _Power()
+            if ctypes.windll.kernel32.GetSystemPowerStatus(ctypes.byref(st)):
+                ac = int(st.ACLineStatus)
+                pct = int(st.BatteryLifePercent)
+                out.update({
+                    "supported": 0 <= pct <= 100,
+                    "on_battery": ac == 0,
+                    "percent": pct if 0 <= pct <= 100 else -1,
+                    "charging": ac == 1,
+                })
+        else:
+            base = Path("/sys/class/power_supply")
+            for bat in sorted(base.glob("BAT*")):
+                try:
+                    state = (bat / "status").read_text(encoding="utf-8").strip().lower()
+                    pct = int((bat / "capacity").read_text(encoding="utf-8").strip())
+                except (OSError, ValueError):
+                    continue
+                out.update({
+                    "supported": True,
+                    "on_battery": state == "discharging",
+                    "percent": pct,
+                    "charging": state == "charging",
+                })
+                break
+    except Exception:
+        pass
+    _POWER_CACHE = (now, dict(out))
+    return out
+
+
+def low_power() -> bool:
+    """是否该按低电量策略暂停实时转写：未接电源且低于 20%。"""
+    if not _LOW_POWER_PAUSE:
+        return False
+    st = system_power()
+    pct = int(st.get("percent") if st.get("percent") is not None else -1)
+    return bool(st.get("on_battery")) and 0 <= pct < 20
+
+
 def auto_mode() -> str:
     """≤4 核或 ≤8GB -> 低配；检测不到内存时只看核数。"""
     d = detect_hardware()
@@ -222,23 +290,26 @@ def auto_mode() -> str:
     return "full"
 
 
-def apply_perf_mode(mode: str = "auto") -> dict:
+def apply_perf_mode(mode: str = "auto", low_power_pause: bool = True) -> dict:
     """应用性能档位。引擎级参数对下一场生效，不中断当前录音。"""
-    global _PERF_MODE
+    global _PERF_MODE, _LOW_POWER_PAUSE
     mode = str(mode or "auto").strip().lower()
     if mode not in ("auto", "full", "lite"):
         mode = "auto"
     _PERF_MODE = auto_mode() if mode == "auto" else mode
+    _LOW_POWER_PAUSE = bool(low_power_pause)
     return perf()
 
 
 def perf() -> dict:
     d = detect_hardware()
     lite = _PERF_MODE == "lite"
+    power = system_power()
+    saving = low_power()
     effective = {
         "asr_workers": asr_workers(), "asr_threads": asr_threads(),
-        "partials": not lite, "highlight_llm": not lite,
-        "live_highlight_card": not lite,
+        "partials": not lite and not saving, "highlight_llm": not lite,
+        "live_highlight_card": not lite and not saving,
         "follow_interval_min_s": 180 if lite else 60,
         "notify_poll_s": 6 if lite else 4,
         "live_poll_s": 5 if lite else 3,
@@ -251,12 +322,13 @@ def perf() -> dict:
     advice = "lite" if int(d.get("cores") or 0) <= 4 or (
         0 < int(d.get("ram_mb") or 0) <= 8 * 1024) else "full"
     return {"mode": _PERF_MODE, "detected": d, "effective": effective,
-            "advice": advice,
+            "advice": advice, "low_power": saving, "power": power,
+            "low_power_pause": _LOW_POWER_PAUSE,
             "note": "引擎参数在下一场记录生效；界面与轮询立即生效。"}
 
 
 def partials_enabled() -> bool:
-    return _PERF_MODE != "lite"
+    return _PERF_MODE != "lite" and not low_power()
 
 
 # 直播中的「疑似认人」：只影响展示与飞书文案，不写底库、不标 verified。

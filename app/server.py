@@ -1104,7 +1104,10 @@ p{font-size:14px;line-height:1.75;margin:8px 0}
             return self._json({"items": qa.history(
                 int(_num(q.get("limit"), 10) or 10))})
         if p == "/api/qa/suggest":
-            return self._json({"items": qa.suggest(str(q.get("session_id") or ""))})
+            if not settings.prefs().get("qa_suggest_enabled", True):
+                return self._json({"items": [], "enabled": False})
+            return self._json({"items": qa.suggest(str(q.get("session_id") or "")),
+                               "enabled": True})
         if p == "/api/perf":
             return self._json(config.perf())
         if p == "/api/product/metrics":
@@ -2311,7 +2314,9 @@ p{font-size:14px;line-height:1.75;margin:8px 0}
             out = settings.set_prefs(b if isinstance(b, dict) else {})
             try:
                 # 设置页改档位后立即应用：ASR 参数下一场生效，UI/轮询立即生效。
-                config.apply_perf_mode(out.get("perf_mode") or "auto")
+                config.apply_perf_mode(
+                    out.get("perf_mode") or "auto",
+                    out.get("low_power_pause", True))
                 if "perf_mode" in (b or {}):
                     metrics.METRICS.inc("p1.perf_mode_set")
             except Exception:

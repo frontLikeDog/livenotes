@@ -2265,12 +2265,28 @@ function renderSettings() {
   val('#prefCaptureMode', prefs.capture_mode || 'browser');
   val('#prefCloseAction', prefs.close_action || 'tray');
   val('#prefTopics', prefs.topics || 10);
-  val('#prefPerfMode', prefs.perf_mode || 'auto');
-  val('#prefFollowInterval', prefs.follow_interval_s || 120);
+  const perfMode = prefs.perf_mode || 'auto';
+  $$('input[name="perfMode"]').forEach((inp) => { inp.checked = inp.value === perfMode; });
+  $$('.perf-card').forEach((card) => {
+    const inp = card.querySelector('input');
+    card.classList.toggle('is-active', !!(inp && inp.checked));
+  });
+  val('#prefMaxRooms', prefs.max_rooms || 5);
+  val('#prefWeeklyTime', prefs.weekly_time || 'mon-09');
+  const minutes = [1, 2, 5, 10].reduce((best, n) =>
+    Math.abs(n * 60 - Number(prefs.follow_interval_s || 120)) <
+    Math.abs(best * 60 - Number(prefs.follow_interval_s || 120)) ? n : best, 2);
+  val('#prefFollowInterval', minutes);
   const weekly = $('#prefWeekly');
   if (weekly) weekly.checked = prefs.weekly_enabled !== false;
-  const qa = $('#prefQa');
-  if (qa) qa.checked = prefs.qa_enabled !== false;
+  const auto = $('#prefAutoRecord');
+  if (auto) auto.checked = prefs.auto_record_enabled === true;
+  const notifyBox = $('#prefNotify');
+  if (notifyBox) notifyBox.checked = prefs.notify_enabled !== false;
+  const ask = $('#prefAskSuggest');
+  if (ask) ask.checked = prefs.qa_suggest_enabled !== false;
+  const low = $('#prefLowPower');
+  if (low) low.checked = prefs.low_power_pause !== false;
   renderPerfAdvice();
   updateFallbackHint();
   const lan = st.lan || {};
@@ -2297,24 +2313,32 @@ function renderPerfAdvice() {
   const d = S.perf;
   const cores = Number((d.detected || {}).cores) || 0;
   const ram = Number((d.detected || {}).ram_mb) || 0;
-  const names = { lite: '低配', full: '流畅' };
-  const now = names[d.mode] || d.mode || '自动';
-  const advice = names[d.advice] || d.advice || '自动';
+  const names = { lite: '省电', full: '高性能', auto: '均衡' };
+  const now = names[d.mode] || d.mode || '均衡';
+  const advice = names[d.advice] || d.advice || '均衡';
+  const power = d.power || {};
+  const battery = power.supported && power.percent >= 0
+    ? ' · 电量 ' + power.percent + '%' + (power.on_battery ? '（未接电源）' : '')
+    : '';
   el.textContent = '当前：' + cores + ' 核 / ' +
-    (ram ? Math.round(ram / 1024) + ' GB' : '内存未知') +
+    (ram ? Math.round(ram / 1024) + ' GB' : '内存未知') + battery +
     ' · 建议' + advice + '，实际按' + now + '运行。';
 }
 function renderPerfOut() {
   const out = $('#perfOut');
   if (!out || !S.perf) return;
   const e = S.perf.effective || {};
-  const names = { lite: '低配', full: '流畅' };
+  const names = { lite: '省电', full: '高性能', auto: '均衡' };
   const yes = (v) => (v ? '开' : '关');
+  const power = S.perf.power || {};
   out.hidden = false;
   out.textContent = [
     '档位：' + (names[S.perf.mode] || S.perf.mode),
     'ASR worker：' + e.asr_workers + ' · 线程：' + e.asr_threads,
     '实时部分结果：' + yes(e.partials) + ' · 实时高光卡：' + yes(e.live_highlight_card),
+    '低电量暂停：' + (power.supported
+      ? (S.perf.low_power ? '已触发（' + power.percent + '%）' : '待机')
+      : '这台电脑没有可读的电池'),
     '通知轮询：' + e.notify_poll_s + ' 秒 · 状态轮询：' + e.live_poll_s + ' 秒',
     '笔记库每页：' + e.library_page + ' 条 · 逐字稿窗口：' + e.transcript_window + ' 句',
     '问笔记：top ' + e.qa_top_k + ' / ' + e.qa_tokens + ' tokens',
@@ -2326,7 +2350,7 @@ async function savePerfMode(value) {
   await loadPerf();
   renderPerfAdvice();
   renderPerfOut();
-  toast('性能档位已改为' + ({ auto: '自动', full: '流畅', lite: '低配' }[value] || value) + '。');
+  toast('性能档位已改为' + ({ auto: '均衡', full: '高性能', lite: '省电' }[value] || value) + '。');
 }
 async function savePref(key, value) {
   try {
@@ -2344,7 +2368,8 @@ function setSettingsPane(pane) {
   $$('#setNav button').forEach((b) => {
     const on = b.dataset.setpane === pane;
     b.classList.toggle('on', on);
-    b.setAttribute('aria-current', on ? 'page' : 'false');
+    if (on) b.setAttribute('aria-current', 'page');
+    else b.removeAttribute('aria-current');
   });
   $$('#setContent .set-pane').forEach((p) => p.classList.toggle('on', p.dataset.pane === pane));
   const content = $('#setContent');
@@ -2481,7 +2506,8 @@ function hudTitle(room, s) {
 }
 
 function hudHighlight() {
-  if (perfLite() || !S.sessInfo || S.sessInfo.id !== S.hudSid) return null;
+  if (perfLite() || (S.perf && S.perf.low_power) ||
+      !S.sessInfo || S.sessInfo.id !== S.hudSid) return null;
   if (S.sessInfo.paused || Date.now() < S.hudHi.dismissUntil) return null;
   const list = Array.isArray(S.sessInfo.live_highlights) ? S.sessInfo.live_highlights : [];
   for (let i = list.length - 1; i >= 0; i -= 1) {
@@ -4272,14 +4298,35 @@ function bind() {
     if (t.id === 'prefCaptureMode') return savePref('capture_mode', t.value);
     if (t.id === 'prefCloseAction') return savePref('close_action', t.value);
     if (t.id === 'prefLan') return toggleLan(t.checked);
-    if (t.id === 'prefPerfMode') return savePerfMode(t.value);
-    if (t.id === 'prefFollowInterval') {
-      const v = clamp(Number(t.value) || 120, 60, 300);
-      t.value = String(v);
-      return savePref('follow_interval_s', v);
+    if (t.name === 'perfMode') {
+      $$('.perf-card').forEach((card) => {
+        const inp = card.querySelector('input');
+        card.classList.toggle('is-active', !!(inp && inp.checked));
+      });
+      return savePerfMode(t.value);
     }
+    if (t.id === 'prefFollowInterval') {
+      return savePref('follow_interval_s', clamp((Number(t.value) || 2) * 60, 60, 600));
+    }
+    if (t.id === 'prefAutoRecord') return savePref('auto_record_enabled', t.checked);
     if (t.id === 'prefWeekly') return savePref('weekly_enabled', t.checked);
-    if (t.id === 'prefQa') return savePref('qa_enabled', t.checked);
+    if (t.id === 'prefWeeklyTime') return savePref('weekly_time', t.value);
+    if (t.id === 'prefNotify') {
+      S.set.prefs = S.set.prefs || {};
+      S.set.prefs.notify_enabled = t.checked;
+      if (S.notif.settings) S.notif.settings.enabled = t.checked;
+      if (S.notif.open) renderNotifPrefs();
+      return savePref('notify_enabled', t.checked);
+    }
+    if (t.id === 'prefAskSuggest') return savePref('qa_suggest_enabled', t.checked);
+    if (t.id === 'prefMaxRooms') return savePref('max_rooms', Number(t.value) || 5);
+    if (t.id === 'prefLowPower') {
+      savePref('low_power_pause', t.checked).then(() => {
+        loadPerf();
+        renderPerfAdvice();
+      });
+      return;
+    }
     if (t.id === 'prefTopics') {
       const v = clamp(Number(t.value) || 10, 3, 40);
       t.value = String(v);

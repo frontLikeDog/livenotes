@@ -260,7 +260,7 @@ def probe(url: str, platform: str = "", timeout: float = 8.0) -> dict:
 
 | 参数 | 值 |
 |---|---|
-| 间隔 | 默认 120 秒，设置可调 60–300 秒 |
+| 间隔 | 默认 120 秒，设置可调 60–600 秒（1 / 2 / 5 / 10 分钟） |
 | 抖动 | ±15% |
 | 并发 | 2（`ThreadPoolExecutor`） |
 | 单次超时 | 8 秒 |
@@ -305,9 +305,9 @@ live    --连续 3 个周期没有成功检测--> unknown（避免永远显示�
 **触发条件**（全部满足）：
 
 1. `offline/unknown → live`；
-2. `follow.auto_record=1`；
+2. 设置页「开播后自动记录」总开关打开，且 `follow.auto_record=1`；
 3. 当前没有在记录同一个 `room_key`；
-4. 当前记录数 < `watchlink.MAX_ROOMS`（默认 5，可用 `LIVENOTES_MAX_ROOMS` 覆盖）；
+4. 当前记录数 < 设置页「同时记录上限」（3 / 5 / 8，默认 5）；
 5. 应用在运行、引擎就绪；
 6. 当前没有另一个自动记录正在启动（全局锁）。
 
@@ -371,7 +371,7 @@ CREATE TABLE IF NOT EXISTS follows (
 | `app/store.py` | `_SCHEMA` 加 `follows`；`_migrate` 补 `fail_count` 等列 |
 | `app/server.py` | 关注路由；`start_live()` 抽公共函数 |
 | `app/notify.py` | 加 3 个 kind 与业务事件函数 |
-| `app/settings.py` | `follow_interval_s`（60–300，默认 120） |
+| `app/settings.py` | `follow_interval_s`（60–600，默认 120）、`auto_record_enabled`、`max_rooms` |
 | `run.py` | 启动检测 worker |
 | `desktop/dist/shell.js` | 新增 `follows` 视图与通知路由 |
 | `app/web/follows.html` + `js/follows/*` | 新增基座页面 |
@@ -898,7 +898,7 @@ CREATE TABLE IF NOT EXISTS qa_answers (
 
 - 只把检索到的片段发给模型，不发整场逐字稿、不发音频、不发文件名；单条 ≤200 字，总 ≤3000 tokens。
 - 首次使用弹一次说明：「问笔记会把相关片段发给模型；不配置模型时只做本地检索。」可不再提示。
-- 设置里 `qa_enabled`（默认开）；关闭后搜索仍可用，问笔记入口隐藏。
+- 设置里 `qa_enabled`（默认开）与 `qa_suggest_enabled`（默认开，控制搜索面板的追问建议）；关闭问笔记后搜索仍可用，问笔记入口隐藏。
 - 每日 token 预算沿用调度器配置；超预算时只走抽取式。
 - 日志只记 `qa_ask` 事件和耗时/token 数，不记问题和答案正文。
 - 诊断包导出不含问答内容。
@@ -935,15 +935,15 @@ CREATE TABLE IF NOT EXISTS qa_answers (
 
 | 档位 | 适用 | 行为 |
 |---|---|---|
-| **自动（默认）** | 不想管 | 启动时检测：≤4 核或 ≤8GB 内存 → 低配；否则流畅 |
-| **流畅** | 8 核以上 | 现有默认参数 |
-| **低配** | 4 核 / 8GB 或更旧 | 降并发、关部分实时能力、降轮询频率、减动效 |
+| **均衡（默认）** | 不想管 | 启动时检测：≤4 核或 ≤8GB 内存 → 省电参数；否则实时参数 |
+| **高性能** | 8 核以上 | 现有默认参数 |
+| **省电** | 4 核 / 8GB 或更旧 | 降并发、关部分实时能力、降轮询频率、减动效 |
 
-用户手动选择优先于自动；环境变量优先于设置（见 §9.3）。
+用户手动选择优先于自动；环境变量优先于设置（见 §9.3）。另外「低电量时暂停转写」在未接电源且电量低于 20% 时暂停实时部分结果与实时高光卡，录音继续保留。
 
 ### 9.2 参数表
 
-| 参数 | 流畅 | 低配 | 生效时机 |
+| 参数 | 高性能 | 省电 | 生效时机 |
 |---|---|---|---|
 | ASR worker 数 | `min(8, 核数-4)`，下限 2 | 2 | 下一场记录 |
 | ASR 线程数 | `min(4, 核数//2)` | 2 | 下一场记录 |
@@ -964,12 +964,12 @@ CREATE TABLE IF NOT EXISTS qa_answers (
 
 ### 9.3 技术落点
 
-- `app/settings.py`：`perf_mode`（`auto|full|lite`，默认 `auto`），带枚举校验。
-- `app/config.py`：新增 `apply_perf_mode(mode)` 与 `perf()` 查询；现有 `asr_workers()` / 线程数改为「显式环境变量 > 已应用模式 > 自动公式」。
-  - 环境变量（如 `LIVENOTES_ASR_WORKERS`、`LIVENOTES_CAPTURE_MODE`、`LIVENOTES_MAX_ROOMS`）始终优先，方便诊断和压测。
+- `app/settings.py`：`perf_mode`（`auto|full|lite`，默认 `auto`，界面显示为均衡 / 高性能 / 省电）、`low_power_pause`，带枚举与布尔校验。
+- `app/config.py`：新增 `apply_perf_mode(mode, low_power_pause)` 与 `perf()` 查询；现有 `asr_workers()` / 线程数改为「显式环境变量 > 已应用模式 > 自动公式」。低电量判断用 Windows `GetSystemPowerStatus`，15 秒缓存；未接电源且低于 20% 时暂停实时部分结果与实时高光卡。
+  - 环境变量（如 `LIVENOTES_ASR_WORKERS`、`LIVENOTES_CAPTURE_MODE`）始终优先，方便诊断和压测。
   - 为避免 `config` ↔ `settings` 循环导入：`run.py` 启动时读 `settings.prefs()` 后调用 `config.apply_perf_mode()`；设置页保存后由 `server.py`（同时导入两者）再调用一次。
 - `run.py`：启动时应用模式；检测核数/内存写入日志与 `/api/perf`。
-- `app/server.py`：`GET /api/perf` 返回 `{mode, effective:{...}, detected:{cores, ram_mb}, advice}`；设置页「性能自检」调用它。
+- `app/server.py`：`GET /api/perf` 返回 `{mode, effective:{...}, detected:{cores, ram_mb}, advice, low_power, power}`；设置页「性能自检」调用它。
 - 前端：轮询间隔从 `/api/perf` 取；不在页面里写死 4 秒。
 - 生效策略：引擎级参数（ASR worker/线程、部分结果、高光评审）只对下一场生效，设置页明确写「下一场记录生效」；UI/轮询立即生效，避免中断当前录音。
 
@@ -1002,7 +1002,7 @@ CREATE TABLE IF NOT EXISTS qa_answers (
 
 - 4 核 8G 虚拟机，低配，2 路 2 小时：无丢块、CPU ≤ 50%、RSS ≤ 1.2GB、界面可操作。
 - 切换档位不中断当前录音；引擎级参数在下一场生效，页面有说明。
-- 设置页显示「当前：4 核 / 8GB → 建议低配」和实际生效参数。
+- 设置页显示「当前：4 核 / 8GB → 建议省电」和实际生效参数。
 - 1000 场库首屏与搜索达到 §9.4 目标；低配模式下降级符合参数表。
 
 ---
@@ -1252,10 +1252,15 @@ P1 的硬指标：
 
 | 键 | 类型 | 默认 | 说明 |
 |---|---|---|---|
-| `perf_mode` | enum | `auto` | `auto|full|lite` |
-| `follow_interval_s` | int | 120 | 60–300 |
+| `perf_mode` | enum | `auto` | `auto|full|lite`（均衡 / 高性能 / 省电） |
+| `low_power_pause` | bool | true | 低电量时暂停实时字幕与高光 |
+| `follow_interval_s` | int | 120 | 60–600 |
+| `auto_record_enabled` | bool | false | 自动记录总开关 |
+| `max_rooms` | enum | 5 | 同时记录上限 3 / 5 / 8 |
 | `weekly_enabled` | bool | true | 是否生成周报 |
+| `weekly_time` | enum | `mon-09` | `mon-09|mon-12|sun-20` |
 | `qa_enabled` | bool | true | 是否显示问笔记 |
+| `qa_suggest_enabled` | bool | true | 搜索面板是否给追问建议 |
 | `notify_detail` | bool | true | 通知是否显示标题/主播名 |
 
 `settings.DEFAULT_PREFS` 增加上述键与校验；`notify_muted` 继续承载单类开关。

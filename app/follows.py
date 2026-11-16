@@ -17,7 +17,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from typing import Any
 
-from . import liveprobe, logs, notify, rooms, settings, store, watchlink
+from . import liveprobe, logs, notify, rooms, settings, store
 
 _LOCK = threading.RLock()
 _WORKER: threading.Thread | None = None
@@ -32,7 +32,7 @@ def now() -> str:
 
 
 def interval_s() -> int:
-    """检测间隔：设置项 60–300；低配模式不低于 180（docs/36 §9.2）。"""
+    """检测间隔：设置项 60–600；低配模式不低于 180（docs/36 §9.2）。"""
     try:
         base = int(settings.prefs().get("follow_interval_s") or 120)
     except (TypeError, ValueError):
@@ -43,7 +43,20 @@ def interval_s() -> int:
             base = max(180, base)
     except Exception:
         pass
-    return max(60, min(300, base))
+    return max(60, min(600, base))
+
+
+def max_rooms() -> int:
+    """自动记录同时上限。设置页只给 3 / 5 / 8，落到这里再兜一层。"""
+    try:
+        n = int(settings.prefs().get("max_rooms") or 5)
+    except (TypeError, ValueError):
+        n = 5
+    return max(1, min(8, n))
+
+
+def auto_record_enabled() -> bool:
+    return bool(settings.prefs().get("auto_record_enabled", False))
 
 
 # ---------------------------------------------------------------- 读写
@@ -89,7 +102,8 @@ def list_view() -> dict:
                   "offline": sum(1 for i in items if i["live_state"] == "offline"),
                   "unknown": sum(1 for i in items if i["live_state"] == "unknown")},
         "interval_s": interval_s(),
-        "max_rooms": watchlink.MAX_ROOMS,
+        "max_rooms": max_rooms(),
+        "auto_record_enabled": auto_record_enabled(),
         "auto_supported": True,
     }
 
@@ -219,7 +233,7 @@ def _room_already_recording(active: list[dict], room_key: str) -> bool:
 
 def _auto_capacity_left(active: list[dict]) -> bool:
     n = sum(1 for r in active if r.get("state") in ("pending", "starting", "live"))
-    return n < watchlink.MAX_ROOMS
+    return n < max_rooms()
 
 
 def _start_auto_record(row: dict, active: list[dict]) -> dict:
@@ -237,7 +251,7 @@ def _start_auto_record(row: dict, active: list[dict]) -> dict:
                     "error": "这个直播间已经在记录"}
         if not _auto_capacity_left(active):
             return {"ok": False, "room_id": "", "reason": "capacity",
-                    "error": "同时最多记录 %d 路，先停一路再试" % watchlink.MAX_ROOMS}
+                    "error": "同时最多记录 %d 路，先停一路再试" % max_rooms()}
         try:
             room, _created = rooms.add(str(row["url"]), name=str(row.get("name") or ""))
         except Exception as e:
@@ -271,7 +285,7 @@ def _on_live(conn, row: dict, probe: dict, active: list[dict],
         return updated
 
     already = _room_already_recording(active, key)
-    auto = bool(row.get("auto_record"))
+    auto = bool(row.get("auto_record")) and auto_record_enabled()
     started: dict = {"ok": False}
     if auto and not already:
         started = _start_auto_record(updated, active)
