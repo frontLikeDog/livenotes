@@ -178,6 +178,7 @@ def main() -> int:
     env = os.environ.copy()
     env.update({
         "LIVENOTES_HOME": str(spike.HOME),
+        "LIVENOTES_PYTHON": sys.executable,
         "LIVENOTES_NO_HELPERS": "1",
         "LIVENOTES_RESUME_ROOMS": "1",
         "LIVENOTES_ALLOW_MULTI": "1",

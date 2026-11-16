@@ -83,6 +83,7 @@ def main() -> int:
     env = os.environ.copy()
     env.update({
         "LIVENOTES_HOME": str(HOME),
+        "LIVENOTES_PYTHON": sys.executable,
         "LIVENOTES_NO_HELPERS": "1",
         # 不真的恢复采集，避免拉起浏览器和 ASR；这里只验列表动作。
         "LIVENOTES_RESUME_ROOMS": "0",

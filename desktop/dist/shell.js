@@ -65,6 +65,18 @@ const S = {
   workbenchSid: '',
   frameLoads: 0,
   frameKind: '',
+  /* 原生工作台：一场的字幕、说话人、时间轴与 AI 总结。 */
+  wb: {
+    sid: '', rows: [], speakers: [], duration: 0, total: 0,
+    spk: 'all', high: false, summaryScope: 'content',
+    summaries: {}, coach: null, busy: false, seq: 0,
+    audioReady: false, autoplay: false, seekT: null, currentT: 0,
+  },
+  /* 原生设置：prefs 走引擎，主题走 localStorage。 */
+  set: {
+    pane: 'appearance', prefs: null, cfg: null, profiles: [], current: '',
+    lan: null, search: '', loaded: false, busy: false,
+  },
   /* 记录卡：当前盯住的这一路，以及结束后的三步收尾。 */
   hudSid: '',
   hudRoomId: '',
@@ -107,11 +119,13 @@ const isGenericName = (name) => {
   return !n || GENERIC_RE.test(n) || /^(嘉宾|说话人|用户|观众)\s*\d+$/.test(n);
 };
 const SPK_COLORS = ['#E8C47D', '#9CC8B0', '#B9A0E8', '#8FB4D9', '#E89088', '#D7C08A', '#A9C7E8'];
+const SPK_COLORS_LIGHT = ['#8A5A0E', '#2F7D5F', '#5B4A8A', '#3F6F9E', '#A8453A', '#7A6220', '#4E7288'];
 function spkColor(id) {
   let h = 0;
   const s = String(id || '');
   for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
-  return SPK_COLORS[Math.abs(h) % SPK_COLORS.length];
+  const pal = resolvedTheme() === 'light' ? SPK_COLORS_LIGHT : SPK_COLORS;
+  return pal[Math.abs(h) % pal.length];
 }
 
 /* 直播 status 和场后 /api/speakers 的字段名不同，统一成一种形状再画。 */
@@ -478,29 +492,8 @@ async function loadSessions() {
 }
 
 function setWorkbenchFrame(sid, autoplay, seekT) {
-  sid = sid || '';
-  // 同一个工作台 iframe：只发消息原地切场次，不再整页重载。
-  // 这样正在播放的音频、筛选条件和滚动位置都能保住。
-  if (S.view === 'workbench' && S.frameKind === 'workbench' && sid) {
-    S.selectedSession = sid;
-    if (S.workbenchReady) {
-      if (S.workbenchSid !== sid || autoplay || seekT != null) {
-        postToFrame({ type: 'ln-open-session', session: sid,
-                     autoplay: !!autoplay, t: seekT == null ? null : Number(seekT) });
-      }
-      renderSidebar();
-      return;
-    }
-    // iframe 还在加载：目标就是它时等加载完；换了场次才改 URL。
-    if (S.workbenchSid === sid) { renderSidebar(); return; }
-  }
-  const q = 'embed=1' + (sid ? '&session=' + encodeURIComponent(sid) : '') +
-    (autoplay ? '&autoplay=1' : '') +
-    (seekT != null ? '&t=' + encodeURIComponent(seekT) : '');
-  setFrame(API + '/?' + q, API + '/' + (sid ? '?session=' + encodeURIComponent(sid) : ''),
-    '工作台', sid ? shortSid(sid) : '默认场次', true);
-  S.frameKind = 'workbench';
-  S.workbenchSid = sid;
+  // 工作台已经原生化；保留这个入口给旧调用方（重命名、消息跳转）。
+  openWorkbench(sid || S.selectedSession || '', { autoplay: !!autoplay, t: seekT });
 }
 
 function postToFrame(msg) {
@@ -581,30 +574,76 @@ async function pollSessionsLoop() {
 }
 
 /* ================================================================ views */
-// 方案 B：整窗换肤。监听/实时字幕是暗色工作室，工作台/资料是暖纸阅读面。
-const VIEW_THEME = {
-  hud: 'studio', listen: 'studio', live: 'studio',
-  workbench: 'paper', files: 'paper', people: 'paper', settings: 'paper', frame: 'paper',
-};
+/* ================================================================ 主题 */
+// 整窗明暗：light / dark / system，存在本机 localStorage。
+// 设置 → 外观和顶栏的太阳 / 月亮共用同一份选择。
+const THEME_KEY = 'ln.theme';
+const THEME_MEDIA = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+let themeChoice = 'dark';
+try {
+  const saved = localStorage.getItem(THEME_KEY);
+  if (saved && ['light', 'dark', 'system'].includes(saved)) themeChoice = saved;
+} catch (e) {}
+function resolvedTheme() {
+  if (themeChoice === 'system') return THEME_MEDIA && THEME_MEDIA.matches ? 'dark' : 'light';
+  return themeChoice;
+}
 function applyTheme() {
-  document.documentElement.dataset.theme = VIEW_THEME[S.view] || 'paper';
+  const t = resolvedTheme();
+  document.documentElement.dataset.theme = t;
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.setAttribute('content', t === 'dark' ? '#0A0C0F' : '#F1F2F3');
+  const btn = $('#themeToggle');
+  if (btn) {
+    const title = t === 'dark' ? '切换到亮色模式' : '切换到暗色模式';
+    btn.title = title;
+    btn.setAttribute('aria-label', title);
+  }
+  $$('.theme-card').forEach((card) => {
+    const on = card.dataset.themeChoice === themeChoice;
+    card.classList.toggle('is-active', on);
+    const radio = card.querySelector('input[type="radio"]');
+    if (radio) radio.checked = on;
+  });
+}
+function setTheme(choice, opts) {
+  themeChoice = ['light', 'dark', 'system'].includes(choice) ? choice : 'dark';
+  try { localStorage.setItem(THEME_KEY, themeChoice); } catch (e) {}
+  applyTheme();
+  // 内嵌的引擎页只认 paper / studio 两套覆盖；主题变化时重载当前页面。
+  if (S.view === 'files' || S.view === 'people' || S.view === 'live' || S.view === 'frame') {
+    const f = $('#frame');
+    if (f && S.frameEmbedUrl) f.src = withTheme(S.frameEmbedUrl);
+  }
+  if (S.view === 'workbench' && S.wb.sid && S.wb.rows.length) renderWbAll();
+  if (!opts || !opts.silent) markSaved();
+}
+function toggleTheme() {
+  setTheme(resolvedTheme() === 'dark' ? 'light' : 'dark');
 }
 function withTheme(url) {
-  const theme = VIEW_THEME[S.view] || 'paper';
+  // 引擎页只有 paper（暖纸亮面）与 studio（深色壳层）两套覆盖。
+  const theme = resolvedTheme() === 'dark' ? 'studio' : 'paper';
   try {
     const u = new URL(url, location.href);
     u.searchParams.set('theme', theme);
     return u.toString();
   } catch (e) { return url; }
 }
+if (THEME_MEDIA) {
+  const onScheme = () => { if (themeChoice === 'system') setTheme('system', { silent: true }); };
+  if (THEME_MEDIA.addEventListener) THEME_MEDIA.addEventListener('change', onScheme);
+  else if (THEME_MEDIA.addListener) THEME_MEDIA.addListener(onScheme);
+}
+applyTheme();
 
 const VIEW_META = {
   hud: { title: '记录', sub: '录音与收尾', side: false, insp: false },
   listen: { title: '收听', sub: '全部直播间', side: true, insp: true },
-  workbench: { title: '工作台', sub: '场次与字幕', side: true, insp: false },
+  workbench: { title: '工作台', sub: '时间轴与总结', side: true, insp: true },
   files: { title: '文件中心', sub: '录音与回放', side: false, insp: false },
   people: { title: '人物档案', sub: '声纹与确认', side: false, insp: false },
-  settings: { title: '设置', sub: '采集与模型', side: false, insp: false },
+  settings: { title: '设置', sub: '外观与连接', side: false, insp: false },
   live: { title: '实时字幕', sub: '正在监听', side: false, insp: false },
   frame: { title: '页面', sub: '', side: false, insp: false },
 };
@@ -625,13 +664,18 @@ function switchView(view, opts) {
 
   const meta = VIEW_META[view] || VIEW_META.listen;
   const body = $('#body');
-  // 收听页尊重用户自己开合的面板；其它页面按视图默认。
-  body.classList.toggle('no-side', !(view === 'listen' ? S.panes.side : meta.side));
-  body.classList.toggle('no-insp', !(view === 'listen' ? S.panes.insp : meta.insp));
+  // 设置是整页；收听尊重用户自己开合的面板；其它页面按视图默认。
+  const wantSide = view !== 'settings' && (view === 'listen' ? S.panes.side : meta.side);
+  const wantInsp = view !== 'settings' && (view === 'listen' ? S.panes.insp : meta.insp);
+  body.classList.toggle('no-side', !wantSide);
+  body.classList.toggle('no-insp', !wantInsp);
+  body.classList.toggle('set-mode', view === 'settings');
   applyPaneButtons();
   $('#listenView').hidden = view !== 'listen';
   $('#hudView').hidden = view !== 'hud';
-  $('#frameView').hidden = view === 'listen' || view === 'hud';
+  $('#wbView').hidden = view !== 'workbench';
+  $('#setView').hidden = view !== 'settings';
+  $('#frameView').hidden = !['files', 'people', 'live', 'frame'].includes(view);
 
   if (view === 'hud') {
     if (opts.room) S.hudRoomId = opts.room;
@@ -645,8 +689,10 @@ function switchView(view, opts) {
   } else if (view === 'workbench') {
     const sid = opts.session || S.selectedSession || '';
     S.selectedSession = sid;
-    setWorkbenchFrame(sid, opts.autoplay, opts.t);
-    loadSessions();
+    openWorkbench(sid, { autoplay: opts.autoplay, t: opts.t });
+    if (!S.sessions.length) loadSessions();
+  } else if (view === 'settings') {
+    openSettings();
   } else if (view === 'files') {
     const tab = ['trash', 'cleanup'].includes(opts.tab) ? opts.tab : 'live';
     setFrame(API + '/library?embed=1&tab=' + tab,
@@ -654,9 +700,6 @@ function switchView(view, opts) {
     S.frameBackView = 'listen';
   } else if (view === 'people') {
     setFrame(API + '/people?embed=1', API + '/people', '人物档案', '声纹与确认', true);
-    S.frameBackView = 'listen';
-  } else if (view === 'settings') {
-    setFrame(API + '/?embed=1&settings=1', API + '/?settings=1', '设置', '采集与模型', true);
     S.frameBackView = 'listen';
   } else if (view === 'live') {
     const sid = opts.session || S.selectedSession || '';
@@ -668,12 +711,13 @@ function switchView(view, opts) {
     setFrame(opts.url, opts.rawUrl || opts.url, opts.title || '页面', opts.meta || '', true);
     S.frameBackView = opts.back || 'listen';
   }
-  // 工作台/资料页是嵌进来的旧页面：用深色边框包一层，像工作区里的画布；
-  // 实时字幕本身就是深色全屏页，不需要这一圈。
-  $('#frameView').classList.toggle('framed', view !== 'listen' && view !== 'live');
+  // 旧页面是嵌进来的：用一圈画布边框包住；实时字幕本身就是深色全屏页。
+  $('#frameView').classList.toggle('framed', ['files', 'people', 'frame'].includes(view));
 
   $('#crumb').innerHTML = '<b>' + esc(meta.title) + '</b><i>/</i><span>' + esc(meta.sub) + '</span>';
   document.title = 'LiveNotes · ' + meta.title;
+  const label = $('#cmdkLabel');
+  if (label) label.textContent = view === 'settings' ? '搜索设置' : '搜索或执行命令';
   renderRail();
   renderSidebar();
   renderStage();
@@ -729,6 +773,14 @@ function renderSidebar() {
     : '点场次打开工作台 · 数据来自本地引擎';
   const tools = $('#sideTools');
   const list = $('#sideList');
+  // 轮询会反复调 renderSidebar；内容没变就不要重建列表，滚动位置也保住。
+  const setList = (html) => {
+    if (list.dataset.render === html) return;
+    const top = list.scrollTop;
+    list.innerHTML = html;
+    list.dataset.render = html;
+    list.scrollTop = top;
+  };
   const count = S.view === 'listen' ? S.rooms.length : S.sessions.length;
   $('#sideCount').textContent = String(count);
 
@@ -748,11 +800,11 @@ function renderSidebar() {
       if (S.filter === 'issue') return k === 'failed';
       return true;
     });
-    list.innerHTML = rows.length ? rows.map(roomRowHtml).join('') : (
+    setList(rows.length ? rows.map(roomRowHtml).join('') : (
       '<div class="side-empty">' + (S.rooms.length
         ? '这个筛选下没有直播间。'
         : '还没有在听的直播间。<br>点右上角 ＋ 粘贴链接开始。') + '</div>'
-    );
+    ));
     return;
   }
 
@@ -771,10 +823,10 @@ function renderSidebar() {
       : ('点场次打开工作台 · 数据来自本地引擎 · <button class="link" data-open-trash>回收站' +
          (S.trashCount ? ' ' + S.trashCount : '') + '</button>');
     if (!S.sessions.length) {
-      list.innerHTML = '<div class="side-empty">还没有场次。<br>去「收听」加一个直播间，出字后这里会出现。' +
-        '<br><button class="btn sm" data-demo="1">加载演示数据</button></div>';
+      setList('<div class="side-empty">还没有场次。<br>去「收听」加一个直播间，出字后这里会出现。' +
+        '<br><button class="btn sm" data-demo="1">加载演示数据</button></div>');
     } else {
-      list.innerHTML = S.sessions.slice(0, 100).map((s) => {
+      setList(S.sessions.slice(0, 100).map((s) => {
         const picked = S.batchSel.has(s.id);
         const on = !S.batchMode && s.id === S.selectedSession ? ' on' : '';
         const date = fmtClock(s.started_at);
@@ -800,13 +852,13 @@ function renderSidebar() {
           '<span class="room-main"><span class="room-name">' + esc(s.title || '未命名场次') + '</span>' +
           '<span class="room-sub">' + esc(date) + ' · ' + n + ' 条' + tag + '</span></span>' +
           '<span class="room-time">' + esc(dur) + '</span>' + actions + '</button>';
-      }).join('');
+      }).join(''));
     }
     return;
   }
 
   tools.innerHTML = '';
-  list.innerHTML = '';
+  setList('');
 }
 
 function roomRowHtml(r) {
@@ -841,6 +893,10 @@ function renderStage() {
   $('#stageName').textContent = room ? roomName(room) : '选择一个直播间';
   $('#stageMark').textContent = room ? roomCh(room) : 'CH--';
   $('#btnStop').disabled = !room || st.k === 'stopped';
+  ['#stagePause', '#stageMarkBtn'].forEach((sel) => {
+    const b = $(sel);
+    if (b) b.hidden = !room || isWall || isAnnot;
+  });
   $('#btnWall').textContent = isWall ? '信号' : '监控墙';
   $$('#stageSeg button').forEach((b) => {
     b.classList.toggle('on', !isWall && b.dataset.stage === S.stage);
@@ -857,6 +913,39 @@ function renderStage() {
     }
   }
   $('#stageMeta').textContent = meta;
+
+  // 收听页的实时监视条：大计时、电平、采集方式与标记。
+  const monitor = $('#monitorNow');
+  if (monitor) {
+    const showMonitor = !!room && !isWall && !isAnnot && !isPage;
+    monitor.hidden = !showMonitor;
+    if (showMonitor) {
+      const s = sessionFor(room) || {};
+      $('#detailTimer').textContent = fmtHudTimer(s.elapsed || 0);
+      const badge = $('#detailBadge');
+      badge.className = 'live-badge' + (st.k === 'live' ? (s.paused ? ' paused' : '') : ' done');
+      $('#detailBadgeText').textContent = s.paused ? '已暂停' : st.label;
+      $('#stagePause').textContent = s.paused ? '继续' : '暂停';
+      $('#detailMode').textContent = captureLabel(room);
+      $('#detailStart').textContent = fmtClock(s.started_at || s.started_utc) || '—';
+      $('#detailLines').textContent = (s.n_utterances != null ? s.n_utterances : 0) + ' 条';
+      const level = $('#levelMeter');
+      if (level && !level.children.length) {
+        level.innerHTML = Array.from({ length: 16 }, (_, i) => '<i style="--i:' + i + '"></i>').join('');
+      }
+      if (level) level.classList.toggle('paused', !(st.k === 'live' && !s.paused));
+      const marksWrap = $('#marksWrap');
+      const marks = Array.isArray(s.marks) ? s.marks : [];
+      marksWrap.hidden = !marks.length;
+      if (marks.length) {
+        $('#marksList').innerHTML = marks.slice(-6).map((m) => {
+          const t = Number(m.t || 0);
+          const note = m.note ? ' ' + String(m.note).slice(0, 8) : '';
+          return '<button class="mark-chip" data-mark-seek="' + t + '">' + fmtDur(t) + esc(note) + '</button>';
+        }).join('');
+      }
+    }
+  }
 
   const wall = $('#wall');
   const annot = $('#annot');
@@ -1438,6 +1527,9 @@ async function togglePause() {
 }
 
 function renderInspector() {
+  // 工作台的右栏是 AI 总结，由 renderWbSummary 自己维护；
+  // 房间轮询每 2 秒会调 renderAll，不能在这里重建它，否则滚动位置会被重置。
+  if (S.view === 'workbench') return;
   const room = selectedRoom();
   const show = S.view === 'listen' && !!room;
   $('#inspector').classList.toggle('placeholder', !show);
@@ -1535,6 +1627,668 @@ function renderStatus() {
       : (!hr ? '未在记录' : (liveRooms().length > 1 ? liveRooms().length + ' 路在记录' : '正在记录'));
     $('#crumb').innerHTML = '<b>记录</b><i>/</i><span>' + esc(sub) + '</span>';
     document.title = 'LiveNotes · ' + (S.finish ? '正在收尾' : (hr ? '记录中' : '记录'));
+  }
+}
+
+/* ================================================================ 工作台（原生）
+   一场 = 侧栏场次 + 时间轴 + 说话人筛选 + 字幕 + 底部播放器 + 右侧 AI 总结。
+   数据全部来自本地引擎；字幕行可以点时间码回到原文。 */
+const WB_TAGS = {
+  substantive: ['观点', 'opinion'],
+  question_consult: ['提问', 'question'],
+  host_control: ['信息', 'info'],
+  chitchat: ['信息', 'info'],
+  ad: ['广告', 'emotion'],
+};
+const wbHigh = (r) => r && (r.value_tag === 'high' || r.value_tag === 'important');
+function wbSpeakerList() {
+  return (S.wb.speakers || []).map(normSpeaker).filter((s) => s.id)
+    .sort((a, b) => b.count - a.count || b.seconds - a.seconds);
+}
+function wbSpkLabel(id) {
+  const sp = wbSpeakerList().find((x) => x.id === String(id));
+  if (!sp) return String(id || '说话人');
+  return sp.personName || sp.label || sp.id;
+}
+function wbLineHtml(r) {
+  const t = Number(r.t_start) || 0;
+  const tag = WB_TAGS[r.category] || ['信息', 'info'];
+  const high = wbHigh(r);
+  const sp = wbSpkLabel(r.speaker_id);
+  return '<article class="line" data-line-id="' + esc(r.id) + '" data-t="' + t + '">' +
+    '<button class="line-time" data-seek="' + t + '">' + fmtDur(t) + '</button>' +
+    '<div class="line-body"><div class="line-head">' +
+    '<span class="line-spk" style="--spk:' + spkColor(r.speaker_id) + '"><i></i>' + esc(sp) + '</span>' +
+    '<span class="tag tag-' + tag[1] + '">' + tag[0] + '</span>' +
+    (high ? '<span class="line-high">高价值</span>' : '') +
+    '</div><p class="line-text">' + esc(r.text || '') + '</p></div></article>';
+}
+
+function renderWbHeader() {
+  const wb = S.wb;
+  const s = findSession(wb.sid);
+  const sm = wb.summaries.content;
+  $('#wbTitle').textContent = wb.sid
+    ? ((s && s.title) || (sm && sm.title) || '未命名场次')
+    : '工作台';
+  if (!wb.sid) {
+    $('#wbMeta').textContent = '选择左侧场次，查看时间轴、字幕与总结。';
+  } else {
+    const meta = [
+      fmtClock(s && s.started_at),
+      '时长 ' + fmtDur(wb.duration || (s && s.duration_s) || 0),
+      (wb.total || wb.rows.length) + ' 条发言',
+      wb.speakers.length + ' 位说话人',
+    ].filter(Boolean);
+    $('#wbMeta').textContent = meta.join(' · ');
+  }
+  $('#wbExport').disabled = !wb.sid;
+}
+
+function renderWbTimeline() {
+  const wb = S.wb;
+  const bars = $('#wbTlBars');
+  const axis = $('#wbTlAxis');
+  if (!wb.rows.length) {
+    bars.innerHTML = '';
+    axis.innerHTML = '';
+    return;
+  }
+  const dur = Math.max(1, wb.duration || Number(wb.rows[wb.rows.length - 1].t_end) || 1);
+  const N = 44;
+  const buckets = Array.from({ length: N }, (_, i) => ({ t: dur * i / N, total: 0, spk: {}, overlap: false }));
+  wb.rows.forEach((r) => {
+    const t = Number(r.t_start) || 0;
+    const i = clamp(Math.floor(t / dur * N), 0, N - 1);
+    const b = buckets[i];
+    b.total += 1;
+    const k = String(r.speaker_id || '?');
+    b.spk[k] = (b.spk[k] || 0) + 1;
+    if (r.overlap) b.overlap = true;
+  });
+  const max = Math.max(1, ...buckets.map((b) => b.total));
+  bars.innerHTML = buckets.map((b) => {
+    const top = Object.entries(b.spk).sort((a, c) => c[1] - a[1])[0];
+    const h = b.total ? 18 + Math.round(72 * b.total / max) : 4;
+    const color = top ? spkColor(top[0]) : 'var(--line-2)';
+    const tip = fmtDur(b.t) + ' · ' + b.total + ' 条';
+    return '<button class="tl-bar' + (b.overlap ? ' overlap' : '') + '" data-t="' + Math.round(b.t) +
+      '" style="--h:' + h + '%;--spk:' + color + '" title="' + esc(tip) + '" aria-label="' + esc(tip) + '"></button>';
+  }).join('');
+  axis.innerHTML = [0, 0.25, 0.5, 0.75, 1].map((p) => '<span>' + fmtDur(dur * p) + '</span>').join('');
+  $('#wbTlHint').textContent = '点击柱体定位时段 · ' + fmtDur(dur);
+}
+
+function renderWbFilters() {
+  const wb = S.wb;
+  const list = wbSpeakerList();
+  const counts = new Map();
+  wb.rows.forEach((r) => {
+    const k = String(r.speaker_id || '');
+    counts.set(k, (counts.get(k) || 0) + 1);
+  });
+  let html = '<button class="spk-chip' + (wb.spk === 'all' ? ' on' : '') + '" data-spk-filter="all">全部 <span class="n">' +
+    (wb.total || wb.rows.length) + '</span></button>';
+  html += list.slice(0, 10).map((sp) =>
+    '<button class="spk-chip' + (wb.spk === sp.id ? ' on' : '') + '" data-spk-filter="' + esc(sp.id) + '">' +
+    '<span class="spk-dot" style="--spk:' + spkColor(sp.id) + '"></span>' + esc(sp.personName || sp.label) +
+    ' <span class="n">' + (counts.get(sp.id) || 0) + '</span></button>').join('');
+  $('#wbSpkFilters').innerHTML = html;
+  const box = $('#wbHighOnly');
+  if (box) box.checked = wb.high;
+}
+
+function renderWbTranscript() {
+  const wb = S.wb;
+  let list = wb.rows;
+  if (wb.spk !== 'all') list = list.filter((r) => String(r.speaker_id) === wb.spk);
+  if (wb.high) list = list.filter(wbHigh);
+  const total = wb.total || wb.rows.length;
+  const cap = 3000;
+  const shown = list.slice(0, cap);
+  $('#wbTranscript').innerHTML = shown.map(wbLineHtml).join('');
+  $('#wbEmpty').hidden = list.length > 0;
+  if (!list.length) {
+    $('#wbEmpty').textContent = wb.rows.length
+      ? '没有符合筛选条件的发言，试试放宽条件。'
+      : '本场还没有转写内容。';
+  }
+  $('#wbFilterMeta').textContent = list.length > cap
+    ? '显示 ' + cap + ' / ' + list.length + ' 条 · 共 ' + total + ' 条'
+    : '显示 ' + list.length + ' 条 · 共 ' + total + ' 条';
+  const box = $('#wbHighOnly');
+  if (box) box.checked = wb.high;
+}
+
+function renderWbPlayer() {
+  const wb = S.wb;
+  const audio = $('#wbAudio');
+  const range = $('#wbRange');
+  $('#wbDur').textContent = fmtDur(wb.duration || 0);
+  $('#wbCur').textContent = fmtDur(wb.currentT || 0);
+  $('#wbPlay').disabled = !wb.audioReady;
+  range.disabled = !wb.audioReady;
+  range.max = String(Math.max(0, Math.round(wb.duration || 0)));
+  range.value = String(Math.max(0, Math.min(wb.duration || 0, Math.round(wb.currentT || 0))));
+  const s = findSession(wb.sid);
+  $('#wbNote').textContent = !wb.sid ? '点击时间码可定位'
+    : (wb.audioReady ? '点击时间码可定位'
+      : (s && s.audio_state === 'live' ? '录制中 · 结束后可回放' : '本场没有原始音频'));
+  if (!audio) return;
+  if (wb.sid && wb.audioReady) {
+    if (audio.dataset.sid !== wb.sid) {
+      audio.dataset.sid = wb.sid;
+      audio.src = API + '/api/audio?session_id=' + encodeURIComponent(wb.sid);
+    }
+  } else if (audio.dataset.sid) {
+    audio.pause();
+    audio.removeAttribute('src');
+    audio.dataset.sid = '';
+    try { audio.load(); } catch (e) {}
+  }
+}
+
+function renderWbAll() {
+  renderWbHeader();
+  renderWbTimeline();
+  renderWbFilters();
+  renderWbTranscript();
+  renderWbPlayer();
+  renderWbSummary();
+}
+
+async function openWorkbench(sid, opts) {
+  opts = opts || {};
+  sid = sid || '';
+  const wb = S.wb;
+  const changed = wb.sid !== sid;
+  if (changed) {
+    wb.sid = sid;
+    wb.rows = [];
+    wb.speakers = [];
+    wb.total = 0;
+    wb.duration = 0;
+    wb.spk = 'all';
+    wb.high = false;
+    wb.summaries = {};
+    wb.coach = null;
+    wb.summaryScope = 'content';
+    wb.currentT = 0;
+    wb.autoplay = !!opts.autoplay;
+    wb.seekT = opts.t != null ? Number(opts.t) : null;
+  } else {
+    if (opts.autoplay) wb.autoplay = true;
+    if (opts.t != null) wb.seekT = Number(opts.t);
+  }
+  S.selectedSession = sid;
+  S.workbenchSid = sid;
+  S.workbenchReady = false;
+  renderWbHeader();
+  renderWbSummary();
+  renderSidebar();
+  // 同一场再点一次（或轮询触发）不重新拉字幕，保住滚动和筛选。
+  if (!changed && wb.rows.length && !opts.autoplay && opts.t == null) {
+    S.workbenchReady = true;
+    return;
+  }
+  if (!sid) {
+    wb.rows = [];
+    renderWbTimeline();
+    renderWbFilters();
+    renderWbTranscript();
+    renderWbPlayer();
+    S.workbenchReady = true;
+    return;
+  }
+  const seq = ++wb.seq;
+  try {
+    const [u, sp, sm] = await Promise.all([
+      api('/api/utterances?session_id=' + encodeURIComponent(sid) + '&limit=5000'),
+      api('/api/speakers?session_id=' + encodeURIComponent(sid)).catch(() => ({ speakers: [] })),
+      api('/api/summary?session_id=' + encodeURIComponent(sid) + '&scope=content').catch(() => null),
+    ]);
+    if (seq !== wb.seq || S.view !== 'workbench') return;
+    wb.rows = (u.rows || []).slice().sort((a, b) => (Number(a.t_start) || 0) - (Number(b.t_start) || 0));
+    wb.speakers = sp.speakers || [];
+    wb.total = Number(u.total) || wb.rows.length;
+    const s = findSession(sid);
+    const last = wb.rows[wb.rows.length - 1];
+    wb.duration = Math.max(0, Number(s && s.duration_s) || Number(last && (last.t_end || last.t_start)) || 0);
+    if (sm && sm.ok && sm.payload) wb.summaries.content = sm.payload;
+    wb.audioReady = !!(s && s.audio_state === 'ready');
+    S.workbenchReady = true;
+    renderWbAll();
+    if (wb.autoplay || wb.seekT != null) {
+      const t = wb.seekT != null ? wb.seekT : 0;
+      wb.autoplay = false;
+      wb.seekT = null;
+      setTimeout(() => wbSeek(t, { play: true }), 80);
+    }
+  } catch (e) {
+    if (seq !== wb.seq) return;
+    S.workbenchReady = true;
+    renderWbAll();
+    toast('工作台加载失败：' + e.message);
+  }
+}
+
+function wbNearestLine(t) {
+  const nodes = $$('#wbTranscript .line');
+  if (!nodes.length) return null;
+  for (const el of nodes) {
+    if ((Number(el.dataset.t) || 0) >= t - 0.5) return el;
+  }
+  return nodes[nodes.length - 1];
+}
+let wbFocusTimer = null;
+function highlightWbLine(el) {
+  if (!el) return;
+  $$('#wbTranscript .line.is-focus').forEach((x) => x.classList.remove('is-focus'));
+  el.classList.add('is-focus');
+  el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  clearTimeout(wbFocusTimer);
+  wbFocusTimer = setTimeout(() => el.classList.remove('is-focus'), 2600);
+}
+function wbSeek(t, opts) {
+  const wb = S.wb;
+  t = Math.max(0, Number(t) || 0);
+  wb.currentT = t;
+  $('#wbCur').textContent = fmtDur(t);
+  const range = $('#wbRange');
+  range.value = String(Math.round(t));
+  if (wb.audioReady) {
+    const audio = $('#wbAudio');
+    try { audio.currentTime = t; } catch (e) {}
+    if (opts && opts.play) audio.play().catch(() => {});
+  }
+  highlightWbLine(wbNearestLine(t));
+}
+function wbTogglePlay() {
+  const wb = S.wb;
+  const audio = $('#wbAudio');
+  if (!wb.audioReady) { toast('本场没有原始音频，只能看文字。'); return; }
+  if (audio.paused) audio.play().catch(() => toast('播放失败'));
+  else audio.pause();
+}
+
+function wbPointHtml(p) {
+  const t = p && p.t_from != null ? Number(p.t_from) : 0;
+  const sp = Array.isArray(p && p.speakers) ? p.speakers.slice(0, 2).join(' / ') : '';
+  return '<li class="sum-point"><button class="sum-time" data-seek="' + t + '">' + fmtDur(t) + '</button>' +
+    '<div><p>' + (p.title ? '<b>' + esc(p.title) + '</b> · ' : '') + esc((p && p.gist) || '') + '</p>' +
+    '<div class="sum-meta">' + ((p && p.utterance_count) || 0) + ' 条' + (sp ? ' · ' + esc(sp) : '') + '</div></div></li>';
+}
+function wbSummaryHtml(payload, scope) {
+  if (!payload) {
+    const name = scope === 'time' ? '时间轴总结' : (scope === 'category' ? '分类总结' : '内容总结');
+    return '<div class="sum-empty">这一场还没有' + name + '。<br>生成后会按要点列出，点时间码可以回到原文。' +
+      '<br><button class="btn sm" data-wb-gen="' + scope + '">生成总结</button></div>';
+  }
+  let html = '';
+  if (payload.overview) html += '<p class="sum-lead">' + esc(payload.overview) + '</p>';
+  if (scope === 'category' && Array.isArray(payload.groups) && payload.groups.length) {
+    html += payload.groups.map((g) => {
+      const tag = WB_TAGS[g.category] || ['信息', 'info'];
+      const pts = (g.points || []).map(wbPointHtml).join('');
+      return '<div class="sum-group"><div class="category-head"><span class="tag tag-' + tag[1] + '">' +
+        esc(g.label || tag[0]) + '</span><span class="n">' + (g.count || 0) + ' 条</span></div>' +
+        (Array.isArray(g.topics) && g.topics.length ? '<p class="sum-more">话题：' + esc(g.topics.slice(0, 4).join(' · ')) + '</p>' : '') +
+        (pts || '<p class="sum-more">这一类暂时没有可展开的要点。</p>') + '</div>';
+    }).join('');
+  } else if (scope === 'time' && Array.isArray(payload.points)) {
+    html += payload.points.map((p) => {
+      const quotes = (p.evidence || []).slice(0, 2).map((e) =>
+        '<li><time>' + fmtDur(e.t_start) + '</time><span>' + esc(e.quote || '') + '</span></li>').join('');
+      return '<div class="sum-group"><h3>' + esc(p.title || (fmtDur(p.t_from) + ' – ' + fmtDur(p.t_to))) + '</h3>' +
+        '<p class="sum-lead">' + esc(p.gist || '') + '</p>' + (quotes ? '<ul>' + quotes + '</ul>' : '') + '</div>';
+    }).join('');
+  } else if (Array.isArray(payload.points) && payload.points.length) {
+    html += '<ul class="sum-points">' + payload.points.map(wbPointHtml).join('') + '</ul>';
+  } else {
+    html += '<div class="sum-empty">这一场内容太少，暂时整理不出要点。</div>';
+  }
+  const meta = [payload.engine_kind === 'llm' ? 'AI 生成' : '本地摘要'];
+  if (payload.generated_at) meta.push(fmtClock(payload.generated_at));
+  if (payload.stats && payload.stats.included_utterances != null) meta.push(payload.stats.included_utterances + ' 条入选');
+  html += '<p class="sum-foot">' + esc(meta.join(' · ')) +
+    (Array.isArray(payload.caveats) && payload.caveats.length ? '<br>' + esc(payload.caveats[0]) : '') + '</p>';
+  return html;
+}
+function wbCoachHtml() {
+  const c = S.wb.coach;
+  if (!c) {
+    return '<div class="sum-empty">还没有复盘。生成后会看主持 / 嘉宾的发言量、冷场和抢话。' +
+      '<br><button class="btn sm" data-wb-gen="coach">开始复盘</button></div>';
+  }
+  const m = (label, val) => '<div class="metric"><b>' + esc(String(val)) + '</b><span>' + label + '</span></div>';
+  let html = '<div class="coach-metrics">' +
+    m('主持发言', ((c.host && c.host.utterances) || 0) + ' 句') +
+    m('嘉宾发言', ((c.guest && c.guest.utterances) || 0) + ' 句') +
+    m('冷场', ((c.cold && c.cold.count) || 0) + ' 次') +
+    m('抢话', (c.switches || 0) + ' 次') + '</div>';
+  if (c.overall) html += '<p class="sum-lead">' + esc(c.overall) + '</p>';
+  if (c.grade) {
+    const cover = c.coverage ? Math.round((Number(c.coverage.coverage_ratio) || 0) * 100) : null;
+    html += '<p class="sum-foot">评级 ' + esc(String(c.grade)) + (cover != null ? ' · 覆盖 ' + cover + '%' : '') + '</p>';
+  }
+  const dims = c.dimensions;
+  if (dims && typeof dims === 'object') {
+    const entries = Array.isArray(dims)
+      ? dims.map((d, i) => [d.name || d.key || ('维度 ' + (i + 1)), d.score != null ? d.score : d.value])
+      : Object.entries(dims).filter(([, v]) => typeof v === 'number' || typeof v === 'string');
+    if (entries.length) {
+      html += '<div class="sum-group"><h3>维度</h3><ul>' + entries.slice(0, 8).map(([k, v]) =>
+        '<li><time>' + esc(String(v)) + '</time><span>' + esc(String(k)) + '</span></li>').join('') + '</ul></div>';
+    }
+  }
+  const list = wbSpeakerList();
+  const total = list.reduce((n, sp) => n + (sp.seconds || 0), 0);
+  if (list.length && total > 0) {
+    html += '<div class="sum-group"><h3>说话占比</h3><ul>' + list.slice(0, 6).map((sp) =>
+      '<li><time>' + Math.round(100 * sp.seconds / total) + '%</time><span style="color:' + spkColor(sp.id) + '">' +
+      esc(sp.personName || sp.label) + ' · ' + sp.count + ' 句</span></li>').join('') + '</ul></div>';
+  }
+  if (Array.isArray(c.caveats) && c.caveats.length) html += '<p class="sum-foot">' + esc(c.caveats[0]) + '</p>';
+  return html;
+}
+function renderWbSummary() {
+  const wb = S.wb;
+  const scope = wb.summaryScope;
+  $('#inspKicker').textContent = 'AI 总结';
+  const s = findSession(wb.sid);
+  $('#inspTitle').textContent = wb.sid ? ((s && s.title) || '本场笔记') : '本场笔记';
+  $('#inspSub').textContent = wb.sid ? '要点可回溯原文 · ' + shortSid(wb.sid) : '选择一场查看总结';
+  const tabs = [['content', '要点'], ['time', '时间'], ['category', '分类'], ['coach', '复盘']];
+  let body = '<div class="sum-tabs">' + tabs.map(([k, l]) =>
+    '<button class="sum-tab' + (scope === k ? ' on' : '') + '" data-sum-tab="' + k + '">' + l + '</button>').join('') + '</div>';
+  if (!wb.sid) body += '<div class="sum-empty">从左边选一场，这里会显示 AI 总结。</div>';
+  else if (scope === 'coach') body += wbCoachHtml();
+  else body += wbSummaryHtml(wb.summaries[scope], scope);
+  const scroll = $('#inspScroll');
+  const top = scroll.scrollTop;
+  scroll.innerHTML = body;
+  scroll.scrollTop = top;
+  $('#inspActions').innerHTML = wb.sid
+    ? '<button class="btn primary sm" data-wb-gen="' + scope + '"' + (wb.busy ? ' disabled' : '') + '>' +
+      (wb.busy ? '正在生成…' : (scope === 'coach' ? '重新复盘' : '生成总结')) + '</button>'
+    : '';
+}
+async function loadWbSummary(scope) {
+  const wb = S.wb;
+  const sid = wb.sid;
+  if (!sid) return;
+  try {
+    const d = await api('/api/summary?session_id=' + encodeURIComponent(sid) + '&scope=' + scope);
+    if (!d || !d.ok || !d.payload || S.wb.sid !== sid) return;
+    wb.summaries[scope] = d.payload;
+    if (wb.summaryScope === scope) renderWbSummary();
+  } catch (e) {}
+}
+async function loadWbCoach() {
+  const sid = S.wb.sid;
+  if (!sid || S.wb.coach) return;
+  try {
+    const d = await api('/api/coach?session_id=' + encodeURIComponent(sid));
+    if (S.wb.sid !== sid) return;
+    S.wb.coach = d;
+  } catch (e) {
+    if (S.wb.sid === sid) S.wb.coach = null;
+  }
+  if (S.wb.summaryScope === 'coach' && S.wb.sid === sid) renderWbSummary();
+}
+function setWbSummaryScope(scope) {
+  S.wb.summaryScope = scope;
+  renderWbSummary();
+  if (scope === 'coach') loadWbCoach();
+  else if (!S.wb.summaries[scope]) loadWbSummary(scope);
+}
+async function generateWbSummary(scope) {
+  const wb = S.wb;
+  const sid = wb.sid;
+  if (!sid || wb.busy) return;
+  wb.busy = true;
+  renderWbSummary();
+  try {
+    if (scope === 'coach') {
+      const d = await api('/api/coach?session_id=' + encodeURIComponent(sid));
+      if (S.wb.sid === sid) wb.coach = d;
+    } else {
+      await post('/api/summarize', { session_id: sid, mode: scope, engine: 'auto' });
+      const d = await api('/api/summary?session_id=' + encodeURIComponent(sid) + '&scope=' + scope);
+      if (S.wb.sid === sid && d && d.ok && d.payload) wb.summaries[scope] = d.payload;
+    }
+    if (S.wb.sid === sid) toast(scope === 'coach' ? '复盘已更新' : '总结已生成');
+  } catch (e) {
+    if (S.wb.sid === sid) toast('生成失败：' + e.message);
+  }
+  wb.busy = false;
+  if (S.wb.sid === sid) renderWbSummary();
+}
+
+/* ================================================================ 设置（原生）
+   分类 + 搜索 + 即时保存；主题是壳本地设置，其余 prefs 存引擎。 */
+const FALLBACK_HINTS = {
+  ask: '直取失败时会先问你。',
+  auto: '按场次自动选择回退方式。',
+  per_room: '每个房间单独开一个浏览器。',
+  shared: '多个房间共用一个浏览器窗口。',
+  none: '直取失败就停下，不自动打开浏览器。',
+};
+let savedTimer = null;
+function markSaved() {
+  const el = $('#saveState');
+  if (!el) return;
+  el.textContent = '已保存 · 刚刚';
+  el.classList.add('is-saved');
+  clearTimeout(savedTimer);
+  savedTimer = setTimeout(() => {
+    el.textContent = '已保存';
+    el.classList.remove('is-saved');
+  }, 1800);
+}
+function updateFallbackHint() {
+  const el = $('#fallbackHint');
+  const sel = $('#prefFallback');
+  if (el && sel) el.textContent = FALLBACK_HINTS[sel.value] || FALLBACK_HINTS.ask;
+}
+function openSettings() {
+  if (!S.set.loaded) loadSettings();
+  else renderSettings();
+}
+async function loadSettings() {
+  const st = S.set;
+  if (st.busy) return;
+  st.busy = true;
+  try {
+    const [cfg, lan] = await Promise.all([
+      api('/api/settings'),
+      api('/api/lan').catch(() => null),
+    ]);
+    st.cfg = cfg;
+    st.prefs = cfg.prefs || {};
+    st.profiles = cfg.profiles || [];
+    st.current = (cfg.current && cfg.current.id) || cfg.active || '';
+    st.lan = lan;
+    st.loaded = true;
+  } catch (e) {
+    toast('设置加载失败：' + e.message);
+  } finally {
+    st.busy = false;
+  }
+  if (S.view !== 'settings') return;
+  renderSettings();
+  fillProfileForm();
+  setSettingsPane(st.pane);
+}
+function fillProfileForm() {
+  const st = S.set;
+  const cur = st.profiles.find((p) => p.id === st.current) || st.profiles[0];
+  if (!cur) return;
+  $('#setBase').value = cur.base || '';
+  $('#setModel').value = cur.model || '';
+  const temp = cur.temperature != null ? cur.temperature : 0.3;
+  $('#setTemp').value = String(temp);
+  $('#setTempVal').value = String(temp);
+  $('#setKey').value = '';
+  const cs = $('#connState');
+  cs.className = 'conn-state';
+  cs.textContent = cur.has_key ? '已保存 Key · 未测试' : '未配置 Key';
+}
+function renderProfiles() {
+  const st = S.set;
+  const list = $('#profileList');
+  if (!st.profiles.length) {
+    list.innerHTML = '<div class="profile-empty">还没有保存连接。填下面的地址和模型，保存后会出现在这里。</div>';
+    return;
+  }
+  list.innerHTML = st.profiles.map((p) => {
+    const on = p.id === st.current;
+    return '<button class="profile-item' + (on ? ' on' : '') + '" data-profile="' + esc(p.id) + '">' +
+      '<span class="profile-name">' + (on ? '<i class="active-dot"></i>' : '') +
+      esc(p.name || p.model || '未命名连接') + '</span>' +
+      '<span class="profile-meta">' + esc((p.base || '') + ' · ' + (p.model || '')) +
+      (p.configured || p.has_key ? ' · 已配置 Key' : ' · 未配置 Key') + '</span></button>';
+  }).join('');
+}
+function renderSettings() {
+  const st = S.set;
+  const prefs = st.prefs || {};
+  const val = (sel, v) => { const el = $(sel); if (el) el.value = v == null ? '' : String(v); };
+  val('#prefFallback', prefs.direct_fallback || 'ask');
+  val('#prefOpenMode', prefs.open_mode || 'internal');
+  val('#prefCaptureMode', prefs.capture_mode || 'browser');
+  val('#prefCloseAction', prefs.close_action || 'tray');
+  val('#prefTopics', prefs.topics || 10);
+  updateFallbackHint();
+  const lan = st.lan || {};
+  $('#prefLan').checked = !!lan.enabled;
+  $('#lanDetails').hidden = !lan.enabled;
+  $('#lanUrl').textContent = lan.url || '—';
+  const warn = $('#lanWarn');
+  if (warn) {
+    const msg = lan.error || lan.firewall_error ||
+      (lan.firewall === 'blocked' ? '系统防火墙可能拦截了局域网访问。' : '');
+    warn.hidden = !msg;
+    warn.textContent = msg || '';
+  }
+  renderProfiles();
+  $('#aboutEngine').textContent = API || '—';
+  const v = (S.health && (S.health.version || S.health.app_version)) || '0.1.0';
+  $('#aboutVersion').textContent = 'v' + String(v).replace(/^v/, '');
+  applyTheme();
+  if (st.search) filterSettings(st.search);
+}
+async function savePref(key, value) {
+  try {
+    const d = await post('/api/settings/prefs', { [key]: value });
+    S.set.prefs = Object.assign({}, S.set.prefs || {}, (d && d.prefs) || d || { [key]: value });
+    if (key === 'direct_fallback') updateFallbackHint();
+    if (key === 'close_action') fetchCloseAction();
+    markSaved();
+  } catch (e) {
+    toast('保存失败：' + e.message);
+  }
+}
+function setSettingsPane(pane) {
+  S.set.pane = pane;
+  $$('#setNav button').forEach((b) => {
+    const on = b.dataset.setpane === pane;
+    b.classList.toggle('on', on);
+    b.setAttribute('aria-current', on ? 'page' : 'false');
+  });
+  $$('#setContent .set-pane').forEach((p) => p.classList.toggle('on', p.dataset.pane === pane));
+  const content = $('#setContent');
+  if (content) content.scrollTop = 0;
+  const search = $('#setSearch');
+  if (search) search.value = '';
+  S.set.search = '';
+  filterSettings('');
+}
+function filterSettings(q) {
+  S.set.search = q || '';
+  const query = String(q || '').trim().toLowerCase();
+  const pane = $('#setContent .set-pane[data-pane="' + S.set.pane + '"]');
+  if (!pane) return;
+  let visible = 0;
+  $$('.set-row', pane).forEach((row) => {
+    let hay = row.textContent || '';
+    $$('select', row).forEach((sel) => {
+      if (sel.selectedOptions && sel.selectedOptions[0]) hay += ' ' + sel.selectedOptions[0].textContent;
+    });
+    $$('input', row).forEach((inp) => {
+      if (inp.type !== 'password') hay += ' ' + (inp.value || '');
+    });
+    const show = !query || hay.toLowerCase().includes(query);
+    row.hidden = !show;
+    if (show) visible += 1;
+  });
+  $$('.set-group', pane).forEach((group) => {
+    const rows = $$('.set-row', group);
+    group.hidden = rows.length > 0 && rows.every((r) => r.hidden);
+  });
+  const none = $('#setNoMatch');
+  if (none) none.hidden = !(query && visible === 0);
+}
+async function toggleLan(on) {
+  try {
+    const d = await post('/api/lan', { enabled: !!on });
+    S.set.lan = d;
+    renderSettings();
+    markSaved();
+    if (on && d.url) toast('手机访问已开启：' + d.url);
+    else if (d && d.error) toast('开启失败：' + d.error);
+  } catch (e) {
+    const box = $('#prefLan');
+    if (box) box.checked = !on;
+    toast('操作失败：' + e.message);
+  }
+}
+async function activateProfile(id) {
+  try {
+    await post('/api/settings/activate', { id });
+    S.set.current = id;
+    toast('已切换模型连接');
+    await loadSettings();
+  } catch (e) { toast('切换失败：' + e.message); }
+}
+async function saveConnection() {
+  const base = $('#setBase').value.trim();
+  const model = $('#setModel').value.trim();
+  if (!base || !model) { toast('接口地址和模型都要填'); return; }
+  const cur = S.set.profiles.find((p) => p.id === S.set.current);
+  const body = {
+    name: model,
+    provider: (cur && cur.provider) || 'openai',
+    base,
+    model,
+    temperature: Number($('#setTemp').value) || 0.3,
+  };
+  if (cur) body.id = cur.id;
+  const key = $('#setKey').value.trim();
+  if (key) body.key = key;
+  try {
+    await post('/api/settings', body);
+    $('#setKey').value = '';
+    toast('连接已保存');
+    markSaved();
+    await loadSettings();
+  } catch (e) { toast('保存失败：' + e.message); }
+}
+async function testConnection() {
+  const st = $('#connState');
+  st.className = 'conn-state busy';
+  st.textContent = '测试中…';
+  try {
+    const d = await post('/api/llm/test', {
+      base: $('#setBase').value.trim(),
+      model: $('#setModel').value.trim(),
+      key: $('#setKey').value.trim(),
+    });
+    st.className = 'conn-state ' + (d.ok ? 'ok' : 'bad');
+    st.textContent = d.ok ? '连接正常 · ' + (d.ms || 0) + 'ms' : ('失败：' + (d.error || '未知错误'));
+  } catch (e) {
+    st.className = 'conn-state bad';
+    st.textContent = '失败：' + e.message;
   }
 }
 
@@ -2632,11 +3386,12 @@ function drawScope(now) {
   if (!ctx) return;
   const w = scope.w, h = scope.h;
   if (!w || !h) return;
+  const dark = resolvedTheme() === 'dark';
   ctx.clearRect(0, 0, w, h);
-  ctx.fillStyle = '#070B0F';
+  ctx.fillStyle = dark ? '#070B0F' : '#F7F8F9';
   ctx.fillRect(0, 0, w, h);
 
-  ctx.strokeStyle = 'rgba(143,180,217,.055)';
+  ctx.strokeStyle = dark ? 'rgba(147,184,222,.055)' : 'rgba(90,101,114,.10)';
   ctx.lineWidth = 1;
   for (let x = 0; x < w; x += 44) {
     ctx.beginPath(); ctx.moveTo(x + 0.5, 0); ctx.lineTo(x + 0.5, h); ctx.stroke();
@@ -2644,7 +3399,7 @@ function drawScope(now) {
   for (let y = 0; y < h; y += 36) {
     ctx.beginPath(); ctx.moveTo(0, y + 0.5); ctx.lineTo(w, y + 0.5); ctx.stroke();
   }
-  ctx.strokeStyle = 'rgba(143,180,217,.13)';
+  ctx.strokeStyle = dark ? 'rgba(147,184,222,.13)' : 'rgba(90,101,114,.18)';
   ctx.beginPath(); ctx.moveTo(0, h / 2); ctx.lineTo(w, h / 2); ctx.stroke();
 
   const s = sessionFor(room);
@@ -2671,17 +3426,18 @@ function drawScope(now) {
     ctx.stroke();
     ctx.globalAlpha = 1;
   }
-  line('rgba(230,181,102,.85)', 0.85, 1, 1);
-  line('rgba(143,180,217,.55)', 0.5, 1.35, 1.13);
+  line(dark ? 'rgba(230,181,102,.85)' : 'rgba(138,90,14,.72)', 0.85, 1, 1);
+  line(dark ? 'rgba(143,180,217,.55)' : 'rgba(63,111,158,.45)', 0.5, 1.35, 1.13);
 
   const px = ((now / 26) % (w + 120)) - 60;
   const grad = ctx.createLinearGradient(px - 18, 0, px + 18, 0);
-  grad.addColorStop(0, 'rgba(230,181,102,0)');
-  grad.addColorStop(0.5, 'rgba(230,181,102,.18)');
-  grad.addColorStop(1, 'rgba(230,181,102,0)');
+  const sweep = dark ? '231,182,105' : '138,90,14';
+  grad.addColorStop(0, 'rgba(' + sweep + ',0)');
+  grad.addColorStop(0.5, dark ? 'rgba(231,182,105,.18)' : 'rgba(138,90,14,.12)');
+  grad.addColorStop(1, 'rgba(' + sweep + ',0)');
   ctx.fillStyle = grad;
   ctx.fillRect(px - 18, 0, 36, h);
-  ctx.strokeStyle = 'rgba(230,181,102,.5)';
+  ctx.strokeStyle = dark ? 'rgba(230,181,102,.5)' : 'rgba(138,90,14,.35)';
   ctx.beginPath(); ctx.moveTo(px, 0); ctx.lineTo(px, h); ctx.stroke();
 }
 function startScope() {
@@ -3163,6 +3919,124 @@ function bind() {
   };
   $('#btnStop').onclick = () => confirmStopRoom(selectedRoom());
   $('#stageRetry').onclick = () => retryRoom(selectedRoom());
+  $('#stagePause').onclick = () => togglePause();
+  $('#stageMarkBtn').onclick = () => markMoment();
+  $('#emptyDemoBtn').onclick = () => loadDemo();
+  $('#marksList').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-mark-seek]');
+    const room = selectedRoom();
+    if (!b || !room || !room.session_id) return;
+    switchView('workbench', { session: room.session_id, autoplay: true, t: Number(b.dataset.markSeek) || 0 });
+  });
+
+  /* 原生工作台：时间轴、筛选、字幕跳转、播放器、总结标签 */
+  $('#wbTlBars').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-t]');
+    if (b) wbSeek(Number(b.dataset.t) || 0);
+  });
+  $('#wbSpkFilters').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-spk-filter]');
+    if (!b) return;
+    S.wb.spk = b.dataset.spkFilter;
+    renderWbFilters();
+    renderWbTranscript();
+  });
+  $('#wbHighOnly').addEventListener('change', (e) => {
+    S.wb.high = !!e.target.checked;
+    renderWbTranscript();
+  });
+  $('#wbTranscript').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-seek]');
+    if (!b) return;
+    wbSeek(Number(b.dataset.seek) || 0, { play: true });
+  });
+  $('#wbPlay').onclick = wbTogglePlay;
+  $('#wbRange').addEventListener('input', (e) => {
+    const t = Number(e.target.value) || 0;
+    S.wb.currentT = t;
+    $('#wbCur').textContent = fmtDur(t);
+    const audio = $('#wbAudio');
+    if (S.wb.audioReady) { try { audio.currentTime = t; } catch (err) {} }
+  });
+  const wbSyncPlay = () => {
+    const on = !$('#wbAudio').paused;
+    $('#wbPlay .p-play').hidden = on;
+    $('#wbPlay .p-pause').hidden = !on;
+    $('#wbPlay').title = on ? '暂停' : '播放';
+  };
+  $('#wbAudio').addEventListener('timeupdate', () => {
+    const audio = $('#wbAudio');
+    const t = audio.currentTime || 0;
+    S.wb.currentT = t;
+    $('#wbCur').textContent = fmtDur(t);
+    $('#wbRange').value = String(Math.round(t));
+  });
+  $('#wbAudio').addEventListener('play', wbSyncPlay);
+  $('#wbAudio').addEventListener('pause', wbSyncPlay);
+  $('#wbAudio').addEventListener('ended', wbSyncPlay);
+  $('#wbExport').onclick = () => { if (S.wb.sid) downloadSession(S.wb.sid); };
+  $('#inspScroll').addEventListener('click', (e) => {
+    const tab = e.target.closest('[data-sum-tab]');
+    if (tab) return setWbSummaryScope(tab.dataset.sumTab);
+    const gen = e.target.closest('[data-wb-gen]');
+    if (gen) return generateWbSummary(gen.dataset.wbGen);
+    const seek = e.target.closest('[data-seek]');
+    if (seek) return wbSeek(Number(seek.dataset.seek) || 0, { play: true });
+  });
+  $('#inspActions').addEventListener('click', (e) => {
+    const gen = e.target.closest('[data-wb-gen]');
+    if (gen) generateWbSummary(gen.dataset.wbGen);
+  });
+
+  /* 原生设置：分类、搜索、即时保存 */
+  $('#setNav').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-setpane]');
+    if (b) setSettingsPane(b.dataset.setpane);
+  });
+  $('#setSearch').addEventListener('input', (e) => filterSettings(e.target.value));
+  $('#setSearch').addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      e.target.value = '';
+      filterSettings('');
+    }
+  });
+  $('#setContent').addEventListener('change', (e) => {
+    const t = e.target;
+    if (t.name === 'themeChoice') { setTheme(t.value); return; }
+    if (t.id === 'prefFallback') return savePref('direct_fallback', t.value);
+    if (t.id === 'prefOpenMode') return savePref('open_mode', t.value);
+    if (t.id === 'prefCaptureMode') return savePref('capture_mode', t.value);
+    if (t.id === 'prefCloseAction') return savePref('close_action', t.value);
+    if (t.id === 'prefLan') return toggleLan(t.checked);
+    if (t.id === 'prefTopics') {
+      const v = clamp(Number(t.value) || 10, 3, 40);
+      t.value = String(v);
+      return savePref('topics', v);
+    }
+  });
+  $('#setTemp').addEventListener('input', (e) => { $('#setTempVal').value = e.target.value; });
+  $('#profileList').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-profile]');
+    if (b) activateProfile(b.dataset.profile);
+  });
+  $('#providerChips').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-provider-base]');
+    if (!b) return;
+    $('#setBase').value = b.dataset.providerBase || '';
+    $('#setModel').value = b.dataset.providerModel || '';
+    $('#connState').className = 'conn-state';
+    $('#connState').textContent = '未测试';
+  });
+  $('#toggleKeyBtn').onclick = () => {
+    const k = $('#setKey');
+    const show = k.type === 'password';
+    k.type = show ? 'text' : 'password';
+    $('#toggleKeyBtn').textContent = show ? '隐藏' : '显示';
+  };
+  $('#copyLanBtn').onclick = () => copyText($('#lanUrl').textContent);
+  $('#testConnBtn').onclick = testConnection;
+  $('#saveConnBtn').onclick = saveConnection;
 
   // 实时字幕 / 标注：点说话人认人、切筛选、自动滚动
   $('#txTabs').addEventListener('click', (e) => {
@@ -3311,7 +4185,15 @@ function bind() {
     $('#frame').src = S.frameRaw ? S.frameRawUrl : S.frameEmbedUrl;
   };
 
-  $('#cmdkBtn').onclick = openPalette;
+  $('#cmdkBtn').onclick = () => {
+    // 设置页里这个框就是“搜索设置”，不再弹命令面板。
+    if (S.view === 'settings') {
+      const s = $('#setSearch');
+      if (s) { s.focus(); return; }
+    }
+    openPalette();
+  };
+  $('#themeToggle').onclick = toggleTheme;
   $('#btnSettings').onclick = () => switchView('settings');
   $('#recPill').onclick = () => {
     const live = liveRooms();
@@ -3472,6 +4354,8 @@ window.__LN_SHELL__ = {
       todo: annotStats().todo, annotTab: S.annotTab, annotAuto: S.annotAuto,
       selectedSession: S.selectedSession, workbenchSid: S.workbenchSid,
       workbenchReady: S.workbenchReady, frameLoads: S.frameLoads,
+      theme: resolvedTheme(), themeChoice, wbLines: S.wb.rows.length,
+      wbSummaryScope: S.wb.summaryScope,
       trashCount: S.trashCount, batchMode: S.batchMode,
       batchSelected: S.batchSel.size,
       hudSid: S.hudSid, finish: !!S.finish,

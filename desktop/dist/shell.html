@@ -1,8 +1,9 @@
 <!doctype html>
-<html lang="zh-CN" data-theme="studio">
+<html lang="zh-CN" data-theme="dark">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#0A0C0F">
 <title>LiveNotes · 直播语记</title>
 <link rel="stylesheet" href="/shell.css">
 <link rel="stylesheet" href="/hud.css">
@@ -12,12 +13,13 @@
   <header class="topbar" data-tauri-drag-region>
     <div class="brand" data-tauri-drag-region>
       <span class="mark">LN</span>
-      <span class="wordmark" data-tauri-drag-region>LiveNotes</span>
+      <span class="wordmark" data-tauri-drag-region>LiveNotes<span>实时语记</span></span>
     </div>
+    <div class="topbar-divider" data-tauri-drag-region></div>
     <div class="crumb" id="crumb" data-tauri-drag-region><b>收听</b><i>/</i><span id="crumbSub">全部直播间</span></div>
     <button class="cmdk" id="cmdkBtn" aria-label="打开命令面板">
       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 5 5"/></svg>
-      <span>搜索或执行命令</span>
+      <span id="cmdkLabel">搜索或执行命令</span>
       <kbd>Ctrl K</kbd>
     </button>
     <div class="top-right">
@@ -27,6 +29,10 @@
       </button>
       <button class="rec-pill idle" id="recPill" title="正在采集的直播间">
         <span class="dot" id="recDot"></span><b id="liveCount">0</b> 路在听
+      </button>
+      <button class="icon-btn theme-toggle" id="themeToggle" title="切换到亮色模式" aria-label="切换主题">
+        <svg class="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.2 5.2l1.4 1.4M17.4 17.4l1.4 1.4M18.8 5.2l-1.4 1.4M6.6 17.4l-1.4 1.4"/></svg>
+        <svg class="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M20 14.2A8 8 0 0 1 9.8 4a8.2 8.2 0 1 0 10.2 10.2z"/></svg>
       </button>
       <div class="pane-tools" id="paneTools" role="group" aria-label="面板">
         <button class="icon-btn on" data-pane="side" title="房间列表  [" aria-label="房间列表">
@@ -62,28 +68,28 @@
   <div class="body" id="body">
     <nav class="rail" id="rail" aria-label="主导航">
       <button class="rail-item" data-view="hud" title="记录卡">
-        <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3M9 21h6"/></svg>
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3M9 21h6"/></svg>
         <span>记录</span><i class="badge rec" id="railRec" hidden>REC</i>
       </button>
       <button class="rail-item on" data-view="listen" title="收听">
-        <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M3 12h2.5l2-5 3 10 2.5-7 2 4H21"/></svg>
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M3 12h2.5l2-5 3 10 2.5-7 2 4H21"/></svg>
         <span>收听</span><i class="badge" id="railBadge" hidden>0</i>
       </button>
       <button class="rail-item" data-view="workbench" title="工作台">
-        <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M9 9v11"/></svg>
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M9 9v11"/></svg>
         <span>工作台</span>
       </button>
       <button class="rail-item" data-view="files" title="文件中心">
-        <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
         <span>文件</span>
       </button>
       <button class="rail-item" data-view="people" title="人物档案">
-        <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><circle cx="9" cy="8" r="3"/><path d="M3.5 19a5.5 5.5 0 0 1 11 0M16 5.5a3 3 0 1 1 0 5.8M17.5 14.2A5.5 5.5 0 0 1 20.5 19"/></svg>
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><circle cx="9" cy="8" r="3"/><path d="M3.5 19a5.5 5.5 0 0 1 11 0M16 5.5a3 3 0 1 1 0 5.8M17.5 14.2A5.5 5.5 0 0 1 20.5 19"/></svg>
         <span>人物</span>
       </button>
       <div class="rail-spacer"></div>
       <button class="rail-item" data-view="settings" title="设置">
-        <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2.8v2M12 19.2v2M2.8 12h2M19.2 12h2M5.5 5.5l1.4 1.4M17.1 17.1l1.4 1.4M18.5 5.5l-1.4 1.4M6.9 17.1l-1.4 1.4"/></svg>
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2.8v2M12 19.2v2M2.8 12h2M19.2 12h2M5.5 5.5l1.4 1.4M17.1 17.1l1.4 1.4M18.5 5.5l-1.4 1.4M6.9 17.1l-1.4 1.4"/></svg>
         <span>设置</span>
       </button>
     </nav>
@@ -93,7 +99,7 @@
         <h1 id="sideTitle">在听</h1>
         <span class="count" id="sideCount">0</span>
         <span class="grow"></span>
-        <button class="icon-btn" id="btnAdd" title="添加直播间" aria-label="添加直播间">
+        <button class="icon-btn accent" id="btnAdd" title="添加直播间" aria-label="添加直播间">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
         </button>
         <button class="icon-btn" id="btnSideClose" title="收起房间列表" aria-label="收起房间列表">
@@ -116,12 +122,17 @@
     <main class="canvas" id="canvas">
       <section class="listen" id="listenView">
         <div class="stage-head">
+          <button class="back-btn" id="stageBack" title="回到列表" aria-label="回到列表">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg>
+          </button>
           <span class="stage-ch" id="stageCh">CH--</span>
           <div class="stage-title">
-            <b id="stageName">选择一个直播间</b>
-            <span id="stageMeta">—</span>
+            <h2 id="stageName">选择一个直播间</h2>
+            <p id="stageMeta">—</p>
           </div>
           <div class="stage-actions">
+            <button class="btn sm ghost" id="stagePause" hidden>暂停</button>
+            <button class="btn sm ghost" id="stageMarkBtn" hidden>标记此刻</button>
             <div class="seg" id="stageSeg" role="tablist" aria-label="舞台模式">
               <button data-stage="signal" role="tab">信号</button>
               <button data-stage="page" role="tab">页面</button>
@@ -134,12 +145,38 @@
         <div class="stage-wrap" id="stageWrap">
           <canvas id="scope"></canvas>
           <div class="stage-watermark" id="stageMark">CH--</div>
+          <div class="monitor-now" id="monitorNow" hidden>
+            <div class="live-badge" id="detailBadge"><i></i><span id="detailBadgeText">录音中</span></div>
+            <div class="big-timer" id="detailTimer">00:00:00</div>
+            <div class="level" id="levelMeter" aria-hidden="true"></div>
+            <dl class="monitor-meta">
+              <div><dt>采集方式</dt><dd id="detailMode">—</dd></div>
+              <div><dt>开始时间</dt><dd id="detailStart">—</dd></div>
+              <div><dt>已转写</dt><dd id="detailLines">0 条</dd></div>
+            </dl>
+            <div class="marks" id="marksWrap" hidden>
+              <h3>标记</h3>
+              <div class="chip-row" id="marksList"></div>
+            </div>
+          </div>
           <div class="stage-stats" id="stageStats"></div>
           <div class="stage-badge" id="stageBadge" hidden></div>
           <div class="stage-empty" id="stageEmpty">
+            <div class="empty-icon" aria-hidden="true">
+              <svg width="46" height="46" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 24h5l3-8 5 16 4-12 4 8 3-4h14"/></svg>
+            </div>
             <h2>还没有在听的直播间</h2>
-            <p>把直播间链接粘到左边，开始听。采集在引擎里独立跑，切到工作台、关掉窗口都不会停。</p>
-            <button class="btn primary" id="emptyAdd">＋ 添加直播间</button>
+            <p class="empty-lead">粘贴直播间链接，采集在本地引擎里独立跑。切到工作台、关掉窗口都不会停。</p>
+            <ol class="steps">
+              <li><b>粘贴链接</b><span>抖音、快手、B 站都可以</span></li>
+              <li><b>选择采集方式</b><span>直取音频，或跟随一个浏览器</span></li>
+              <li><b>自动转写并生成纪要</b><span>说话人、时间轴、AI 总结</span></li>
+            </ol>
+            <div class="empty-actions">
+              <button class="btn primary" id="emptyAdd">＋ 添加直播间</button>
+              <button class="btn" id="emptyDemoBtn">看一个监听中的示例</button>
+            </div>
+            <p class="empty-hint">音频只存在这台电脑上 · 关窗后录音继续</p>
           </div>
           <div class="stage-error" id="stageError" hidden>
             <h3 id="stageErrTitle">这一路没有在采集</h3>
@@ -205,6 +242,50 @@
         </div>
       </section>
 
+      <section class="wb-view" id="wbView" hidden>
+        <div class="wb-main" id="wbMain">
+          <header class="stage-head wb-head">
+            <div class="stage-title">
+              <h2 id="wbTitle">工作台</h2>
+              <p id="wbMeta">选择左侧场次，查看时间轴、字幕与总结。</p>
+            </div>
+            <div class="stage-actions">
+              <button class="btn sm" id="wbExport" disabled>导出纪要</button>
+            </div>
+          </header>
+          <div class="wb-scroll" id="wbScroll">
+            <div class="timeline-block">
+              <div class="tl-head">
+                <b>全场时间轴</b>
+                <span class="tl-hint" id="wbTlHint">点击柱体定位时段</span>
+              </div>
+              <div class="tl-bars" id="wbTlBars"></div>
+              <div class="tl-axis" id="wbTlAxis"></div>
+            </div>
+            <div class="filterbar">
+              <div class="chip-row" id="wbSpkFilters"></div>
+              <span class="grow"></span>
+              <label class="switch-line"><input type="checkbox" id="wbHighOnly"><span>只看高价值</span></label>
+              <span class="filter-meta" id="wbFilterMeta"></span>
+            </div>
+            <div class="transcript-scroll" id="wbTranscriptScroll">
+              <div class="transcript" id="wbTranscript"></div>
+              <div class="transcript-empty" id="wbEmpty" hidden>本场还没有转写内容。</div>
+            </div>
+          </div>
+          <footer class="player" id="wbPlayer">
+            <button class="p-btn" id="wbPlay" title="播放 / 暂停" aria-label="播放">
+              <svg class="p-play" width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 4.5l12 7.5-12 7.5z"/></svg>
+              <svg class="p-pause" width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" hidden><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg>
+            </button>
+            <span class="p-time"><b id="wbCur">00:00</b> <i>/</i> <span id="wbDur">00:00</span></span>
+            <input class="p-range" type="range" id="wbRange" min="0" max="0" value="0" step="1" aria-label="播放进度">
+            <span class="p-note" id="wbNote">点击时间码可定位</span>
+            <audio id="wbAudio" preload="metadata"></audio>
+          </footer>
+        </div>
+      </section>
+
       <section class="hud-view" id="hudView" hidden>
         <div class="hud-card" id="hudCard">
           <div class="hud-status-row">
@@ -259,6 +340,193 @@
         </div>
       </section>
 
+      <section class="set-view" id="setView" hidden>
+        <header class="settings-head">
+          <div>
+            <h1>设置</h1>
+            <p>外观、采集与模型连接。修改会立即保存到本机。</p>
+          </div>
+          <div class="set-head-tools">
+            <label class="set-search">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 5 5"/></svg>
+              <input id="setSearch" placeholder="搜索设置" autocomplete="off" spellcheck="false">
+            </label>
+            <span class="save-state" id="saveState">已保存</span>
+          </div>
+        </header>
+        <div class="settings">
+          <nav class="set-nav" id="setNav" aria-label="设置分类">
+            <button data-setpane="appearance" class="on">外观</button>
+            <button data-setpane="capture">采集</button>
+            <button data-setpane="desktop">桌面版</button>
+            <button data-setpane="mobile">手机访问</button>
+            <button data-setpane="model">模型与连接</button>
+            <button data-setpane="analysis">AI 分析</button>
+            <button data-setpane="about">关于</button>
+          </nav>
+          <div class="set-content" id="setContent">
+            <section class="set-pane on" data-pane="appearance">
+              <div class="set-group">
+                <div class="set-row set-row-top">
+                  <div class="set-label"><span>主题</span><p>跟随系统时，会随 macOS / Windows 的明暗设置切换。</p></div>
+                  <div class="theme-grid">
+                    <label class="theme-card" data-theme-choice="light">
+                      <input type="radio" name="themeChoice" value="light">
+                      <span class="theme-preview tp-light"><i></i><i></i><i></i></span>
+                      <span class="theme-name">亮色</span>
+                    </label>
+                    <label class="theme-card" data-theme-choice="dark">
+                      <input type="radio" name="themeChoice" value="dark">
+                      <span class="theme-preview tp-dark"><i></i><i></i><i></i></span>
+                      <span class="theme-name">暗色</span>
+                    </label>
+                    <label class="theme-card" data-theme-choice="system">
+                      <input type="radio" name="themeChoice" value="system">
+                      <span class="theme-preview tp-system"><i class="tp-half"></i><i></i><i></i></span>
+                      <span class="theme-name">跟随系统</span>
+                    </label>
+                  </div>
+                </div>
+                <p class="set-note">顶栏右侧的太阳 / 月亮可以随时快速切换。设置只影响这台电脑。</p>
+              </div>
+            </section>
+
+            <section class="set-pane" data-pane="capture">
+              <div class="set-group">
+                <div class="set-row">
+                  <div class="set-label"><span>采集回退方式</span><p>直取失败时怎么继续录。</p></div>
+                  <div class="ctrl">
+                    <select id="prefFallback">
+                      <option value="ask">每次问我</option>
+                      <option value="auto">自动选择</option>
+                      <option value="per_room">每个房间独立浏览器</option>
+                      <option value="shared">共用一个浏览器</option>
+                      <option value="none">不自动回退</option>
+                    </select>
+                  </div>
+                </div>
+                <p class="set-note" id="fallbackHint">直取失败时会先问你。</p>
+              </div>
+            </section>
+
+            <section class="set-pane" data-pane="desktop">
+              <div class="set-group">
+                <div class="set-row">
+                  <div class="set-label"><span>打开方式</span><p>点击直播链接、打开页面时用哪边。</p></div>
+                  <div class="ctrl"><select id="prefOpenMode">
+                    <option value="internal">应用内</option>
+                    <option value="external">系统浏览器</option>
+                  </select></div>
+                </div>
+                <div class="set-row">
+                  <div class="set-label"><span>采集方式</span><p>默认用哪种方式抓直播音频。</p></div>
+                  <div class="ctrl"><select id="prefCaptureMode">
+                    <option value="browser">跟随浏览器</option>
+                    <option value="direct">直取音频</option>
+                    <option value="external">外部工具</option>
+                  </select></div>
+                </div>
+                <div class="set-row">
+                  <div class="set-label"><span>关闭窗口时</span><p>录音还在进行时的行为。</p></div>
+                  <div class="ctrl"><select id="prefCloseAction">
+                    <option value="tray">留在托盘继续录</option>
+                    <option value="quit">停止并退出</option>
+                  </select></div>
+                </div>
+              </div>
+            </section>
+
+            <section class="set-pane" data-pane="mobile">
+              <div class="set-group">
+                <div class="set-row">
+                  <div class="set-label"><span>手机访问</span><p>在同一个局域网里，用手机打开实时字幕和纪要。</p></div>
+                  <label class="switch"><input type="checkbox" id="prefLan"><span class="switch-track"></span></label>
+                </div>
+                <div class="set-lan" id="lanDetails" hidden>
+                  <div class="lan-url" id="lanUrl">—</div>
+                  <button class="btn sm" id="copyLanBtn">复制链接</button>
+                  <p class="set-warn" id="lanWarn" hidden></p>
+                </div>
+              </div>
+            </section>
+
+            <section class="set-pane" data-pane="model">
+              <div class="set-group">
+                <div class="set-row set-row-top">
+                  <div class="set-label"><span>已保存的连接</span><p>选中一个作为当前使用的模型。</p></div>
+                  <div class="profile-list" id="profileList"></div>
+                </div>
+                <div class="set-row set-row-top">
+                  <div class="set-label"><span>快速填充</span><p>常见服务商的默认地址与模型。</p></div>
+                  <div class="provider-chips" id="providerChips">
+                    <button data-provider-base="https://api.deepseek.com/v1" data-provider-model="deepseek-chat">DeepSeek</button>
+                    <button data-provider-base="https://api.openai.com/v1" data-provider-model="gpt-4o-mini">OpenAI</button>
+                    <button data-provider-base="https://dashscope.aliyuncs.com/compatible-mode/v1" data-provider-model="qwen-plus">通义千问</button>
+                    <button data-provider-base="https://open.bigmodel.cn/api/paas/v4" data-provider-model="glm-4-flash">智谱 GLM</button>
+                    <button data-provider-base="http://127.0.0.1:11434/v1" data-provider-model="qwen2.5:7b">Ollama</button>
+                  </div>
+                </div>
+                <div class="set-row">
+                  <div class="set-label"><span>接口地址</span></div>
+                  <div class="ctrl wide"><input id="setBase" placeholder="https://api.example.com/v1" autocomplete="off" spellcheck="false"></div>
+                </div>
+                <div class="set-row">
+                  <div class="set-label"><span>模型</span></div>
+                  <div class="ctrl wide"><input id="setModel" placeholder="deepseek-chat" autocomplete="off" spellcheck="false"></div>
+                </div>
+                <div class="set-row">
+                  <div class="set-label"><span>API Key</span><p>只保存在本机的数据目录里。</p></div>
+                  <div class="ctrl wide input-wrap">
+                    <input id="setKey" type="password" placeholder="sk-…" autocomplete="off" spellcheck="false">
+                    <button class="btn sm" id="toggleKeyBtn" type="button">显示</button>
+                  </div>
+                </div>
+                <div class="set-row">
+                  <div class="set-label"><span>温度</span><p>越低越稳定，越高越发散。</p></div>
+                  <div class="ctrl temp-ctrl">
+                    <input type="range" id="setTemp" min="0" max="1" step="0.1" value="0.3">
+                    <output id="setTempVal">0.3</output>
+                  </div>
+                </div>
+                <div class="set-row">
+                  <div class="set-label"><span>连接状态</span></div>
+                  <div class="ctrl conn-ctrl">
+                    <span class="conn-state" id="connState">未测试</span>
+                    <button class="btn sm" id="testConnBtn">测试连接</button>
+                    <button class="btn sm primary" id="saveConnBtn">保存连接</button>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <section class="set-pane" data-pane="analysis">
+              <div class="set-group">
+                <div class="set-row">
+                  <div class="set-label"><span>话题数量</span><p>生成纪要时，最多整理多少个话题。</p></div>
+                  <div class="ctrl unit-ctrl"><input type="number" id="prefTopics" min="3" max="40" step="1" value="10"><span class="unit">个</span></div>
+                </div>
+                <p class="set-note">AI 总结会优先使用已配置的模型；没配置时用本地摘要，内容仍可回溯到原文。</p>
+              </div>
+            </section>
+
+            <section class="set-pane" data-pane="about">
+              <div class="about-card">
+                <div class="brand-mark-lg">LN</div>
+                <h3>LiveNotes 实时语记</h3>
+                <p>本地采集、转写与整理直播间内容。音频和数据只存在这台电脑上。</p>
+                <div class="about-rows">
+                  <div><span>版本</span><b id="aboutVersion">v0.1.0</b></div>
+                  <div><span>本地引擎</span><b id="aboutEngine">—</b></div>
+                  <div><span>数据</span><b>仅存本机</b></div>
+                </div>
+              </div>
+            </section>
+
+            <div class="set-no-match" id="setNoMatch" hidden>没有匹配的设置项。</div>
+          </div>
+        </div>
+      </section>
+
       <section class="frame-view no-head" id="frameView" hidden>
         <div class="frame-head">
           <button class="icon-btn" id="frameBack" title="返回">
@@ -275,7 +543,7 @@
 
     <aside class="inspector" id="inspector">
       <div class="insp-head">
-        <button class="icon-btn insp-close" id="btnInspClose" title="收起本场声音" aria-label="收起本场声音">
+        <button class="icon-btn insp-close" id="btnInspClose" title="收起面板" aria-label="收起面板">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
         </button>
         <div class="insp-kicker" id="inspKicker">尚未选择</div>

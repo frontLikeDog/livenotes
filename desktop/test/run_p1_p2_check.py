@@ -165,6 +165,7 @@ def main() -> int:
     env = os.environ.copy()
     env.update({
         "LIVENOTES_HOME": str(HOME),
+        "LIVENOTES_PYTHON": sys.executable,
         "LIVENOTES_NO_HELPERS": "1",
         "LIVENOTES_RESUME_ROOMS": "0",
         "LIVENOTES_ALLOW_MULTI": "1",
@@ -198,27 +199,41 @@ def main() -> int:
             cdp.call("Page.enable")
             cdp.wait_value("typeof window.__LN_SHELL__", "object")
             cdp.wait_value("window.__LN_SHELL__.state().sessions", lambda n: n >= 2)
-            # 1) 工作台内切场次：iframe 不重载
+            # 1) 原生工作台：切场次不重载任何 iframe，字幕直接换
             cdp.eval("window.__LN_SHELL__.view('workbench')")
             cdp.wait_value("window.__LN_SHELL__.state().workbenchReady", True)
             st0 = cdp.eval("JSON.stringify(window.__LN_SHELL__.state())")
             st0 = json.loads(st0)
             loads0 = st0["frameLoads"]
-            src0 = cdp.eval("document.getElementById('frame').src")
             first_sid = cdp.eval("(S.sessions.find(s=>s.is_demo)||{}).id || ''")
             assert first_sid, "demo session missing"
             log(f"workbench loaded sid={st0['selectedSession']} loads={loads0}; demo={first_sid}")
-            # 先点演示场，再点第二场：两次都应该只发消息，不重载 iframe。
             cdp.eval(f"""document.querySelector('#sideList [data-session="{first_sid}"]').click()""")
             cdp.wait_value("window.__LN_SHELL__.state().workbenchSid", first_sid)
+            cdp.wait_value("document.querySelectorAll('#wbTranscript .line').length",
+                           lambda n: n >= 2)
             cdp.eval(f"""document.querySelector('#sideList [data-session="{SECOND}"]').click()""")
             cdp.wait_value("window.__LN_SHELL__.state().workbenchSid", SECOND)
+            cdp.wait_value("window.__LN_SHELL__.state().workbenchReady", True)
             st1 = json.loads(cdp.eval("JSON.stringify(window.__LN_SHELL__.state())"))
-            src1 = cdp.eval("document.getElementById('frame').src")
-            log(f"switched sid={st1['selectedSession']} loads={st1['frameLoads']} src={src1}")
+            log(f"switched sid={st1['selectedSession']} loads={st1['frameLoads']} "
+                f"wbLines={st1['wbLines']}")
             assert st1["frameLoads"] == loads0, (loads0, st1["frameLoads"])
-            # 一次都没重载：iframe src 应保持初次加载的地址，内容靠消息原地切。
-            assert src1 == src0, (src0, src1)
+            assert st1["wbLines"] >= 0, st1["wbLines"]
+            assert cdp.eval("document.getElementById('wbView').hidden") is False
+            # 点时间码 → 该行进入定位态；说话人筛选只留这一位的字幕。
+            cdp.eval("document.querySelector('#wbTranscript .line-time').click()")
+            cdp.wait_value("!!document.querySelector('#wbTranscript .line.is-focus')", True)
+            n_before = cdp.eval("document.querySelectorAll('#wbTranscript .line').length")
+            chips = cdp.eval("document.querySelectorAll('#wbSpkFilters [data-spk-filter]').length")
+            if chips > 1:
+                cdp.eval("document.querySelectorAll('#wbSpkFilters [data-spk-filter]')[1].click()")
+                cdp.wait_value("document.querySelectorAll('#wbTranscript .line').length",
+                               lambda n: n <= n_before)
+                cdp.eval("document.querySelector('#wbSpkFilters [data-spk-filter=\"all\"]').click()")
+            # 右侧总结标签可切
+            cdp.eval("document.querySelector('#inspScroll [data-sum-tab=\"time\"]').click()")
+            cdp.wait_value("document.querySelector('#inspScroll .sum-tab.on').textContent", "时间")
 
             # 2) 批量选择与取消
             cdp.eval("document.querySelector('[data-batch-toggle]').click()")
@@ -260,73 +275,74 @@ def main() -> int:
                 f.eval("window.confirm=window.__lnConfirm")
                 log("cleanup trash + undo ok")
 
-            # 5) 回工作台，验字幕行右键菜单
+            # 5) 回工作台：原生时间轴、字幕与总结面板
             cdp.eval("window.__LN_SHELL__.view('workbench')")
             cdp.wait_value("window.__LN_SHELL__.state().workbenchReady", True)
             cdp.eval(f"""document.querySelector('#sideList [data-session="{first_sid}"]').click()""")
             cdp.wait_value("window.__LN_SHELL__.state().workbenchSid", first_sid)
-            with iframe_client(ui, lambda u: "library" not in u) as f:
-                f.wait_value("document.querySelectorAll('#list .urow').length",
-                             lambda n: n >= 2)
+            cdp.wait_value("window.__LN_SHELL__.state().workbenchReady", True)
+            cdp.wait_value("document.querySelectorAll('#wbTranscript .line').length",
+                           lambda n: n >= 2)
+            assert cdp.eval("document.querySelectorAll('#wbTlBars .tl-bar').length") == 44
+            assert cdp.eval("document.querySelectorAll('#wbTranscript .line .tag').length") >= 2
+            assert cdp.eval("document.getElementById('wbExport').disabled") is False
+            cdp.eval("document.getElementById('wbHighOnly').click()")
+            cdp.wait_value("!!document.querySelector('#wbHighOnly').checked", True)
+            cdp.wait_value(
+                "document.querySelector('#wbFilterMeta').textContent.includes('显示')", True)
+            cdp.eval("document.getElementById('wbHighOnly').click()")
+            cdp.wait_value("!!document.querySelector('#wbHighOnly').checked", False)
+            log("native workbench ok")
 
-                def row_menu():
-                    f.eval("""(() => { document.querySelector('#list .urow').dispatchEvent(
-                      new MouseEvent('contextmenu',{bubbles:true,clientX:220,clientY:240})); })()""")
-                    f.wait_value("!!document.querySelector('.ln-ctx')", True)
-
-                row_menu()
-                menu = f.eval("document.querySelector('.ln-ctx').innerText")
-                log(f"subtitle menu: {menu!r}")
-                for want in ("改说话人", "标记高价值", "在全库搜索"):
-                    assert want in menu, (want, menu)
-                f.eval("""[...document.querySelectorAll('.ln-ctx-item')]
-                  .find(b=>b.textContent.includes('标记高价值')).click()""")
-                f.wait_value("!!document.querySelector('#list .urow.manual')", True)
-
-                row_menu()
-                f.wait_value("document.querySelector('.ln-ctx').innerText.includes('取消高价值标记')",
-                             True)
-                f.eval("document.body.dispatchEvent(new MouseEvent('mousedown',{bubbles:true}))")
-                # 改说话人子菜单
-                row_menu()
-                f.eval("""[...document.querySelectorAll('.ln-ctx-item')]
-                  .find(b=>b.textContent.includes('改说话人')).click()""")
-                f.wait_value("!!document.querySelector('.ln-ctx')", True)
-                sub = f.eval("document.querySelector('.ln-ctx').innerText")
-                log(f"speaker menu: {sub!r}")
-                assert "新建说话人" in sub, sub
-                f.eval("document.body.dispatchEvent(new MouseEvent('mousedown',{bubbles:true}))")
-
-                # 输入框右键菜单（顶栏在 embed 里隐藏，但元素和菜单逻辑仍在）
-                f.eval("""(() => { const q=document.getElementById('gq');
-                  q.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,
-                    clientX:200,clientY:120})); })()""")
-                f.wait_value("!!document.querySelector('.ln-ctx')", True)
-                imenu = f.eval("document.querySelector('.ln-ctx').innerText")
-                log(f"input menu: {imenu!r}")
-                assert "粘贴" in imenu and "全选" in imenu, imenu
-                f.eval("document.body.dispatchEvent(new MouseEvent('mousedown',{bubbles:true}))")
-
-                # 选中文本 → iframe 内全库搜索面板
-                f.eval("""(() => { const t=document.querySelector('#list .urow .txt');
-                  const r=document.createRange(); r.selectNodeContents(t);
-                  const s=getSelection(); s.removeAllRanges(); s.addRange(r);
-                  t.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,
-                    clientX:260,clientY:300})); })()""")
-                f.wait_value("!!document.querySelector('.ln-ctx')", True)
-                smenu = f.eval("document.querySelector('.ln-ctx').innerText")
-                log(f"selection menu: {smenu!r}")
-                assert "定位到这句话" in smenu and "搜索" in smenu, smenu
-                f.eval("""[...document.querySelectorAll('.ln-ctx-item')]
-                  .find(b=>b.textContent.includes('搜索')).click()""")
-                f.wait_value("!!document.querySelector('.ln-search')", True)
-                f.wait_value("document.querySelectorAll('.ln-s-row').length",
-                             lambda n: n >= 1)
-                log("search overlay rows: " + str(
-                    f.eval("document.querySelectorAll('.ln-s-row').length")))
-                f.eval("document.querySelector('.ln-s-head [data-x]').click()")
-
-            ui.shot(proc.pid, "impl-workbench-menu.png")
+            # 6) 设置：分类、搜索、主题与即时保存
+            loads_wb = json.loads(cdp.eval("JSON.stringify(window.__LN_SHELL__.state())"))["frameLoads"]
+            cdp.eval("window.__LN_SHELL__.view('settings')")
+            cdp.wait_value("window.__LN_SHELL__.state().view", "settings")
+            assert cdp.eval("document.getElementById('setView').hidden") is False
+            assert cdp.eval("document.querySelectorAll('#setNav [data-setpane]').length") == 7
+            cdp.wait_value("typeof S !== 'undefined' && !!S.set.prefs", True)
+            # 搜索只滤当前分类；无命中时出现提示。
+            cdp.eval("(()=>{const i=document.getElementById('setSearch');"
+                     "i.value='跟随系统';i.dispatchEvent(new Event('input',{bubbles:true}))})()")
+            cdp.wait_value(
+                "document.querySelectorAll('.set-pane[data-pane=\"appearance\"] .set-row:not([hidden])').length",
+                1)
+            cdp.eval("(()=>{const i=document.getElementById('setSearch');"
+                     "i.value='绝无此项';i.dispatchEvent(new Event('input',{bubbles:true}))})()")
+            cdp.wait_value("document.getElementById('setNoMatch').hidden", False)
+            cdp.eval("(()=>{const i=document.getElementById('setSearch');"
+                     "i.value='';i.dispatchEvent(new Event('input',{bubbles:true}))})()")
+            # 主题卡与顶栏切换同步，并写入 localStorage。
+            cdp.eval("document.querySelector('[data-theme-choice=\"light\"] input').click()")
+            cdp.wait_value("document.documentElement.dataset.theme", "light")
+            cdp.wait_value("window.__LN_SHELL__.state().themeChoice", "light")
+            assert cdp.eval("localStorage.getItem('ln.theme')") == "light"
+            cdp.eval("document.getElementById('themeToggle').click()")
+            cdp.wait_value("document.documentElement.dataset.theme", "dark")
+            cdp.wait_value("window.__LN_SHELL__.state().themeChoice", "dark")
+            cdp.eval("document.querySelector('[data-theme-choice=\"system\"] input').click()")
+            cdp.wait_value("window.__LN_SHELL__.state().themeChoice", "system")
+            cdp.wait_value("document.documentElement.dataset.theme",
+                           cdp.eval("matchMedia('(prefers-color-scheme: dark)').matches"
+                                    " ? 'dark' : 'light'"))
+            cdp.eval("document.querySelector('[data-theme-choice=\"dark\"] input').click()")
+            cdp.wait_value("window.__LN_SHELL__.state().themeChoice", "dark")
+            # 偏好即时保存：切到采集页改回退方式，落库后再改回来。
+            cdp.eval("document.querySelector('#setNav [data-setpane=\"capture\"]').click()")
+            cdp.wait_value("!!document.querySelector('.set-pane[data-pane=\"capture\"].on')", True)
+            old_pref = cdp.eval("document.getElementById('prefFallback').value")
+            new_pref = "auto" if old_pref != "auto" else "ask"
+            cdp.eval(f"(()=>{{const el=document.getElementById('prefFallback');"
+                     f"el.value='{new_pref}';el.dispatchEvent(new Event('change',{{bubbles:true}}))}})()")
+            cdp.wait_value(
+                f"api('/api/settings').then(d=>d.prefs.direct_fallback)", new_pref)
+            cdp.eval(f"(()=>{{const el=document.getElementById('prefFallback');"
+                     f"el.value='{old_pref}';el.dispatchEvent(new Event('change',{{bubbles:true}}))}})()")
+            cdp.wait_value(
+                f"api('/api/settings').then(d=>d.prefs.direct_fallback)", old_pref)
+            st2 = json.loads(cdp.eval("JSON.stringify(window.__LN_SHELL__.state())"))
+            assert st2["frameLoads"] == loads_wb, (loads_wb, st2["frameLoads"])
+            log(f"settings ok theme={st2['theme']} pref={old_pref}")
             log("PASS")
         return 0
     finally:
