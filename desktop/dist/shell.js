@@ -54,6 +54,7 @@ const S = {
   paletteOpen: false,
   paletteIndex: 0,
   paletteActions: [],
+  paletteSearch: { q: '', rows: [], seq: 0, timer: 0 },
   modalOpen: false,
   closeAction: 'tray',
   txBusy: false,
@@ -65,6 +66,8 @@ const S = {
   workbenchSid: '',
   frameLoads: 0,
   frameKind: '',
+  /* 性能档位：/api/perf 的最近一次结果，界面与轮询按它降频。 */
+  perf: null,
   /* 原生工作台：一场的字幕、说话人、时间轴与 AI 总结。 */
   wb: {
     sid: '', rows: [], speakers: [], duration: 0, total: 0,
@@ -81,6 +84,8 @@ const S = {
   hudSid: '',
   hudRoomId: '',
   hudClock: { elapsed: 0, at: 0, paused: false, sid: '' },
+  /* 实时高光卡：同一时刻只露一条；「不用」后两分钟内不再弹。 */
+  hudHi: { saved: new Set(), dismissUntil: 0, current: '' },
   finish: null,
   finishTimer: null,
   /* 通知：应用内中心 + 系统 toast。booted 之前只填充中心，不重播。 */
@@ -196,12 +201,26 @@ async function post(path, body) {
   });
 }
 
-function toast(msg) {
+function toast(msg, action) {
   const el = $('#toast');
-  el.textContent = msg;
+  el.textContent = '';
+  const text = document.createElement('span');
+  text.textContent = msg;
+  el.appendChild(text);
+  if (action && action.label && typeof action.run === 'function') {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'toast-act';
+    btn.textContent = action.label;
+    btn.onclick = () => {
+      el.hidden = true;
+      action.run();
+    };
+    el.appendChild(btn);
+  }
   el.hidden = false;
   clearTimeout(toast._t);
-  toast._t = setTimeout(() => { el.hidden = true; }, 2800);
+  toast._t = setTimeout(() => { el.hidden = true; }, action ? 5200 : 2800);
 }
 
 function copyText(text) {
@@ -560,9 +579,27 @@ async function pollTranscript() {
   }
 }
 
+function perfNum(key, fallback) {
+  const v = S.perf && S.perf.effective && S.perf.effective[key];
+  const n = Number(v);
+  return n > 0 ? n : fallback;
+}
+function perfLite() {
+  return !!(S.perf && S.perf.effective && S.perf.effective.animations === false);
+}
+async function loadPerf() {
+  try {
+    const d = await api('/api/perf');
+    S.perf = d;
+    document.body.classList.toggle('perf-lite', !!perfLite());
+  } catch (e) {
+    /* 旧引擎没有 /api/perf：按流畅档继续。 */
+  }
+  return S.perf;
+}
 async function pollRoomsLoop() {
   await refreshRooms();
-  setTimeout(pollRoomsLoop, S.online ? 2000 : 5000);
+  setTimeout(pollRoomsLoop, S.online ? perfNum('live_poll_s', 2) * 1000 : 5000);
 }
 async function pollTranscriptLoop() {
   await pollTranscript();
@@ -641,6 +678,10 @@ const VIEW_META = {
   hud: { title: '记录', sub: '录音与收尾', side: false, insp: false },
   listen: { title: '收听', sub: '全部直播间', side: true, insp: true },
   workbench: { title: '工作台', sub: '时间轴与总结', side: true, insp: true },
+  follows: { title: '关注', sub: '开播提醒与自动记录', side: false, insp: false },
+  library: { title: '笔记库', sub: '每一场的要点与高光', side: false, insp: false },
+  weekly: { title: '周报', sub: '这一周的回看', side: false, insp: false },
+  note: { title: '笔记', sub: '要点、高光与原话', side: false, insp: false },
   files: { title: '文件中心', sub: '录音与回放', side: false, insp: false },
   people: { title: '人物档案', sub: '声纹与确认', side: false, insp: false },
   settings: { title: '设置', sub: '外观与连接', side: false, insp: false },
@@ -675,7 +716,8 @@ function switchView(view, opts) {
   $('#hudView').hidden = view !== 'hud';
   $('#wbView').hidden = view !== 'workbench';
   $('#setView').hidden = view !== 'settings';
-  $('#frameView').hidden = !['files', 'people', 'live', 'frame'].includes(view);
+  $('#frameView').hidden = !['files', 'people', 'live', 'frame',
+    'follows', 'library', 'weekly', 'note'].includes(view);
 
   if (view === 'hud') {
     if (opts.room) S.hudRoomId = opts.room;
@@ -695,9 +737,41 @@ function switchView(view, opts) {
     openSettings();
   } else if (view === 'files') {
     const tab = ['trash', 'cleanup'].includes(opts.tab) ? opts.tab : 'live';
-    setFrame(API + '/library?embed=1&tab=' + tab,
-      API + '/library?tab=' + tab, '文件中心', '录音与回放', true);
+    setFrame(API + '/files?embed=1&tab=' + tab,
+      API + '/files?tab=' + tab, '文件中心', '录音与回放', true);
     S.frameBackView = 'listen';
+  } else if (view === 'follows') {
+    setFrame(API + '/follows?embed=1', API + '/follows',
+      '关注', '开播提醒与自动记录', false);
+    S.frameBackView = 'listen';
+  } else if (view === 'library') {
+    const search = ['notes', 'lines', 'follows', 'ask'].includes(opts.search)
+      ? opts.search : '';
+    let extra = '';
+    if (search) {
+      extra = '&search=' + search +
+        (opts.q ? '&q=' + encodeURIComponent(opts.q) : '');
+    }
+    setFrame(API + '/library?embed=1' + extra,
+      API + '/library' + (extra ? '?' + extra.slice(1) : ''),
+      '笔记库', '每一场的要点与高光', false);
+    S.frameBackView = 'listen';
+  } else if (view === 'weekly') {
+    const period = /^\d{4}-W\d{1,2}$/.test(String(opts.period || ''))
+      ? String(opts.period) : '';
+    const q = 'embed=1' + (period ? '&period=' + encodeURIComponent(period) : '');
+    setFrame(API + '/weekly?' + q,
+      API + '/weekly' + (period ? '?period=' + encodeURIComponent(period) : ''),
+      '周报', period || '这一周的回看', false);
+    S.frameBackView = 'listen';
+  } else if (view === 'note') {
+    const sid = opts.session || S.selectedSession || '';
+    const t = opts.t != null && opts.t !== ''
+      ? '&t=' + encodeURIComponent(opts.t) : '';
+    const raw = '/note?session_id=' + encodeURIComponent(sid) + t;
+    setFrame(API + raw + '&embed=1', API + raw,
+      '笔记', sid ? shortSid(sid) : '', false);
+    S.frameBackView = opts.back || 'library';
   } else if (view === 'people') {
     setFrame(API + '/people?embed=1', API + '/people', '人物档案', '声纹与确认', true);
     S.frameBackView = 'listen';
@@ -753,7 +827,8 @@ function renderAll() {
 }
 
 function renderRail() {
-  const active = (S.view === 'live' || S.view === 'frame') ? 'listen' : S.view;
+  let active = (S.view === 'live' || S.view === 'frame') ? 'listen' : S.view;
+  if (S.view === 'note') active = 'library';
   $$('.rail-item').forEach((b) => b.classList.toggle('on', b.dataset.view === active));
   const n = liveRooms().length;
   const badge = $('#railBadge');
@@ -1496,18 +1571,49 @@ async function handleSpkAction(act, id, el) {
 async function markMoment() {
   const room = activeRoom();
   if (!room || !room.session_id) { toast('这一路还没有会话。'); return; }
+  const bookmark = S.view === 'hud';
   try {
-    await post('/api/live/mark', {
+    const d = await post('/api/live/mark', {
       session_id: room.session_id,
-      note: S.view === 'hud' ? '记录卡打点' : '标注模式打点',
+      note: bookmark ? '' : '标注模式打点',
+      kind: bookmark ? 'bookmark' : 'mark',
     });
-    const s = sessionFor(room);
-    const t = s && Array.isArray(s.marks) && s.marks.length
-      ? s.marks[s.marks.length - 1].t : null;
-    toast(t != null ? ('已标记 ' + fmtDur(t)) : '已标记，可在工作台的时间轴上找到。');
+    if (S.sessInfo && Array.isArray(d.marks)) S.sessInfo.marks = d.marks;
+    const m = d.mark || {};
+    const at = m.t != null ? ' ' + fmtDur(m.t) : '';
+    const undo = m.id ? {
+      label: '撤销',
+      run: () => undoMark(room.session_id, m.id, bookmark),
+    } : null;
+    toast((bookmark ? '已加书签' : '已标记') + at, undo);
     if (S.view === 'hud') await pollTranscript();
   } catch (e) {
-    toast('打点失败：' + e.message);
+    toast((bookmark ? '加书签失败：' : '打点失败：') + e.message);
+  }
+}
+async function undoMark(sid, markId, bookmark) {
+  try {
+    await api('/api/live/mark?session_id=' + encodeURIComponent(sid) +
+      '&id=' + encodeURIComponent(markId), { method: 'DELETE' });
+    toast(bookmark ? '已撤销书签' : '已撤销标记');
+    await pollTranscript();
+  } catch (e) {
+    toast('撤销失败：' + e.message);
+  }
+}
+async function saveHudHighlight(h) {
+  if (!h || !S.hudSid) return;
+  try {
+    await post('/api/highlights/save', {
+      session_id: S.hudSid, t0: h.t0, t1: h.t1, quote: h.quote || '',
+      kind: h.kind || 'info', speaker: h.speaker || '', score: h.score || 0,
+      why: h.why || '',
+    });
+    S.hudHi.saved.add(h.id);
+    renderHudHighlight();
+    toast('已收藏这段高光，笔记里会标「你收藏的」。');
+  } catch (e) {
+    toast('收藏失败：' + e.message);
   }
 }
 
@@ -2159,6 +2265,13 @@ function renderSettings() {
   val('#prefCaptureMode', prefs.capture_mode || 'browser');
   val('#prefCloseAction', prefs.close_action || 'tray');
   val('#prefTopics', prefs.topics || 10);
+  val('#prefPerfMode', prefs.perf_mode || 'auto');
+  val('#prefFollowInterval', prefs.follow_interval_s || 120);
+  const weekly = $('#prefWeekly');
+  if (weekly) weekly.checked = prefs.weekly_enabled !== false;
+  const qa = $('#prefQa');
+  if (qa) qa.checked = prefs.qa_enabled !== false;
+  renderPerfAdvice();
   updateFallbackHint();
   const lan = st.lan || {};
   $('#prefLan').checked = !!lan.enabled;
@@ -2177,6 +2290,43 @@ function renderSettings() {
   $('#aboutVersion').textContent = 'v' + String(v).replace(/^v/, '');
   applyTheme();
   if (st.search) filterSettings(st.search);
+}
+function renderPerfAdvice() {
+  const el = $('#perfAdvice');
+  if (!el || !S.perf) return;
+  const d = S.perf;
+  const cores = Number((d.detected || {}).cores) || 0;
+  const ram = Number((d.detected || {}).ram_mb) || 0;
+  const names = { lite: '低配', full: '流畅' };
+  const now = names[d.mode] || d.mode || '自动';
+  const advice = names[d.advice] || d.advice || '自动';
+  el.textContent = '当前：' + cores + ' 核 / ' +
+    (ram ? Math.round(ram / 1024) + ' GB' : '内存未知') +
+    ' · 建议' + advice + '，实际按' + now + '运行。';
+}
+function renderPerfOut() {
+  const out = $('#perfOut');
+  if (!out || !S.perf) return;
+  const e = S.perf.effective || {};
+  const names = { lite: '低配', full: '流畅' };
+  const yes = (v) => (v ? '开' : '关');
+  out.hidden = false;
+  out.textContent = [
+    '档位：' + (names[S.perf.mode] || S.perf.mode),
+    'ASR worker：' + e.asr_workers + ' · 线程：' + e.asr_threads,
+    '实时部分结果：' + yes(e.partials) + ' · 实时高光卡：' + yes(e.live_highlight_card),
+    '通知轮询：' + e.notify_poll_s + ' 秒 · 状态轮询：' + e.live_poll_s + ' 秒',
+    '笔记库每页：' + e.library_page + ' 条 · 逐字稿窗口：' + e.transcript_window + ' 句',
+    '问笔记：top ' + e.qa_top_k + ' / ' + e.qa_tokens + ' tokens',
+    S.perf.note || '',
+  ].filter(Boolean).join('\n');
+}
+async function savePerfMode(value) {
+  await savePref('perf_mode', value);
+  await loadPerf();
+  renderPerfAdvice();
+  renderPerfOut();
+  toast('性能档位已改为' + ({ auto: '自动', full: '流畅', lite: '低配' }[value] || value) + '。');
 }
 async function savePref(key, value) {
   try {
@@ -2330,6 +2480,40 @@ function hudTitle(room, s) {
   return roomName(room);
 }
 
+function hudHighlight() {
+  if (perfLite() || !S.sessInfo || S.sessInfo.id !== S.hudSid) return null;
+  if (S.sessInfo.paused || Date.now() < S.hudHi.dismissUntil) return null;
+  const list = Array.isArray(S.sessInfo.live_highlights) ? S.sessInfo.live_highlights : [];
+  for (let i = list.length - 1; i >= 0; i -= 1) {
+    const h = list[i];
+    if (h && h.id && !S.hudHi.saved.has(h.id)) return h;
+  }
+  return null;
+}
+function renderHudHighlight() {
+  const el = $('#hudHighlight');
+  if (!el) return;
+  const h = hudHighlight();
+  if (!h) {
+    if (!el.hidden) el.innerHTML = '';
+    el.hidden = true;
+    S.hudHi.current = '';
+    return;
+  }
+  const changed = S.hudHi.current !== h.id;
+  S.hudHi.current = h.id;
+  el.hidden = false;
+  el.dataset.hhId = h.id;
+  if (!changed) return;
+  el.innerHTML =
+    '<div class="hh-head"><span>这段话可能值得回听</span><b>' +
+    esc(fmtDur(h.t0)) + '–' + esc(fmtDur(h.t1)) + '</b></div>' +
+    (h.quote ? '<p class="hh-quote">「' + esc(h.quote) + '」</p>' : '') +
+    '<div class="hh-actions"><button type="button" data-hh="play">试听</button>' +
+    '<button type="button" data-hh="save">收藏</button>' +
+    '<button type="button" data-hh="skip">不用</button></div>';
+}
+
 function renderHud() {
   const room = hudRoom();
   const s = sessionFor(room) || (S.sessInfo && S.sessInfo.id === S.hudSid ? S.sessInfo : null);
@@ -2338,14 +2522,22 @@ function renderHud() {
   $('#hudCard').hidden = hasFinish || !room;
   $('#hudIdle').hidden = hasFinish || !!room;
 
-  if (hasFinish) { renderFinish(); return; }
+  if (hasFinish) {
+    $('#hudHighlight').hidden = true;
+    renderFinish();
+    return;
+  }
   if (!room) {
     S.hudClock = { elapsed: 0, at: 0, paused: false, sid: '' };
+    $('#hudHighlight').hidden = true;
     return;
   }
 
   const sid = room.session_id || '';
-  if (sid && sid !== S.hudSid) S.hudSid = sid;
+  if (sid && sid !== S.hudSid) {
+    S.hudSid = sid;
+    S.hudHi = { saved: new Set(), dismissUntil: 0, current: '' };
+  }
   const st = stateInfo(room);
   // 看门狗/采集页把这一路停了：不把用户丢回空态，直接进入收尾进度。
   if (st.k === 'stopped' && sid && !S.finish) {
@@ -2398,6 +2590,8 @@ function renderHud() {
   const part = S.partial && (S.partial.text || S.partial.transcript || '');
   $('#hudPartial').hidden = !part;
   $('#hudPartial').textContent = part ? ('识别中… ' + part) : '';
+
+  renderHudHighlight();
 
   const marks = (s && Array.isArray(s.marks)) ? s.marks : [];
   $('#hudMarks').hidden = marks.length === 0;
@@ -2639,11 +2833,10 @@ async function pollFinish() {
   setTimeout(tick, 1200);
 }
 
-function openNoteFor(sid) {
-  if (!sid) { switchView('workbench'); return; }
-  // 笔记页还没交付前，工作台就是这场笔记的可读页；路由保持一致，后面只换落点。
+function openNoteFor(sid, t) {
+  if (!sid) { switchView('library'); return; }
   S.selectedSession = sid;
-  switchView('workbench', { session: sid });
+  switchView('note', { session: sid, t: t, back: 'library' });
 }
 
 function dismissFinish() {
@@ -3286,6 +3479,10 @@ function paletteActions() {
     { id: 'listen', label: '收听工作区', hint: '看所有在听、切换直播间', key: '1', icon: '◉', run: () => switchView('listen') },
     { id: 'workbench', label: '工作台', hint: '场次、字幕、AI 总结', key: '2', icon: '▤', run: () => switchView('workbench') },
     { id: 'files', label: '文件中心', hint: '录音、回放、导出', key: '3', icon: '▧', run: () => switchView('files') },
+    { id: 'follows', label: '关注', hint: '开播提醒与自动记录', icon: '◔', run: () => switchView('follows') },
+    { id: 'library', label: '笔记库', hint: '每一场的要点与高光', icon: '▤', run: () => switchView('library') },
+    { id: 'ask', label: '问笔记', hint: '用一句话问你的笔记，答案带出处', icon: '✦', run: () => switchView('library', { search: 'ask' }) },
+    { id: 'weekly', label: '周报', hint: '这一周的回看', icon: '▦', run: () => switchView('weekly') },
     { id: 'cleanup', label: '体检清理', hint: '演示 / 空采集 / 重复场次', icon: '⌫', run: () => switchView('files', { tab: 'cleanup' }) },
     { id: 'trash', label: '回收站', hint: '还原或彻底删除', icon: '▤', run: () => switchView('files', { tab: 'trash' }) },
     { id: 'people', label: '人物档案', hint: '声纹与人名确认', key: '4', icon: '◎', run: () => switchView('people') },
@@ -3310,10 +3507,12 @@ function openPalette() {
   if (S.overlayDepth === 1) hideStageForOverlay();
   S.paletteOpen = true;
   S.paletteIndex = 0;
+  S.paletteSearch = { q: '', rows: [], seq: 0, timer: 0 };
   const p = $('#palette');
   p.hidden = false;
   const input = $('#pInput');
   input.value = '';
+  input.placeholder = '搜索笔记、原话，或输入命令：收听、工作台、添加直播间…';
   renderPalette();
   setTimeout(() => input.focus(), 20);
 }
@@ -3324,13 +3523,40 @@ function closePalette() {
   S.overlayDepth = Math.max(0, S.overlayDepth - 1);
   if (S.overlayDepth === 0) restoreStageFromOverlay();
 }
+function searchPaletteRows(q) {
+  const seq = ++S.paletteSearch.seq;
+  S.paletteSearch.q = q;
+  S.paletteSearch.rows = [];
+  if (q.length < 2) return;
+  api('/api/search?types=notes,utterances&limit=12&q=' + encodeURIComponent(q))
+    .then((d) => {
+      if (seq !== S.paletteSearch.seq || !S.paletteOpen) return;
+      S.paletteSearch.rows = (d.rows || []).map((row) => {
+        const t = row.t_start != null ? row.t_start : row.t;
+        return {
+          id: 'hit-' + row.kind + '-' + row.id,
+          label: row.session_title || '笔记',
+          hint: (row.speaker_label ? row.speaker_label + ' · ' : '') +
+            String(row.text || '').slice(0, 70),
+          icon: row.kind === 'utterance' ? '≡' : '▤',
+          run: () => openNoteFor(row.session_id, t),
+        };
+      });
+      S.paletteIndex = Math.min(S.paletteIndex, Math.max(0, S.paletteActions.length - 1));
+      renderPalette();
+    })
+    .catch(() => {});
+}
 function renderPalette() {
   const q = ($('#pInput').value || '').trim().toLowerCase();
-  S.paletteActions = paletteActions().filter((a) =>
+  const cmds = paletteActions().filter((a) =>
     !q || (a.label + ' ' + a.hint + ' ' + a.id).toLowerCase().includes(q));
+  const hits = (q.length >= 2 && S.paletteSearch.q === q)
+    ? S.paletteSearch.rows : [];
+  S.paletteActions = cmds.concat(hits);
   const list = $('#pList');
   if (!S.paletteActions.length) {
-    list.innerHTML = '<div class="p-empty">没有匹配的命令。试试“收听”“工作台”“停止”。</div>';
+    list.innerHTML = '<div class="p-empty">没有匹配的命令或笔记。试试主播名、关键词，或“收听”。</div>';
     return;
   }
   S.paletteIndex = clamp(S.paletteIndex, 0, S.paletteActions.length - 1);
@@ -3454,7 +3680,17 @@ function navigateToUrl(href) {
   const sid = u.searchParams.get('session') || u.searchParams.get('session_id') || '';
   if (path === '/rooms') return switchView('listen');
   if (path === '/live') return switchView('live', { session: sid });
+  if (path === '/note') {
+    return switchView('note', { session: sid, t: u.searchParams.get('t') });
+  }
+  if (path === '/follows') return switchView('follows');
+  if (path === '/weekly') return switchView('weekly', { period: u.searchParams.get('period') });
   if (path === '/library') {
+    return switchView('library', {
+      search: u.searchParams.get('search'), q: u.searchParams.get('q'),
+    });
+  }
+  if (path === '/files') {
     const tab = u.searchParams.get('tab') || 'live';
     return switchView('files', { tab });
   }
@@ -3487,8 +3723,11 @@ function notifClock(iso) {
 }
 function notifActionLabel(item) {
   const v = (item.action || {}).view;
-  return { hud: '打开记录卡', note: '打开笔记', storage: '打开存储设置', diagnostics: '检查问题' }[v]
-    || '查看';
+  return {
+    hud: '打开记录卡', note: '打开笔记', library: '打开笔记库',
+    follow: '查看关注', follows: '查看关注', weekly: '打开周报',
+    storage: '打开存储设置', diagnostics: '检查问题',
+  }[v] || '查看';
 }
 function renderNotifBadge() {
   const n = Number(S.notif.unread) || 0;
@@ -3531,16 +3770,28 @@ function renderNotifPrefs() {
     '<label class="np-row"><input type="checkbox" data-np="system"' +
       (st.system ? ' checked' : '') + (st.enabled ? '' : ' disabled') +
       '><span class="grow"><b>后台用系统通知</b><br><span>窗口不在前台时弹 Windows 通知</span></span></label>',
+    '<label class="np-row"><input type="checkbox" data-np="detail"' +
+      (st.detail ? ' checked' : '') + (st.enabled ? '' : ' disabled') +
+      '><span class="grow"><b>显示直播标题</b><br><span>关掉后只说「你关注的主播」「一场直播」</span></span></label>',
   ];
   if (S.notif.sysDenied) {
     rows.push('<div class="np-row"><span style="color:var(--amber)">系统通知权限被关闭了，应用内通知中心仍然完整。</span></div>');
   }
   rows.push('<div class="np-sep"></div>');
+  const groups = new Map();
   (st.kinds || []).forEach((k) => {
-    rows.push('<label class="np-row"><input type="checkbox" data-np="kind" data-kind="' +
-      esc(k.kind) + '"' + (muted.has(k.kind) ? '' : ' checked') +
-      (st.enabled ? '' : ' disabled') + '><span class="grow"><b>' + esc(k.label) +
-      '</b><br><span>' + esc(k.desc) + '</span></span></label>');
+    const g = k.group || '其他';
+    if (!groups.has(g)) groups.set(g, []);
+    groups.get(g).push(k);
+  });
+  groups.forEach((list, group) => {
+    rows.push('<div class="np-group">' + esc(group) + '</div>');
+    list.forEach((k) => {
+      rows.push('<label class="np-row"><input type="checkbox" data-np="kind" data-kind="' +
+        esc(k.kind) + '"' + (muted.has(k.kind) ? '' : ' checked') +
+        (st.enabled ? '' : ' disabled') + '><span class="grow"><b>' + esc(k.label) +
+        '</b><br><span>' + esc(k.desc) + '</span></span></label>');
+    });
   });
   rows.push('<button class="btn np-test" id="npTest">发一条测试通知</button>');
   box.innerHTML = rows.join('');
@@ -3585,7 +3836,7 @@ async function pollNotifications() {
     /* 引擎重启/网络抖动：下一拍再试 */
   } finally {
     S.notif.busy = false;
-    setTimeout(pollNotifications, S.online ? 4000 : 6000);
+    setTimeout(pollNotifications, S.online ? perfNum('notify_poll_s', 4) * 1000 : 6000);
   }
 }
 async function presentNotification(item) {
@@ -3680,6 +3931,18 @@ function routeNotification(item) {
     else switchView('workbench');
     return;
   }
+  if (view === 'follow' || view === 'follows') {
+    switchView('follows');
+    return;
+  }
+  if (view === 'weekly') {
+    switchView('weekly', { period: act.period });
+    return;
+  }
+  if (view === 'library') {
+    switchView('library');
+    return;
+  }
   if (view === 'storage') {
     switchView('settings');
     toast('设置页里可以查看磁盘和存储选项。');
@@ -3689,7 +3952,7 @@ function routeNotification(item) {
     invoke('diag_open').catch(() => switchView('settings'));
     return;
   }
-  if (view === 'follow' || view === 'home') { switchView('listen'); return; }
+  if (view === 'home') { switchView('library'); return; }
   if (sid) {
     if (act.t != null) switchView('workbench', { session: sid, autoplay: true, t: act.t });
     else openNoteFor(sid);
@@ -4009,6 +4272,14 @@ function bind() {
     if (t.id === 'prefCaptureMode') return savePref('capture_mode', t.value);
     if (t.id === 'prefCloseAction') return savePref('close_action', t.value);
     if (t.id === 'prefLan') return toggleLan(t.checked);
+    if (t.id === 'prefPerfMode') return savePerfMode(t.value);
+    if (t.id === 'prefFollowInterval') {
+      const v = clamp(Number(t.value) || 120, 60, 300);
+      t.value = String(v);
+      return savePref('follow_interval_s', v);
+    }
+    if (t.id === 'prefWeekly') return savePref('weekly_enabled', t.checked);
+    if (t.id === 'prefQa') return savePref('qa_enabled', t.checked);
     if (t.id === 'prefTopics') {
       const v = clamp(Number(t.value) || 10, 3, 40);
       t.value = String(v);
@@ -4035,6 +4306,11 @@ function bind() {
     $('#toggleKeyBtn').textContent = show ? '隐藏' : '显示';
   };
   $('#copyLanBtn').onclick = () => copyText($('#lanUrl').textContent);
+  $('#perfCheckBtn').onclick = async () => {
+    await loadPerf();
+    renderPerfAdvice();
+    renderPerfOut();
+  };
   $('#testConnBtn').onclick = testConnection;
   $('#saveConnBtn').onclick = saveConnection;
 
@@ -4126,6 +4402,26 @@ function bind() {
     if (!b || !S.hudSid) return;
     switchView('workbench', { session: S.hudSid, autoplay: true, t: Number(b.dataset.hudMark) || 0 });
   });
+  $('#hudHighlight').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-hh]');
+    if (!b) return;
+    const id = $('#hudHighlight').dataset.hhId;
+    const list = (S.sessInfo && S.sessInfo.live_highlights) || [];
+    const h = list.find((x) => x.id === id);
+    if (!h) return;
+    const act = b.dataset.hh;
+    if (act === 'save') { saveHudHighlight(h); return; }
+    if (act === 'skip') {
+      S.hudHi.dismissUntil = Date.now() + 120000;
+      renderHudHighlight();
+      return;
+    }
+    if (act === 'play') {
+      switchView('workbench', {
+        session: S.hudSid, autoplay: true, t: Math.max(0, Number(h.t0) - 3),
+      });
+    }
+  });
   $('#fcOpen').onclick = () => { if (S.finish) openNoteFor(S.finish.sid); };
   $('#fcRaw').onclick = () => { if (S.finish) openNoteFor(S.finish.sid); };
   $('#fcLater').onclick = () => dismissFinish();
@@ -4160,6 +4456,7 @@ function bind() {
     if (!el || !el.dataset || !el.dataset.np) return;
     if (el.dataset.np === 'enabled') return updateNotifSettings({ notify_enabled: !!el.checked });
     if (el.dataset.np === 'system') return updateNotifSettings({ notify_system: !!el.checked });
+    if (el.dataset.np === 'detail') return updateNotifSettings({ notify_detail: !!el.checked });
     if (el.dataset.np === 'kind') {
       const muted = $$('#npBody input[data-np="kind"]')
         .filter((x) => !x.checked).map((x) => x.dataset.kind);
@@ -4208,7 +4505,19 @@ function bind() {
     else setStage(S.stage === 'wall' ? 'signal' : 'wall');
   };
   $('#palette').addEventListener('click', (e) => { if (e.target === $('#palette')) closePalette(); });
-  $('#pInput').addEventListener('input', () => { S.paletteIndex = 0; renderPalette(); });
+  $('#pInput').addEventListener('input', () => {
+    S.paletteIndex = 0;
+    const q = ($('#pInput').value || '').trim().toLowerCase();
+    // 旧结果立即作废，避免输入后马上回车点到上一次的搜索结果。
+    S.paletteSearch.q = '';
+    S.paletteSearch.rows = [];
+    S.paletteSearch.seq += 1;
+    clearTimeout(S.paletteSearch.timer);
+    renderPalette();
+    if (q.length >= 2) {
+      S.paletteSearch.timer = setTimeout(() => searchPaletteRows(q), 180);
+    }
+  });
   $('#pInput').addEventListener('keydown', (e) => {
     if (e.key === 'ArrowDown') { e.preventDefault(); S.paletteIndex = Math.min(S.paletteActions.length - 1, S.paletteIndex + 1); renderPalette(); }
     else if (e.key === 'ArrowUp') { e.preventDefault(); S.paletteIndex = Math.max(0, S.paletteIndex - 1); renderPalette(); }
@@ -4245,12 +4554,16 @@ function bind() {
       if (e.key === '[') { e.preventDefault(); setPane('side', !S.panes.side); return; }
       if (e.key === ']') { e.preventDefault(); setPane('insp', !S.panes.insp); return; }
       if (e.key === '\\') { e.preventDefault(); setPane('tx', !S.panes.tx); return; }
-      if (e.key === 'm' || e.key === 'M') { e.preventDefault(); markMoment(); return; }
+      if (e.key === 'm' || e.key === 'M' || e.key === 'b' || e.key === 'B') {
+        e.preventDefault(); markMoment(); return;
+      }
       if (e.code === 'Space' || e.key === ' ') { e.preventDefault(); togglePause(); return; }
     }
     if (!typing && !mod && S.view === 'hud' && !S.finish &&
         !(e.target && e.target.closest && e.target.closest('button'))) {
-      if (e.key === 'm' || e.key === 'M') { e.preventDefault(); markMoment(); return; }
+      if (e.key === 'b' || e.key === 'B' || e.key === 'm' || e.key === 'M') {
+        e.preventDefault(); markMoment(); return;
+      }
       if (e.code === 'Space' || e.key === ' ') { e.preventDefault(); togglePause(); return; }
     }
     if (e.key === 'Escape') {
@@ -4569,6 +4882,7 @@ function init() {
   startScope();
   renderAll();
   switchView('listen');
+  loadPerf();
   refreshRooms();
   fetchCloseAction();
   loadSessions();

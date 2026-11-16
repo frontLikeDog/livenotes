@@ -44,7 +44,10 @@ def test_empty_corrupt_and_non_dict_file_are_safe(isolated_paths):
         "prefs": {"topics": 10, "direct_fallback": "", "open_mode": "",
                   "capture_mode": "", "close_action": "tray",
                   "notify_enabled": True, "notify_system": True,
-                  "notify_sound": True, "notify_muted": []},
+                  "notify_sound": True, "notify_muted": [],
+                  "notify_detail": True, "perf_mode": "auto",
+                  "follow_interval_s": 120, "weekly_enabled": True,
+                  "qa_enabled": True},
         "direct_fallback": {"mode": "ask", "stored": "", "source": "default"},
     }
     settings.path().write_text("{oops", encoding="utf-8")
@@ -106,7 +109,10 @@ def test_prefs_clamping_and_unknown_keys(isolated_paths):
     assert settings.prefs() == {"topics": 10, "direct_fallback": "", "open_mode": "",
                                 "capture_mode": "", "close_action": "tray",
                                 "notify_enabled": True, "notify_system": True,
-                                "notify_sound": True, "notify_muted": []}
+                                "notify_sound": True, "notify_muted": [],
+                                "notify_detail": True, "perf_mode": "auto",
+                                "follow_interval_s": 120, "weekly_enabled": True,
+                                "qa_enabled": True}
     assert settings.set_prefs({"topics": 999})["topics"] == 40
     assert settings.set_prefs({"topics": -5})["topics"] == 3
     assert settings.set_prefs({"topics": "abc"})["topics"] == 3      # 非法值忽略
@@ -114,7 +120,10 @@ def test_prefs_clamping_and_unknown_keys(isolated_paths):
     assert out == {"topics": 12, "direct_fallback": "", "open_mode": "",
                    "capture_mode": "", "close_action": "tray",
                    "notify_enabled": True, "notify_system": True,
-                   "notify_sound": True, "notify_muted": []}
+                   "notify_sound": True, "notify_muted": [],
+                   "notify_detail": True, "perf_mode": "auto",
+                   "follow_interval_s": 120, "weekly_enabled": True,
+                   "qa_enabled": True}
     _write({"version": 2, "profiles": {}, "prefs": {"topics": 100}})
     assert settings.prefs()["topics"] == 40
     _write({"version": 2, "profiles": {}, "prefs": {"topics": "x"}})

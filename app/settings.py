@@ -118,12 +118,19 @@ DEFAULT_PREFS = {
     "notify_system": True,
     "notify_sound": True,
     "notify_muted": [],
+    "notify_detail": True,    # 通知里是否显示直播标题/主播名
+    # P1：性能与回归入口
+    "perf_mode": "auto",      # auto | full | lite
+    "follow_interval_s": 120,  # 关注检测间隔 60–300 秒
+    "weekly_enabled": True,   # 是否自动生成周报
+    "qa_enabled": True,       # 是否显示「问笔记」
 }
 
 FALLBACK_MODES = ("ask", "auto", "per_room", "shared", "none")
 OPEN_MODES = ("external", "internal")
 CAPTURE_MODES = ("browser", "direct", "external")
 CLOSE_ACTIONS = ("tray", "quit")
+PERF_MODES = ("auto", "full", "lite")
 
 
 def _fallback_mode(v: Any) -> str:
@@ -139,6 +146,11 @@ def _open_mode(v: Any) -> str:
 def _capture_mode(v: Any) -> str:
     s = str(v or "").strip().lower()
     return s if s in CAPTURE_MODES else ""
+
+
+def _perf_mode(v: Any) -> str:
+    s = str(v or "").strip().lower()
+    return s if s in PERF_MODES else ""
 
 
 def _close_action(v: Any) -> str:
@@ -185,10 +197,17 @@ def prefs() -> dict[str, Any]:
     p["open_mode"] = _open_mode(p.get("open_mode"))
     p["capture_mode"] = _capture_mode(p.get("capture_mode"))
     p["close_action"] = _close_action(p.get("close_action")) or "tray"
-    for k in ("notify_enabled", "notify_system", "notify_sound"):
+    for k in ("notify_enabled", "notify_system", "notify_sound", "notify_detail",
+              "weekly_enabled", "qa_enabled"):
         b = _as_bool(p.get(k))
         p[k] = DEFAULT_PREFS[k] if b is None else b
     p["notify_muted"] = _notify_muted(p.get("notify_muted")) or []
+    p["perf_mode"] = _perf_mode(p.get("perf_mode")) or "auto"
+    try:
+        p["follow_interval_s"] = max(60, min(300, int(p.get("follow_interval_s")
+                                                     or 120)))
+    except (TypeError, ValueError):
+        p["follow_interval_s"] = 120
     return p
 
 
@@ -238,9 +257,19 @@ def set_prefs(patch: dict[str, Any]) -> dict[str, Any]:
                 v = _notify_muted(v)
                 if v is None:
                     continue
-            elif k in ("notify_enabled", "notify_system", "notify_sound"):
+            elif k in ("notify_enabled", "notify_system", "notify_sound",
+                       "notify_detail", "weekly_enabled", "qa_enabled"):
                 v = _as_bool(v)
                 if v is None:
+                    continue
+            elif k == "perf_mode":
+                v = _perf_mode(v)
+                if not v:
+                    continue
+            elif k == "follow_interval_s":
+                try:
+                    v = max(60, min(300, int(v)))
+                except (TypeError, ValueError):
                     continue
             p[k] = v
         d["prefs"] = p

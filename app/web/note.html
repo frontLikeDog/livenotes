@@ -1,0 +1,469 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#0A0C0F">
+<title>笔记 · LiveNotes</title>
+<script>
+try{var _t=new URLSearchParams(location.search).get('theme');if(_t)document.documentElement.dataset.theme=(_t==='paper'?'light':'dark')}catch(e){}
+</script>
+<link rel="stylesheet" href="/static/css/p1.css">
+</head>
+<body>
+<script src="/static/js/embed.js"></script>
+
+<header class="topbar" data-ln-region="topbar">
+  <a class="brand" href="/">
+    <span class="brand-mark" aria-hidden="true">L</span>
+    <span class="brand-name">LiveNotes<span>实时语记</span></span>
+  </a>
+  <span class="topbar-divider" aria-hidden="true"></span>
+  <nav class="pagenav" aria-label="页面">
+    <a href="/library" class="is-on">笔记库</a>
+    <a href="/follows">关注</a>
+    <a href="/weekly">周报</a>
+  </nav>
+  <span class="grow"></span>
+  <button class="top-search" type="button" data-p1-search aria-label="搜索笔记或提问">
+    <svg class="od-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+      stroke-linecap="round" aria-hidden="true" style="--od-icon-size:14px">
+      <circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/>
+    </svg>
+    <span>搜索笔记</span><kbd>Ctrl K</kbd>
+  </button>
+  <a class="icon-btn" href="/" title="返回首页" aria-label="返回首页">
+    <svg class="od-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+      stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="--od-icon-size:16px">
+      <path d="m4 10.5 8-6.5 8 6.5V20H4Z"/><path d="M9.5 20v-5.5h5V20"/>
+    </svg>
+  </a>
+</header>
+
+<main class="stage" data-ln-region="stage">
+  <div class="note-page" id="notePage">
+    <header class="note-head" id="noteHead">
+      <button class="icon-btn note-back" type="button" id="noteBack" aria-label="返回笔记库">
+        <svg class="od-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+          stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="--od-icon-size:18px">
+          <path d="M15 6l-6 6 6 6"/>
+        </svg>
+      </button>
+      <div class="note-head-main">
+        <p class="eyebrow">NOTE</p>
+        <h1 id="noteTitle">正在打开笔记…</h1>
+        <p class="note-meta" id="noteMeta">—</p>
+      </div>
+      <div class="note-actions" id="noteActions" hidden>
+        <a class="btn btn-ghost" id="noteRaw" href="#">查看原文</a>
+        <button class="btn btn-ghost" type="button" id="noteShare">分享</button>
+        <button class="btn btn-primary" type="button" id="noteExport">导出笔记</button>
+      </div>
+    </header>
+
+    <div class="note-layout" id="noteLayout">
+      <article class="note-doc" id="noteDoc" aria-live="polite">
+        <div class="sp-empty"><span class="sp-spinner"></span> 正在打开笔记…</div>
+      </article>
+      <aside class="note-aside" id="noteAside">
+        <section class="aside-card">
+          <h2>这一场</h2>
+          <dl class="source-list" id="noteSource"></dl>
+        </section>
+        <section class="aside-card">
+          <h2>相关的笔记</h2>
+          <div class="related-list" id="noteRelated"></div>
+        </section>
+        <p class="aside-note">要点均可在原文中定位；说话人由本机转写自动区分。</p>
+      </aside>
+    </div>
+  </div>
+</main>
+
+<script src="/static/js/p1.js"></script>
+<script src="/static/js/sharecard.js"></script>
+<script>
+(function () {
+  'use strict';
+  var S = { sid: '', data: null, poll: 0, target: null };
+
+  function sidFromUrl() {
+    var q = new URLSearchParams(location.search);
+    return q.get('session_id') || q.get('session') || '';
+  }
+  function targetFromUrl() {
+    var t = parseFloat(new URLSearchParams(location.search).get('t'));
+    return isFinite(t) ? t : null;
+  }
+
+  function el(tag, cls, text) {
+    var node = document.createElement(tag);
+    if (cls) node.className = cls;
+    if (text != null) node.textContent = text;
+    return node;
+  }
+
+  function playButton(t, label) {
+    var button = el('button', 'hl-play');
+    button.type = 'button';
+    button.setAttribute('aria-label', label || ('试听 ' + P1.fmtDur(t)));
+    button.innerHTML = '<svg class="od-icon" viewBox="0 0 24 24" fill="currentColor" ' +
+      'aria-hidden="true" style="--od-icon-size:11px"><path d="M8 5.5v13l10-6.5Z"/></svg>';
+    button.addEventListener('click', function () {
+      P1.nav(P1.playUrl(S.sid, t));
+    });
+    return button;
+  }
+
+  function timeLink(t, text) {
+    var b = el('b', null, text || P1.fmtDur(t));
+    b.setAttribute('role', 'button');
+    b.tabIndex = 0;
+    b.title = '从这一段开始回听';
+    var go = function () { P1.nav(P1.playUrl(S.sid, t)); };
+    b.addEventListener('click', go);
+    b.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(); }
+    });
+    return b;
+  }
+
+  function section(title, note) {
+    var sec = el('section', 'doc-sec');
+    var head = el('div', 'doc-sec-head');
+    head.appendChild(el('h2', null, title));
+    if (note) head.appendChild(el('span', null, note));
+    sec.appendChild(head);
+    return sec;
+  }
+
+  function renderDoc(data) {
+    var doc = P1.$('#noteDoc');
+    doc.innerHTML = '';
+    var state = data.note_state;
+    if (state === 'queued' || state === 'running') {
+      var status = el('div', 'doc-status');
+      status.appendChild(el('i'));
+      status.appendChild(document.createTextNode(
+        state === 'queued' ? '正在排队整理 · 可以先看逐字稿'
+          : '正在整理 · 已有 ' + (data.progress || 0) + '% 可用'));
+      doc.appendChild(status);
+    } else if (state === 'failed') {
+      var failed = el('div', 'doc-status is-failed');
+      failed.textContent = '这次整理没有完成。录音和逐字稿都还在，可以重试。';
+      doc.appendChild(failed);
+    } else if (state === 'insufficient') {
+      var thin = el('div', 'doc-status');
+      thin.textContent = '这一场发言太少，暂时没有要点。';
+      doc.appendChild(thin);
+    }
+
+    var lead = String((data.summary || {}).overview || '').trim();
+    if (lead) {
+      doc.appendChild(el('p', 'doc-lead', lead));
+    } else if (state === 'ready' || state === 'partial') {
+      doc.appendChild(el('p', 'doc-lead', '这场没有生成概述，要点和原话都在下面。'));
+    }
+
+    var topics = (data.summary || {}).topics || [];
+    if (topics.length) {
+      var tags = el('div', 'chip-row');
+      tags.style.marginTop = '14px';
+      topics.slice(0, 6).forEach(function (t) {
+        var chip = el('span', 'chip', t);
+        chip.style.pointerEvents = 'none';
+        tags.appendChild(chip);
+      });
+      doc.appendChild(tags);
+    }
+
+    var points = data.points || [];
+    if (points.length) {
+      var sec = section('要点', points.length + ' 条 · 可回溯原话');
+      var list = el('ol', 'point-list');
+      points.forEach(function (point, index) {
+        var item = el('li', 'point-item');
+        item.setAttribute('data-t', point.t_from != null ? point.t_from : '');
+        item.appendChild(el('span', 'point-num', P1.pad(index + 1)));
+        var body = el('div', 'point-body');
+        var title = String(point.title || '').trim();
+        var gist = String(point.gist || '').trim();
+        if (title) body.appendChild(el('p', 'point-text', title));
+        if (gist && gist !== title) body.appendChild(el('p', 'point-gist', gist));
+        if (point.quote) {
+          var quote = el('p', 'point-quote');
+          if (point.t_from != null) quote.appendChild(timeLink(point.t_from));
+          var speaker = (point.speakers || [])[0] || '';
+          quote.appendChild(document.createTextNode(
+            ' ' + (speaker ? speaker + '：' : '') + point.quote));
+          body.appendChild(quote);
+        }
+        item.appendChild(body);
+        list.appendChild(item);
+      });
+      sec.appendChild(list);
+      doc.appendChild(sec);
+    }
+
+    var highlights = data.highlights || [];
+    if (highlights.length) {
+      var hlSec = section('高光', '点击试听原声');
+      var hlist = el('div', 'hl-list');
+      highlights.slice(0, 8).forEach(function (h) {
+        var card = el('div', 'hl-card');
+        card.setAttribute('data-t', h.peak_t || h.t_start || 0);
+        var t = h.peak_t || h.t_start || 0;
+        card.appendChild(el('span', 'hl-time', P1.fmtDur(t)));
+        var body = el('div', 'hl-body');
+        body.appendChild(el('p', null, h.quote || h.text || h.hook || ''));
+        var who = h.speaker_label || '';
+        var source = h.source === 'manual' ? '你收的高光'
+          : h.source === 'live' ? '记录时收的高光' : '自动发现';
+        body.appendChild(el('span', null, (who ? who + ' · ' : '') + source
+          + (h.why ? ' · ' + h.why : '')));
+        var actions = el('div', 'hl-actions');
+        actions.appendChild(playButton(t));
+        card.appendChild(body);
+        card.appendChild(actions);
+        hlist.appendChild(card);
+      });
+      hlSec.appendChild(hlist);
+      doc.appendChild(hlSec);
+    }
+
+    var bookmarks = data.bookmarks || [];
+    if (bookmarks.length) {
+      var bmSec = section('书签', bookmarks.length + ' 处 · 记录时留下的');
+      var blist = el('div', 'bookmark-list');
+      bookmarks.forEach(function (bm) {
+        var row = el('div', 'bm-row');
+        row.setAttribute('data-t', bm.t || 0);
+        var time = el('button', 'bm-time', P1.fmtDur(bm.t));
+        time.type = 'button';
+        time.title = '从这里回听';
+        time.addEventListener('click', function () { P1.nav(P1.playUrl(S.sid, bm.t)); });
+        var body = el('div', 'bm-body');
+        body.appendChild(el('p', null, bm.note || '（没有写备注）'));
+        body.appendChild(el('span', null,
+          bm.kind === 'bookmark' ? '手动书签' : bm.kind === 'highlight'
+            ? '收藏的高光' : '记录时标记'));
+        row.appendChild(time);
+        row.appendChild(body);
+        if (bm.kind === 'mark' || bm.kind === 'bookmark') {
+          var remove = el('button', 'bm-del', '×');
+          remove.type = 'button';
+          remove.setAttribute('aria-label', '移除这个书签');
+          remove.addEventListener('click', function () {
+            P1.del('/api/live/mark?session_id=' + encodeURIComponent(S.sid)
+              + '&id=' + encodeURIComponent(bm.ref_id)).then(function (d) {
+              if (d.error) { P1.toast(d.error); return; }
+              P1.toast('已移除书签');
+              load(true);
+            });
+          });
+          row.appendChild(remove);
+        } else {
+          row.appendChild(el('span'));
+        }
+        blist.appendChild(row);
+      });
+      bmSec.appendChild(blist);
+      doc.appendChild(bmSec);
+    }
+
+    var speakers = data.speakers || [];
+    if (speakers.length) {
+      var spSec = section('说话人', speakers.length + ' 位');
+      var slist = el('div', 'spk-list');
+      var total = speakers.reduce(function (sum, s) { return sum + (s.seconds || 0); }, 0) || 1;
+      speakers.slice(0, 8).forEach(function (s) {
+        var row = el('div', 'spk-row');
+        var name = el('span', 'spk-name');
+        var avatar = el('span', 'mini-avatar ' + P1.tone(s.label), P1.initial(s.label));
+        avatar.setAttribute('aria-hidden', 'true');
+        name.appendChild(avatar);
+        name.appendChild(document.createTextNode(s.label || s.speaker_id || '未知'));
+        var track = el('span', 'spk-bar');
+        var fill = el('i');
+        fill.style.width = Math.max(4, Math.round((s.seconds || 0) / total * 100)) + '%';
+        track.appendChild(fill);
+        row.appendChild(name);
+        row.appendChild(track);
+        row.appendChild(el('span', 'spk-pct',
+          Math.max(1, Math.round((s.seconds || 0) / total * 100)) + '%'));
+        slist.appendChild(row);
+      });
+      spSec.appendChild(slist);
+      doc.appendChild(spSec);
+    }
+
+    var more = el('div', 'doc-more');
+    var raw = el('a', 'btn btn-ghost btn-sm', '查看逐字稿原文');
+    raw.href = '/reader?session=' + encodeURIComponent(S.sid);
+    var rebuild = el('button', 'btn btn-ghost btn-sm',
+      state === 'failed' ? '重新生成' : '重新整理');
+    rebuild.type = 'button';
+    rebuild.disabled = state === 'queued' || state === 'running';
+    rebuild.addEventListener('click', function () {
+      rebuild.disabled = true;
+      P1.post('/api/note/rebuild', { session_id: S.sid }).then(function (d) {
+        if (d.error) { P1.toast(d.error); rebuild.disabled = false; return; }
+        P1.toast('已重新整理');
+        load(true);
+      }).catch(function () {
+        rebuild.disabled = false;
+        P1.toast('整理没有开始，稍后再试。');
+      });
+    });
+    more.appendChild(raw);
+    more.appendChild(rebuild);
+    doc.appendChild(more);
+  }
+
+  function renderAside(data) {
+    var source = P1.$('#noteSource');
+    source.innerHTML = '';
+    var session = data.session || {};
+    var rows = [
+      ['来源', P1.sourceName(session.source_mode)],
+      ['主播', data.streamer || '未识别'],
+      ['记录时间', P1.fmtStamp(session.started_at), true],
+      ['时长', P1.durText(session.duration_s), true],
+      ['发言', ((data.summary || {}).stats || {}).included_utterances
+        ? String(data.summary.stats.included_utterances) + ' 条' : '—', true],
+      ['状态', P1.noteState(data.note_state, data.progress).label],
+      ['音频', session.audio_state === 'none' ? '没有保留录音' : '本地 · 已保留']
+    ];
+    rows.forEach(function (row) {
+      var div = document.createElement('div');
+      var dt = el('dt', null, row[0]);
+      var dd = el('dd', row[2] ? 'mono' : null, row[1]);
+      div.appendChild(dt);
+      div.appendChild(dd);
+      source.appendChild(div);
+    });
+
+    var related = P1.$('#noteRelated');
+    related.innerHTML = '';
+    var items = data.related || [];
+    if (!items.length) {
+      related.appendChild(el('p', 'aside-note', '还没有相关笔记。'));
+    } else {
+      items.forEach(function (item) {
+        var a = el('a', 'related-item');
+        a.href = P1.noteUrl(item.session_id);
+        a.appendChild(el('strong', null, item.title || '未命名直播'));
+        a.appendChild(el('span', null, P1.fmtStamp(item.started_at)
+          + (item.reason ? ' · ' + item.reason : '')));
+        related.appendChild(a);
+      });
+    }
+  }
+
+  function render(data) {
+    S.data = data;
+    var session = data.session || {};
+    var title = session.title || '未命名直播';
+    document.title = title + ' · LiveNotes';
+    P1.$('#noteTitle').textContent = title;
+    var meta = P1.$('#noteMeta');
+    meta.innerHTML = '';
+    var who = data.streamer || '未识别主播';
+    var bits = [
+      P1.fmtStamp(session.started_at),
+      P1.durText(session.duration_s),
+      who,
+      (data.speakers || []).length + ' 位说话人',
+      P1.noteState(data.note_state, data.progress).label
+    ];
+    bits.forEach(function (bit, index) {
+      if (index) meta.appendChild(document.createTextNode(' · '));
+      if (index === 2) meta.appendChild(el('b', null, bit));
+      else meta.appendChild(document.createTextNode(bit));
+    });
+    P1.$('#noteActions').hidden = false;
+    P1.$('#noteRaw').href = '/reader?session=' + encodeURIComponent(S.sid);
+    renderDoc(data);
+    renderAside(data);
+
+    if (S.target != null) {
+      var hit = scrollToTarget(S.target);
+      // 生成中先记住目标：等要点/高光出来后还要再定位一次。
+      var state = data.note_state;
+      if (hit || (state !== 'queued' && state !== 'running')) S.target = null;
+    }
+  }
+
+  function scrollToTarget(t) {
+    var nodes = P1.$$('[data-t]', P1.$('#noteDoc')).filter(function (node) {
+      return node.getAttribute('data-t') !== '';
+    });
+    if (!nodes.length) return false;
+    var best = nodes[0], delta = Infinity;
+    nodes.forEach(function (node) {
+      var d = Math.abs(parseFloat(node.getAttribute('data-t')) - t);
+      if (d < delta) { delta = d; best = node; }
+    });
+    if (delta > 90) return false;
+    setTimeout(function () {
+      best.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      best.classList.add('is-target');
+      setTimeout(function () { best.classList.remove('is-target'); }, 2400);
+    }, 60);
+    return true;
+  }
+
+  function missing(message) {
+    var doc = P1.$('#noteDoc');
+    doc.innerHTML = '';
+    var box = el('div', 'note-missing');
+    box.appendChild(el('h2', null, '这篇笔记打不开'));
+    box.appendChild(el('p', null, message || '可能已经被清理，或者链接不完整。'));
+    var back = el('a', 'btn btn-primary', '回笔记库');
+    back.href = '/library';
+    box.appendChild(back);
+    doc.appendChild(box);
+    P1.$('#noteAside').hidden = true;
+    P1.$('#noteActions').hidden = true;
+  }
+
+  function schedule(ms) {
+    clearTimeout(S.poll);
+    S.poll = setTimeout(function () { load(false); }, ms || 5000);
+  }
+
+  function load(force) {
+    if (!S.sid) { missing('链接里没有场次编号。'); return; }
+    P1.api('/api/note?session_id=' + encodeURIComponent(S.sid)).then(function (d) {
+      if (!d.ok) { missing(d.error); return; }
+      render(d);
+      if (d.note_state === 'queued' || d.note_state === 'running') schedule(4000);
+      if (force) P1.toast('已刷新');
+    }).catch(function () {
+      if (!S.data) missing('读取笔记时本地服务没有响应。');
+      else P1.toast('刷新没有完成，稍后再试。');
+    });
+  }
+
+  P1.$('#noteBack').addEventListener('click', function () {
+    if (window.history.length > 1) window.history.back();
+    else P1.nav('/library');
+  });
+  P1.$('#noteExport').addEventListener('click', function () {
+    P1.metric('export', { session_id: S.sid, kind: 'note_md' });
+    P1.download('/api/export?session_id=' + encodeURIComponent(S.sid) + '&format=note_md');
+    P1.toast('正在导出笔记');
+  });
+  P1.$('#noteShare').addEventListener('click', function () {
+    if (!S.data) return;
+    if (window.ShareCard) window.ShareCard.open(S.data);
+    else P1.toast('分享组件没有加载出来，刷新一次试试。');
+  });
+
+  S.sid = sidFromUrl();
+  S.target = targetFromUrl();
+  load(false);
+})();
+</script>
+</body>
+</html>

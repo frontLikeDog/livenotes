@@ -7,6 +7,23 @@
 ## 能做什么
 
 - **实时监听**：在浏览器里选中正在播放的直播标签页，只采集这一路音频（不需要虚拟声卡）
+- **关注与开播提醒**：关注直播间后按 60–300 秒检测；开播时提醒，可打开「自动开始记录」，
+  一次只起一路，容量满或启动失败会说明原因。见 [docs/36](docs/36-p1-second-visit-iteration-plan.md)
+- **笔记库与全库搜索**：`/library` 是笔记卡片流，可按全部 / 本周 / 已生成 / 生成中筛选，
+  按时间、时长、生成时间排序并翻页；`Ctrl+K` 搜笔记和逐字稿，两字词、三字词都能搜到，
+  点结果直接落到对应时间码。
+- **笔记页与书签**：`/note` 把一句话、要点、原话、高光、说话人和书签放在一页；记录中
+  按 `B` 加书签并可在 5 秒内撤销；实时高光卡可以试听、收藏或「不用」。
+- **分享卡片**：1080×1440 竖版 PNG，金句 / 要点 / 高光三种模板；开启局域网分享后
+  自动带二维码，纯 Canvas 在本机生成，不产生服务端临时文件。
+- **文件中心仍在 `/files`**：录音、回收站、体检清理是一张表；`/library` 现在只回答
+  「我记过什么」，两套列表不挤在一页。
+- **站内周报**：`/weekly` 每周一整理上一周的跨场主题、值得回看和下周可以做，支持
+  按周翻看与 Markdown 导出。
+- **问笔记**：搜索面板里直接用自然语言提问，答案只从本机笔记检索并标出可点引用；
+  没有模型时退回本地摘录，不空屏。
+- **低配模式**：设置 → 性能提供自动 / 流畅 / 低配三档；低配会降轮询、关实时高光卡与
+  装饰动效，但录音、转写和笔记生成不降级。
 - **三种采集底座**：默认「每个房间一个专属浏览器」，互不影响、最稳；设
   `LIVENOTES_CAPTURE_MODE=shared` 改成「一个 Edge 开多个房间标签页」，3 路实测
   浏览器内存 2.4GB（独立模式约 2.8GB）；设 `LIVENOTES_CAPTURE_MODE=direct`
@@ -199,7 +216,7 @@ python tools/fetch_models.py           # 约 270MB 本地模型
 pip install -r requirements-dev.txt   # pytest + numpy + lark-oapi，故意不装 sherpa-onnx
 python -m pytest                      # 全量回归
 node extensions/livehub/selftest.mjs  # 插件 offscreen 自检
-python tools/ui_smoke.py              # 前端冒烟：11 个页面逐个用 headless Chrome 打开
+python tools/ui_smoke.py              # 前端冒烟：15 个页面逐个用 headless Chrome 打开
 ```
 
 `tests/` 覆盖存储与 FTS 检索、显著性打分（滑动基线/冷启动/推送门槛）、术语纠错顺序、
@@ -346,6 +363,7 @@ python tools/stress_live.py --tracks 1,3,5,10 --duration 7200 --warmup 60 \
 
 - [`docs/29-live-labeling.md`](docs/29-live-labeling.md) 直播标注
 - [`docs/30-scene-highlights-and-narrative-weekly.md`](docs/30-scene-highlights-and-narrative-weekly.md) 场面化高光与主线叙事周报：证据闸门、兜底与调参
+- [`docs/36-p1-second-visit-iteration-plan.md`](docs/36-p1-second-visit-iteration-plan.md) P1「让用户第二次打开」：关注、笔记库、书签、分享卡、周报、问笔记与低配模式
 
 ## 许可证
 

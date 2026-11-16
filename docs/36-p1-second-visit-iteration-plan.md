@@ -392,7 +392,7 @@ CREATE TABLE IF NOT EXISTS follows (
 
 ### 4.1 从「文件中心」到「笔记库」
 
-现有 `/library` 是一张表：场次、时间、时长、音频大小、操作。它回答「文件在哪」，不回答「我记过什么」。P1 把它改成卡片流，保留「录音 / 回收站 / 清理」tab，但默认 tab 是「笔记」。
+现有 `/library` 是一张表：场次、时间、时长、音频大小、操作。它回答「文件在哪」，不回答「我记过什么」。P1 把 `/library` 改成卡片流；原来的「录音 / 回收站 / 清理」表整体迁到 `/files`，桌面壳仍保留独立的「文件」入口，两套列表不再挤在同一页。
 
 页面骨架：
 
@@ -1265,7 +1265,7 @@ P1 的硬指标：
 | 页面 | 路径 | 类型 | 说明 |
 |---|---|---|---|
 | 笔记页 | `/note?session=` | 基座 | G1；桌面壳新增 `note` 视图；支持 `?t=` 定位、`?share=1` 只读 |
-| 笔记库 | `/library` | 基座 | 改造为卡片流；保留文件/回收站/清理 tab |
+| 笔记库 | `/library` | 基座 | 改造为卡片流；文件/回收站/清理迁到 `/files` |
 | 关注 | `/follows` | 基座 | G2；桌面壳新增 `follows` 视图 |
 | 周报 | `/weekly` | 基座 | E；桌面壳新增 `weekly` 视图 |
 | 搜索面板 | 全局组件 | 基座 | `Ctrl+K`；所有页面共用 |
@@ -1273,23 +1273,20 @@ P1 的硬指标：
 
 导航调整最小化：
 
-- 现有 `files` 视图改名为「笔记库」，仍指向 `/library`；新增 `follows`、`weekly`；`note` 作为 `workbench` 的升级落点（有笔记进 `/note`，没笔记进工作台）。
+- 现有 `files` 保持「文件中心」，改指 `/files`；新增 `library` 指向 `/library`（笔记库）、`follows`、`weekly`；`note` 作为工作台的升级落点（有笔记进 `/note`，没笔记进工作台）。
 - 不删除 `listen` / `workbench` / `people` / `capture`；它们仍是「更多」里的专业视图。
-- 桌面壳 `VIEW_META` 增加 `note/follows/weekly`；`VIEW_THEME` 都归 `paper`。
+- 桌面壳 `VIEW_META` 增加 `note/follows/library/weekly`；这些基座页自己把 `theme=paper` 映射为亮色、其余为深色，不再依赖旧的 `VIEW_THEME`。
 
 ### 12.6 文件清单
 
 **新增**
 
-- `app/follows.py`、`app/liveprobe.py`、`app/notes.py`、`app/qa.py`、`app/copy.py`
-- `app/web/note.html`、`app/web/css/note.css`、`app/web/js/note/*`
-- `app/web/follows.html`、`app/web/css/follows.css`、`app/web/js/follows/*`
-- `app/web/weekly.html`、`app/web/css/weekly.css`、`app/web/js/weekly/*`
-- `app/web/js/library/*`（重写）、`app/web/js/searchpalette.js`、`app/web/js/sharecard.js`
-- `app/web/js/vendor/qrcodegen.js`
-- `desktop/web/css/p1-overlay.css`、`desktop/web/js/p1-overlay.js`（桌面专属观感）
-- `tests/test_follows.py`、`test_auto_record.py`、`test_notes_api.py`、`test_library_cards.py`、`test_bookmarks.py`、`test_qa.py`、`test_reports_weekly.py`、`test_export_note_md.py`、`test_perf_mode.py`
-- `tools/a11y_check.py`、`tools/bench_perf.py`
+- `app/follows.py`、`app/liveprobe.py`、`app/notes.py`、`app/qa.py`、`app/qr.py`、`app/copy.py`
+- `app/web/note.html`、`app/web/follows.html`、`app/web/weekly.html`
+- `app/web/files.html`（原文件中心，迁到 `/files`）
+- `app/web/css/p1.css`（四个 P1 页共用视觉）、`app/web/js/p1.js`（接口、搜索面板、状态映射）、`app/web/js/sharecard.js`
+- `tests/test_p1_backend.py`（二维码、偏好、关注、笔记库、书签、问答、周报、导出、性能）、`tests/test_p1_pages.py`（页面路由、基座锚点、二维码与笔记库接口）
+- 实施说明：搜索面板与 P1 页逻辑合并进 `p1.js`/`p1.css`，没有按原计划拆成每页一个 CSS/JS；纯 Python 二维码取代 `qrcodegen.js`，少一个前端依赖。
 
 **修改**
 

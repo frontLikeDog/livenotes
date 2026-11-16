@@ -12,8 +12,8 @@ from __future__ import annotations
 
 import traceback
 
-from . import (analysis, classify, logs, notify, polish, reader, recluster,
-               scheduler, store, titles)
+from . import (analysis, classify, logs, notes, notify, polish, qa, reader,
+               recluster, scheduler, store, titles)
 
 _FILTER_KEYS = ("t_from", "t_to", "categories", "speakers", "q",
                 "exclude_low_value", "exclude_overlap", "min_conf")
@@ -80,8 +80,19 @@ def _run_summary(sid: str, payload: dict) -> dict | scheduler.TaskResult:
                                session_id=sid, error=str(e))
         f = dict(payload.get("filters") or {})
         f["session_id"] = sid
+        try:
+            store.upsert_note(conn, sid, state="running", progress=10,
+                              error="", generated_at=None)
+        except Exception:
+            traceback.print_exc()
         out = analysis.make_summary(conn, sid, f, payload.get("mode") or "content",
                                     payload.get("engine") or "auto")
+        try:
+            # 总结落库后立刻重建检索单元：搜索/问笔记不用等下一次启动。
+            notes.index_session(conn, sid)
+        except Exception:
+            logs.log_event("notes.index_failed", level="warn", session_id=sid,
+                           error=str(traceback.format_exc())[:200])
         if payload.get("auto"):
             logs.log_event("live.finalize_done", session_id=sid,
                            engine=str(out.get("engine") or ""),
@@ -103,11 +114,18 @@ def _run_summary(sid: str, payload: dict) -> dict | scheduler.TaskResult:
         # 自动收尾失败时别让场次一直叫「直播监听 11-05 03:41」：先落一份本地抽取式
         # 总结（0 token），再用本地信息命名。仍然把失败抛出去，任务状态是 failed，
         # 用户可以重试，而不是被缓存成"已完成"。
+        try:
+            store.upsert_note(conn, sid, state="failed",
+                              error=str(e).splitlines()[0][:200]
+                              if str(e).strip() else "生成失败")
+        except Exception:
+            traceback.print_exc()
         if payload.get("auto"):
             try:
                 f = dict(payload.get("filters") or {})
                 f["session_id"] = sid
                 analysis.make_summary(conn, sid, f, "content", "extractive")
+                notes.index_session(conn, sid)
                 logs.log_event("live.fallback_summary", level="warn", session_id=sid)
             except Exception:
                 traceback.print_exc()
@@ -207,6 +225,17 @@ def submit_classify(sid: str, offset: int = 0, limit: int | None = None,
         cache_ttl=0)
 
 
+# ---------------------------------------------------------------- 问笔记
+
+def _run_qa(sid: str, payload: dict) -> dict:
+    """问答任务。结果写 qa_answers，HTTP 轮询读行，不靠 Job public 结果。"""
+    qid = int(payload.get("qid") or 0)
+    if not qid:
+        raise ValueError("缺少问题编号")
+    return qa.run_job(qid)
+
+
 scheduler.register("summary", _run_summary)
 scheduler.register("polish", _run_polish)
 scheduler.register("classify", _run_classify)
+scheduler.register("qa", _run_qa)

@@ -35,10 +35,10 @@
 ```
 主窗口（http://tauri.localhost/shell.html）
 ├── topbar        面包屑 / 命令面板入口 / N 路在听 / 设置
-├── rail 64px     收听 · 工作台 · 文件 · 人物 · 设置
+├── rail 64px     记录 · 收听 · 工作台 · 关注 · 笔记库 · 周报 · 文件 · 人物 · 设置
 ├── sidebar 280   当前模式的上下文列表（房间 / 场次）
 ├── canvas        信号画布 / 监控墙 / 原生直播页面子视图
-│   └── frameView 工作台 / 文件中心 / 人物 / 设置（iframe，带深色画框）
+│   └── frameView 工作台 / 关注 / 笔记库 / 周报 / 笔记 / 文件 / 人物 / 设置（iframe）
 ├── inspector 340 当前房间的诊断、会话、实时字幕
 ├── statusbar     引擎端口 · 房间数 · 在听数 · 关窗提示
 └── overlays      命令面板 / 确认框 / toast
@@ -52,7 +52,11 @@
 |---|---|---|
 | `listen` | 收听工作区 | 信号画布 / 监控墙 / 原生页面 |
 | `workbench` | 场次与字幕 | `/?embed=1&session=<sid>`，默认选第一个有发言的场次 |
-| `files` | 文件中心 | `/library?embed=1` |
+| `follows` | 关注 | `/follows?embed=1`，开播提醒与自动记录 |
+| `library` | 笔记库 | `/library?embed=1`，卡片流与全库搜索 |
+| `weekly` | 周报 | `/weekly?embed=1&period=<YYYY-Www>` |
+| `note` | 笔记页 | `/note?embed=1&session_id=<sid>&t=<秒>`，从笔记库或通知进入 |
+| `files` | 文件中心 | `/files?embed=1` |
 | `people` | 人物档案 | `/people?embed=1` |
 | `settings` | 设置 | `/?embed=1&settings=1`，整页铺满画框 |
 | `live` | 实时字幕 | `/live?embed=1&session=<sid>`，深色页不套画框 |
@@ -77,7 +81,7 @@
 
 `Ctrl+K` 打开；支持上下键、Enter、Esc、点击。动作包括：
 
-- 收听 / 工作台 / 文件中心 / 人物 / 设置；
+- 记录 / 收听 / 工作台 / 关注 / 笔记库 / 周报 / 文件中心 / 人物 / 设置；
 - 添加直播间、打开监控墙；
 - 当前房间的显示页面 / 实时字幕；
 - 停止全部采集、刷新数据。
@@ -85,7 +89,8 @@
 ### 3.3 工作台与资料
 
 - 场次列表来自 `/api/sessions`，默认选中第一个 `n_utterances > 0` 的场次；
-- 工作台、文件、人物、设置都通过 `iframe` 复用现有页面，`embed.js` 隐藏页面自己的顶栏；
+- 工作台、关注、笔记库、周报、笔记、文件、人物、设置都通过 `iframe` 复用现有页面，
+  `embed.js` 隐藏页面自己的顶栏；P1 页面是深色整页，不套旧画框；
 - iframe 内的同源链接被 `embed.js` 拦截，`postMessage` 给壳，由壳在内容区打开；
 - iframe 内的 `Ctrl+K` / `Ctrl+1..5` 也交给壳处理；
 - 窄宽度下保留引擎页的移动标签栏，否则三栏内容会被移动媒体查询整体隐藏。

@@ -476,7 +476,9 @@ def build(conn: sqlite3.Connection, sid: str, limit: int | None = None,
     场面切分和可读层在 app/scenes.py：先切 30~90 秒的段，再让模型写钩子 /
     挑原声 / 打标签；模型不可用时退回规则版，接口不报错。
     """
-    from . import scenes
+    from . import config, scenes
+    # 低配模式只用规则版：高光评审是最容易被用户感知到的后台花活。
+    use_llm = bool(use_llm) and config.perf()["effective"].get("highlight_llm", True)
     return scenes.build(conn, sid, limit=limit or scenes.LIMIT, use_llm=use_llm)
 
 # ---------------------------------------------------------------- 实时

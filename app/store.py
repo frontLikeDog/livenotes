@@ -298,6 +298,98 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_notif_dedupe
     ON notifications(dedupe_key) WHERE dedupe_key <> '';
 CREATE INDEX IF NOT EXISTS idx_notif_created ON notifications(created_at);
 CREATE INDEX IF NOT EXISTS idx_notif_read ON notifications(read_at);
+
+-- 关注：对象是直播间，不是人。platform + room_key 唯一，名称只是展示字段。
+CREATE TABLE IF NOT EXISTS follows (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    platform         TEXT NOT NULL,
+    room_key         TEXT NOT NULL,
+    url              TEXT NOT NULL,
+    name             TEXT NOT NULL DEFAULT '',
+    live_title       TEXT NOT NULL DEFAULT '',
+    live_state       TEXT NOT NULL DEFAULT 'unknown',  -- live|offline|unknown
+    live_started_at  TEXT,
+    live_episode     TEXT NOT NULL DEFAULT '',          -- 同一场去重
+    last_live_at     TEXT,
+    last_checked_at  TEXT,
+    last_error       TEXT NOT NULL DEFAULT '',
+    last_session_id  TEXT NOT NULL DEFAULT '',
+    fail_count       INTEGER NOT NULL DEFAULT 0,
+    notify           INTEGER NOT NULL DEFAULT 1,
+    auto_record      INTEGER NOT NULL DEFAULT 0,
+    created_at       TEXT NOT NULL,
+    UNIQUE(platform, room_key)
+);
+
+-- 一篇笔记的生成状态。没有行时按「有总结→ready / 无总结→empty」推导，
+-- 不强制回填历史场次（见 docs/36 §12.1）。
+CREATE TABLE IF NOT EXISTS notes (
+    session_id   TEXT PRIMARY KEY,
+    state        TEXT NOT NULL DEFAULT 'empty',  -- empty|queued|running|ready|partial|failed|stale|insufficient
+    progress     INTEGER NOT NULL DEFAULT 0,
+    stages_json  TEXT NOT NULL DEFAULT '{}',
+    error        TEXT NOT NULL DEFAULT '',
+    generated_at TEXT,
+    updated_at   TEXT
+);
+
+-- 全库搜索与问笔记共用的结构化索引：总结 / 要点 / 高光 / 书签。
+CREATE TABLE IF NOT EXISTS note_units (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id  TEXT NOT NULL,
+    kind        TEXT NOT NULL,                 -- summary|point|highlight|bookmark
+    ref_id      TEXT NOT NULL DEFAULT '',      -- 要点序号 / 高光 id / 书签 id
+    t           REAL,                          -- 关联时间码
+    speaker     TEXT NOT NULL DEFAULT '',
+    title       TEXT NOT NULL DEFAULT '',      -- 这场笔记的标题（冗余，省一次 join）
+    text        TEXT NOT NULL,
+    weight      REAL NOT NULL DEFAULT 1.0,
+    created_at  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_nu_session ON note_units(session_id);
+CREATE INDEX IF NOT EXISTS idx_nu_kind ON note_units(kind);
+
+-- 问笔记历史：只留最近 200 条，正文不出本机。
+CREATE TABLE IF NOT EXISTS qa_answers (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    question       TEXT NOT NULL,
+    scope_json     TEXT NOT NULL DEFAULT '{}',
+    state          TEXT NOT NULL,        -- running|ready|no_result|failed
+    answer         TEXT NOT NULL DEFAULT '',
+    citations_json TEXT NOT NULL DEFAULT '[]',
+    engine         TEXT NOT NULL DEFAULT '',   -- llm|extractive
+    feedback       TEXT NOT NULL DEFAULT '',   -- up|down|''
+    job_id         TEXT NOT NULL DEFAULT '',
+    error          TEXT NOT NULL DEFAULT '',
+    created_at     TEXT NOT NULL,
+    updated_at     TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_qa_created ON qa_answers(created_at DESC);
+
+-- 周报/复盘：状态、文件、结构化数据。同一周期只允许一行。
+CREATE TABLE IF NOT EXISTS reports (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind         TEXT NOT NULL,          -- weekly | retro
+    period       TEXT NOT NULL,          -- 2026-W46
+    since        TEXT NOT NULL,
+    until        TEXT NOT NULL,
+    state        TEXT NOT NULL,          -- queued|running|ready|failed|empty
+    path         TEXT NOT NULL DEFAULT '',
+    title        TEXT NOT NULL DEFAULT '',
+    summary      TEXT NOT NULL DEFAULT '',
+    data_json    TEXT NOT NULL DEFAULT '{}',
+    error        TEXT NOT NULL DEFAULT '',
+    generated_at TEXT,
+    UNIQUE(kind, period)
+);
+CREATE INDEX IF NOT EXISTS idx_reports_kind ON reports(kind, since DESC);
+
+-- 索引版本：note_units / FTS 重建的幂等依据。
+CREATE TABLE IF NOT EXISTS index_meta (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL DEFAULT '',
+    updated_at TEXT
+);
 """
 
 _FTS_TRIGGERS = """
@@ -316,6 +408,24 @@ CREATE TRIGGER IF NOT EXISTS u_au AFTER UPDATE ON utterances BEGIN
   VALUES (new.id, new.text, new.speaker_label, new.topic);
 END;
 """
+
+_NOTE_FTS_TRIGGERS = """
+CREATE TRIGGER IF NOT EXISTS nu_ai AFTER INSERT ON note_units BEGIN
+  INSERT INTO note_units_fts(rowid, text, title) VALUES (new.id, new.text, new.title);
+END;
+CREATE TRIGGER IF NOT EXISTS nu_ad AFTER DELETE ON note_units BEGIN
+  INSERT INTO note_units_fts(note_units_fts, rowid, text, title)
+  VALUES ('delete', old.id, old.text, old.title);
+END;
+CREATE TRIGGER IF NOT EXISTS nu_au AFTER UPDATE ON note_units BEGIN
+  INSERT INTO note_units_fts(note_units_fts, rowid, text, title)
+  VALUES ('delete', old.id, old.text, old.title);
+  INSERT INTO note_units_fts(rowid, text, title) VALUES (new.id, new.text, new.title);
+END;
+"""
+
+#: note_units 索引结构版本；变了就在启动时重建 FTS。
+NOTE_INDEX_VERSION = "1"
 
 
 def connect() -> sqlite3.Connection:
@@ -420,9 +530,23 @@ def _migrate(conn: sqlite3.Connection) -> None:
     # 老的高光行留空即可，前端自动退回 text。
     for _col, _ddl in (("hook", "TEXT DEFAULT ''"), ("tag", "TEXT DEFAULT ''"),
                        ("quote", "TEXT DEFAULT ''"),
-                       ("scene_json", "TEXT DEFAULT '[]'")):
+                       ("scene_json", "TEXT DEFAULT '[]'"),
+                       # 来源：auto/scenes/live/manual。kind 仍是评分类型，语义不变。
+                       ("source", "TEXT NOT NULL DEFAULT 'auto'")):
         if hcols and _col not in hcols:
             conn.execute("ALTER TABLE highlights ADD COLUMN %s %s" % (_col, _ddl))
+    # 书签：marks 继续用，加一列 kind（mark|bookmark），不为书签另起一张表。
+    mcols = {r["name"] for r in conn.execute("PRAGMA table_info(marks)")}
+    if mcols and "kind" not in mcols:
+        conn.execute(
+            "ALTER TABLE marks ADD COLUMN kind TEXT NOT NULL DEFAULT 'mark'")
+    # 34 可能已经建过 follows 表：建表时直接带 P1 三列，老库则补列。
+    fcols = {r["name"] for r in conn.execute("PRAGMA table_info(follows)")}
+    for _col, _ddl in (("live_episode", "TEXT NOT NULL DEFAULT ''"),
+                       ("last_session_id", "TEXT NOT NULL DEFAULT ''"),
+                       ("fail_count", "INTEGER NOT NULL DEFAULT 0")):
+        if fcols and _col not in fcols:
+            conn.execute("ALTER TABLE follows ADD COLUMN %s %s" % (_col, _ddl))
     # 上一次进程被杀 / 崩溃时留下的"还在跑"的任务：启动时一律收尾成 interrupted。
     # 后台线程已经不在了，留着 running 会让前端永远转圈，也让新任务以为"有一场在跑"。
     conn.execute(
@@ -450,6 +574,19 @@ def init_db(conn: sqlite3.Connection) -> None:
             # 写入中途被杀，索引就会是空的/不一致；trigram 的 MATCH 这时静默返回 0 条，
             # 用户看到的是「升级后搜不到了」。启动时重建一次，单机小库的开销可以忽略。
             conn.execute("INSERT INTO utterances_fts(utterances_fts) VALUES('rebuild')")
+            conn.execute(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS note_units_fts USING fts5("
+                "text, title, content='note_units', content_rowid='id', "
+                "tokenize='trigram')")
+            conn.executescript(_NOTE_FTS_TRIGGERS)
+            ver = conn.execute(
+                "SELECT value FROM index_meta WHERE key='note_units_fts'").fetchone()
+            if not ver or str(ver["value"]) != NOTE_INDEX_VERSION:
+                conn.execute(
+                    "INSERT INTO note_units_fts(note_units_fts) VALUES('rebuild')")
+                conn.execute(
+                    "INSERT OR REPLACE INTO index_meta(key,value,updated_at) "
+                    "VALUES ('note_units_fts',?,?)", (NOTE_INDEX_VERSION, now()))
             FTS_TRIGRAM = True
         except sqlite3.OperationalError:
             # 编译时未带 FTS5：功能降级为 LIKE，不阻断运行
@@ -701,17 +838,27 @@ def delete_session(conn: sqlite3.Connection, sid: str) -> None:
     conn.commit()
 
 
-def insert_mark(conn: sqlite3.Connection, sid: str, t: float, note: str = "") -> dict:
+def insert_mark(conn: sqlite3.Connection, sid: str, t: float, note: str = "",
+                kind: str = "mark") -> dict:
+    kind = "bookmark" if str(kind or "").lower() == "bookmark" else "mark"
     cur = conn.execute(
-        "INSERT INTO marks(session_id,t,note,created_at) VALUES (?,?,?,?)",
-        (sid, float(t), note, now()))
+        "INSERT INTO marks(session_id,t,note,kind,created_at) VALUES (?,?,?,?,?)",
+        (sid, float(t), note, kind, now()))
     conn.commit()
-    return {"id": cur.lastrowid, "t": round(float(t), 1), "note": note}
+    return {"id": cur.lastrowid, "t": round(float(t), 1), "note": note,
+            "kind": kind}
 
 
 def list_marks(conn: sqlite3.Connection, sid: str) -> list[dict]:
     return [dict(r) for r in conn.execute(
-        "SELECT id,t,note FROM marks WHERE session_id=? ORDER BY t", (sid,))]
+        "SELECT id,t,note,kind FROM marks WHERE session_id=? ORDER BY t", (sid,))]
+
+
+def delete_mark(conn: sqlite3.Connection, sid: str, mark_id: int) -> int:
+    cur = conn.execute("DELETE FROM marks WHERE id=? AND session_id=?",
+                       (int(mark_id), sid))
+    conn.commit()
+    return int(cur.rowcount or 0)
 
 
 # ---------------------------------------------------------------- 查询
@@ -1448,13 +1595,13 @@ def list_summaries(conn: sqlite3.Connection, sid: str, limit: int = 20) -> list[
 _H_COLS = ("session_id", "t_start", "t_end", "peak_t", "kind", "level", "score",
            "info_z", "arousal_z", "why", "speaker_label", "text", "n_utts",
            "features_json", "feedback", "feedback_at", "utterance_id",
-           "hook", "tag", "quote", "scene_json")
+           "hook", "tag", "quote", "scene_json", "source")
 _H_DEFAULTS = {
     "session_id": "", "t_start": 0.0, "t_end": 0.0, "peak_t": 0.0,
     "kind": "info", "level": "P1", "score": 0.0, "info_z": 0.0, "arousal_z": 0.0,
     "why": "", "speaker_label": "", "text": "", "n_utts": 0, "features_json": "{}",
     "feedback": 0, "feedback_at": None, "utterance_id": 0,
-    "hook": "", "tag": "", "quote": "", "scene_json": "[]",
+    "hook": "", "tag": "", "quote": "", "scene_json": "[]", "source": "auto",
 }
 
 
@@ -1485,8 +1632,11 @@ def replace_highlights(conn: sqlite3.Connection, sid: str, rows: list[dict]) -> 
         for r in conn.execute(
             "SELECT peak_t, feedback, feedback_at FROM highlights "
             "WHERE session_id=? AND feedback<>0", (sid,))}
+    # 人工标记（kind='manual'）和收藏（source in manual/live）不是算法产物，
+    # 重算后原样放回去；否则用户刚收藏的实时高光会被下一次「重新分析」抹掉。
     manual = [dict(r) for r in conn.execute(
-        "SELECT * FROM highlights WHERE session_id=? AND kind='manual'", (sid,))]
+        "SELECT * FROM highlights WHERE session_id=? "
+        "AND (kind='manual' OR source IN ('manual','live'))", (sid,))]
     conn.execute("DELETE FROM highlights WHERE session_id=?", (sid,))
     sql = ("INSERT INTO highlights (" + ",".join(_H_COLS) + ",created_at) VALUES ("
            + ",".join("?" for _ in _H_COLS) + ",?)")
@@ -1547,7 +1697,8 @@ def toggle_manual_highlight(conn: sqlite3.Connection, sid: str,
         "INSERT INTO highlights (" + ",".join(_H_COLS) + ",created_at) VALUES ("
         + ",".join("?" for _ in _H_COLS) + ",?)",
         (sid, t0, t1, t0, "manual", "P0", 1000.0, 0.0, 0.0, "手动标记",
-         who, body, 1, "{}", 0, None, uid, body[:60], "手动", body, "[]", now()))
+         who, body, 1, "{}", 0, None, uid, body[:60], "手动", body, "[]",
+         "manual", now()))
     conn.commit()
     return {"ok": True, "highlighted": True, "id": int(cur.lastrowid),
             "kind": "manual"}
@@ -1579,6 +1730,29 @@ def list_highlights(conn: sqlite3.Connection, sid: str, limit: int = 50) -> list
         except ValueError:
             r["scene"] = []
     return rows
+
+
+def save_highlight(conn: sqlite3.Connection, row: dict) -> dict:
+    """写一条「用户收藏」的高光。按 (session, peak_t) 幂等，重复收藏不叠加。"""
+    sid = str(row.get("session_id") or "")
+    peak = round(float(row.get("peak_t") or row.get("t_start") or 0.0), 1)
+    hit = conn.execute(
+        "SELECT * FROM highlights WHERE session_id=? AND ABS(peak_t-?)<0.1 "
+        "AND source IN ('manual','live') ORDER BY id LIMIT 1",
+        (sid, peak)).fetchone()
+    if hit:
+        return dict(hit)
+    data = dict(row)
+    data.setdefault("session_id", sid)
+    data["peak_t"] = peak
+    conn.execute(
+        "INSERT INTO highlights (" + ",".join(_H_COLS) + ",created_at) VALUES ("
+        + ",".join("?" for _ in _H_COLS) + ",?)",
+        tuple(data.get(c, _H_DEFAULTS[c]) for c in _H_COLS) + (now(),))
+    rid = int(conn.execute("SELECT last_insert_rowid() AS n").fetchone()["n"])
+    conn.commit()
+    return dict(conn.execute("SELECT * FROM highlights WHERE id=?",
+                             (rid,)).fetchone())
 
 
 def highlights_meta(conn: sqlite3.Connection, sid: str) -> dict:
@@ -2035,3 +2209,536 @@ def prune_metrics(days: int = 7) -> dict[str, int]:
         return {"samples": int(s.rowcount or 0), "events": int(e.rowcount or 0)}
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------- P1：关注
+
+def list_follows(conn: sqlite3.Connection) -> list[dict]:
+    """直播中的排前面，其余按最近检测时间倒序。"""
+    return [dict(r) for r in conn.execute(
+        "SELECT * FROM follows ORDER BY "
+        "CASE live_state WHEN 'live' THEN 0 WHEN 'unknown' THEN 2 ELSE 1 END, "
+        "COALESCE(last_live_at, created_at) DESC, id")]
+
+
+def get_follow(conn: sqlite3.Connection, fid: int) -> dict | None:
+    return rowdict(conn.execute("SELECT * FROM follows WHERE id=?",
+                                (int(fid),)).fetchone())
+
+
+def add_follow(conn: sqlite3.Connection, platform: str, room_key: str,
+               url: str, name: str = "") -> dict | None:
+    """同一 platform+room_key 只留一行；重复关注返回已有行（不报错）。"""
+    platform = str(platform or "").strip().lower()
+    room_key = str(room_key or "").strip()
+    url = str(url or "").strip()
+    if not platform or not room_key or not url:
+        return None
+    conn.execute(
+        "INSERT INTO follows(platform,room_key,url,name,live_state,created_at) "
+        "VALUES (?,?,?,?,'unknown',?) "
+        "ON CONFLICT(platform,room_key) DO UPDATE SET "
+        "url=CASE WHEN excluded.url<>'' THEN excluded.url ELSE follows.url END, "
+        "name=CASE WHEN excluded.name<>'' THEN excluded.name ELSE follows.name END",
+        (platform, room_key, url, str(name or "").strip()[:80], now()))
+    conn.commit()
+    return rowdict(conn.execute(
+        "SELECT * FROM follows WHERE platform=? AND room_key=?",
+        (platform, room_key)).fetchone())
+
+
+def update_follow(conn: sqlite3.Connection, fid: int, **fields: Any) -> dict | None:
+    allowed = ("name", "notify", "auto_record", "live_title", "live_state",
+               "live_started_at", "live_episode", "last_live_at",
+               "last_checked_at", "last_error", "last_session_id", "fail_count")
+    sets, vals = [], []
+    for k in allowed:
+        if k not in fields:
+            continue
+        v = fields[k]
+        if k in ("notify", "auto_record"):
+            v = 1 if v else 0
+        elif k == "fail_count":
+            v = max(0, int(v or 0))
+        sets.append("%s=?" % k)
+        vals.append(v)
+    if not sets:
+        return get_follow(conn, fid)
+    vals.append(int(fid))
+    conn.execute("UPDATE follows SET " + ",".join(sets) + " WHERE id=?", vals)
+    conn.commit()
+    return get_follow(conn, fid)
+
+
+def remove_follow(conn: sqlite3.Connection, fid: int) -> int:
+    cur = conn.execute("DELETE FROM follows WHERE id=?", (int(fid),))
+    conn.commit()
+    return int(cur.rowcount or 0)
+
+
+def count_follows(conn: sqlite3.Connection) -> int:
+    return int(conn.execute("SELECT COUNT(*) AS n FROM follows").fetchone()["n"])
+
+
+# ---------------------------------------------------------------- P1：笔记状态
+
+NOTE_STATES = ("empty", "insufficient", "queued", "running", "ready",
+               "partial", "failed", "stale")
+
+
+def get_note(conn: sqlite3.Connection, sid: str) -> dict | None:
+    row = rowdict(conn.execute("SELECT * FROM notes WHERE session_id=?",
+                               (sid,)).fetchone())
+    if row:
+        try:
+            row["stages"] = json.loads(row.pop("stages_json") or "{}")
+        except (TypeError, ValueError):
+            row["stages"] = {}
+    return row
+
+
+def upsert_note(conn: sqlite3.Connection, sid: str, **fields: Any) -> dict:
+    allowed = ("state", "progress", "error", "generated_at")
+    cur = conn.execute("SELECT session_id FROM notes WHERE session_id=?",
+                       (sid,)).fetchone()
+    vals: dict[str, Any] = {}
+    if cur:
+        for k in allowed:
+            if k in fields:
+                vals[k] = fields[k]
+        if "stages" in fields:
+            vals["stages_json"] = json.dumps(fields["stages"], ensure_ascii=False)
+        if vals:
+            conn.execute(
+                "UPDATE notes SET " + ",".join("%s=?" % k for k in vals)
+                + ",updated_at=? WHERE session_id=?",
+                list(vals.values()) + [now(), sid])
+    else:
+        stages = fields.get("stages") or {}
+        conn.execute(
+            "INSERT INTO notes(session_id,state,progress,stages_json,error,"
+            "generated_at,updated_at) VALUES (?,?,?,?,?,?,?)",
+            (sid, fields.get("state") or "empty",
+             int(fields.get("progress") or 0),
+             json.dumps(stages, ensure_ascii=False),
+             str(fields.get("error") or ""), fields.get("generated_at"), now()))
+    conn.commit()
+    return get_note(conn, sid) or {}
+
+
+def delete_note(conn: sqlite3.Connection, sid: str) -> None:
+    conn.execute("DELETE FROM notes WHERE session_id=?", (sid,))
+    conn.commit()
+
+
+# ---------------------------------------------------------------- P1：笔记单元
+
+def replace_note_units(conn: sqlite3.Connection, sid: str,
+                       units: list[dict]) -> int:
+    """整场重建检索单元。只保留有实际文字的单元（空要点不占索引）。"""
+    conn.execute("DELETE FROM note_units WHERE session_id=?", (sid,))
+    rows = []
+    ts = now()
+    for u in units or []:
+        text = str(u.get("text") or "").strip()
+        if not text:
+            continue
+        rows.append((sid, str(u.get("kind") or "point"),
+                     str(u.get("ref_id") or ""),
+                     _num_or_none(u.get("t")), str(u.get("speaker") or "")[:80],
+                     str(u.get("title") or "")[:200], text[:2000],
+                     float(u.get("weight") or 1.0), ts))
+    if rows:
+        conn.executemany(
+            "INSERT INTO note_units(session_id,kind,ref_id,t,speaker,title,text,"
+            "weight,created_at) VALUES (?,?,?,?,?,?,?,?,?)", rows)
+    conn.commit()
+    return len(rows)
+
+
+def _num_or_none(v: Any) -> float | None:
+    try:
+        return float(v) if v is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def delete_note_units(conn: sqlite3.Connection, sid: str) -> None:
+    conn.execute("DELETE FROM note_units WHERE session_id=?", (sid,))
+    conn.commit()
+
+
+def note_units_for_session(conn: sqlite3.Connection, sid: str,
+                           limit: int = 200) -> list[dict]:
+    return [dict(r) for r in conn.execute(
+        "SELECT * FROM note_units WHERE session_id=? ORDER BY "
+        "CASE kind WHEN 'summary' THEN 0 WHEN 'point' THEN 1 "
+        "WHEN 'highlight' THEN 2 ELSE 3 END, COALESCE(t,0), id LIMIT ?",
+        (sid, max(1, int(limit))))]
+
+
+def search_note_units(conn: sqlite3.Connection, queries: list[str],
+                      limit: int = 20, session_id: str = "",
+                      since: str = "", until: str = "",
+                      kind: str = "") -> list[dict]:
+    """note_units 检索。≥3 字走 FTS5 trigram（BM25），否则 LIKE。
+
+    返回按「BM25 + 类型权重 + 新鲜度」粗排后的行；精细排序在 app/qa.py。
+    """
+    queries = [str(q).strip() for q in (queries or []) if str(q).strip()]
+    if not queries:
+        return []
+    where, args = [], []
+    if session_id:
+        where.append("nu.session_id=?")
+        args.append(session_id)
+    if kind:
+        where.append("nu.kind=?")
+        args.append(kind)
+    if since:
+        where.append("COALESCE(s.started_at,'')>=?")
+        args.append(since)
+    if until:
+        where.append("COALESCE(s.started_at,'')<?")
+        args.append(until)
+    scope = (" AND " + " AND ".join(where)) if where else ""
+    out: list[dict] = []
+    seen: set[int] = set()
+    for q in queries:
+        rows: list[dict] = []
+        if FTS_TRIGRAM and len(q) >= 3:
+            try:
+                rows = [dict(r) for r in conn.execute(
+                    "SELECT nu.*, s.started_at, bm25(note_units_fts) AS rank "
+                    "FROM note_units_fts JOIN note_units nu "
+                    "  ON nu.id=note_units_fts.rowid "
+                    "LEFT JOIN sessions s ON s.id=nu.session_id "
+                    "WHERE note_units_fts MATCH ?" + scope +
+                    " ORDER BY rank LIMIT ?",
+                    [q] + args + [max(1, int(limit)) * 3])]
+            except sqlite3.OperationalError:
+                rows = []
+        if not rows:
+            # 两字词 / FTS 不可用：LIKE。单机 1000 场以内可接受（见 docs/36 §9.5）。
+            like = "%" + q.replace("%", "").replace("_", "") + "%"
+            rows = [dict(r) for r in conn.execute(
+                "SELECT nu.*, s.started_at, 0.0 AS rank "
+                "FROM note_units nu LEFT JOIN sessions s ON s.id=nu.session_id "
+                "WHERE (nu.text LIKE ? OR nu.title LIKE ?)" + scope +
+                " ORDER BY nu.id DESC LIMIT ?",
+                [like, like] + args + [max(1, int(limit)) * 3])]
+        for r in rows:
+            rid = int(r["id"])
+            if rid in seen:
+                continue
+            seen.add(rid)
+            r["coverage"] = 1.0 if q in str(r.get("text") or "") else 0.6
+            out.append(r)
+    # 粗排：FTS rank 越小越相关（负数），没命中查询词的排在后面。
+    def _key(r: dict) -> float:
+        rank = float(r.get("rank") or 0.0)
+        return rank - float(r.get("weight") or 1.0) + (0 if r.get("coverage") else 0.5)
+    out.sort(key=_key)
+    return out[:max(1, int(limit))]
+
+
+# ---------------------------------------------------------------- P1：笔记库卡片
+
+def _summary_json(conn: sqlite3.Connection, sid: str) -> dict:
+    row = conn.execute(
+        "SELECT payload_json FROM summaries WHERE session_id=? "
+        "ORDER BY created_at DESC, id DESC LIMIT 1", (sid,)).fetchone()
+    if not row:
+        return {}
+    try:
+        data = json.loads(row["payload_json"] or "{}")
+        return data if isinstance(data, dict) else {}
+    except (TypeError, ValueError):
+        return {}
+
+
+def derive_note_state(conn: sqlite3.Connection, sid: str,
+                      note: dict | None = None) -> tuple[str, int]:
+    """没有 notes 行的历史场次按「有总结→ready / 没总结→empty」推导。"""
+    note = note if note is not None else get_note(conn, sid)
+    if note and note.get("state"):
+        return str(note["state"]), int(note.get("progress") or 0)
+    payload = _summary_json(conn, sid)
+    if payload and (payload.get("overview") or payload.get("points")):
+        return "ready", 100
+    n = conn.execute("SELECT COUNT(*) AS n FROM utterances WHERE session_id=?",
+                     (sid,)).fetchone()["n"]
+    return ("insufficient" if int(n or 0) < 20 else "empty"), 0
+
+
+def library_cards(conn: sqlite3.Connection, limit: int = 24, cursor: str = "",
+                  filter: str = "all", sort: str = "time",
+                  since: str = "") -> dict:
+    """笔记库卡片流。一条 SQL 取候选 + 聚合计数，避免 N+1 与逐行 stat()。"""
+    limit = max(1, min(60, int(limit or 24)))
+    filter = filter if filter in ("all", "ready", "running", "nogen", "week",
+                                  "follow") else "all"
+    sort = sort if sort in ("time", "duration", "generated") else "time"
+    where = ["s.deleted_at IS NULL"]
+    args: list[Any] = []
+    if filter == "ready":
+        where.append("(n.state='ready' OR (n.state IS NULL AND EXISTS("
+                     "SELECT 1 FROM summaries su WHERE su.session_id=s.id)))")
+    elif filter == "running":
+        where.append("(n.state IN ('queued','running') OR EXISTS("
+                     "SELECT 1 FROM analysis_runs r WHERE r.session_id=s.id "
+                     "AND r.status IN ('queued','running')))")
+    elif filter == "nogen":
+        where.append("NOT EXISTS(SELECT 1 FROM summaries su WHERE su.session_id=s.id)")
+    elif filter == "week":
+        where.append("COALESCE(s.started_at,'')>=?")
+        args.append(since or "0000")
+    elif filter == "follow":
+        where.append("EXISTS(SELECT 1 FROM follows f WHERE f.last_session_id=s.id)")
+    if cursor:
+        try:
+            key, cid = cursor.rsplit("|", 1)
+        except ValueError:
+            key, cid = "", ""
+        if cid:
+            col = {"time": "COALESCE(s.started_at,'')",
+                   "duration": "COALESCE(s.duration_s,0)",
+                   "generated": "COALESCE(n.generated_at,'')"}[sort]
+            op = "<" if sort != "duration" else "<"
+            where.append("(%s %s ? OR (%s = ? AND s.id < ?))"
+                         % (col, op, col))
+            args.extend([key, key, cid])
+    order = {"time": "COALESCE(s.started_at,'') DESC, s.id DESC",
+             "duration": "COALESCE(s.duration_s,0) DESC, s.id DESC",
+             "generated": "COALESCE(n.generated_at,'') DESC, s.id DESC"}[sort]
+    rows = [dict(r) for r in conn.execute(
+        "SELECT s.id,s.title,s.started_at,s.duration_s,s.source_mode,"
+        " s.audio_path,s.audio_format,s.minutes_url,"
+        " (SELECT COUNT(*) FROM utterances u WHERE u.session_id=s.id) AS n_utterances,"
+        " (SELECT COUNT(*) FROM speakers sp WHERE sp.session_id=s.id) AS speaker_count,"
+        " (SELECT COUNT(*) FROM highlights h WHERE h.session_id=s.id) AS n_highlights,"
+        " (SELECT COUNT(*) FROM marks m WHERE m.session_id=s.id) AS n_bookmarks,"
+        " n.state AS note_state, n.progress AS note_progress,"
+        " n.generated_at AS note_generated_at"
+        " FROM sessions s LEFT JOIN notes n ON n.session_id=s.id "
+        "WHERE " + " AND ".join(where) + " ORDER BY " + order + " LIMIT ?",
+        args + [limit + 1])]
+    has_more = len(rows) > limit
+    rows = rows[:limit]
+    items = []
+    for r in rows:
+        payload = _summary_json(conn, r["id"])
+        points = payload.get("points") or []
+        state = str(r.get("note_state") or "")
+        progress = int(r.get("note_progress") or 0)
+        if not state:
+            state, progress = derive_note_state(conn, r["id"], None)
+        if state == "ready":
+            progress = 100
+        topics = payload.get("topics") or []
+        items.append({
+            "session_id": r["id"],
+            "title": payload.get("session_title") or r["title"],
+            "streamer": payload.get("host_speaker") or "",
+            "platform": "",
+            "started_at": r.get("started_at") or "",
+            "duration_s": float(r.get("duration_s") or 0),
+            "note_state": state,
+            "progress": progress,
+            "summary": str(payload.get("overview") or "")[:160],
+            "n_points": len(points),
+            "n_highlights": int(r.get("n_highlights") or 0),
+            "n_bookmarks": int(r.get("n_bookmarks") or 0),
+            "speaker_count": int(r.get("speaker_count") or 0),
+            "n_utterances": int(r.get("n_utterances") or 0),
+            "audio_state": "ready" if r.get("audio_path") else "none",
+            "topics": [str(t) for t in topics][:6],
+            "generated_at": r.get("note_generated_at") or payload.get("generated_at") or "",
+        })
+    next_cursor = ""
+    if has_more and items:
+        last = rows[-1]
+        key = {"time": last.get("started_at") or "",
+               "duration": float(last.get("duration_s") or 0),
+               "generated": last.get("note_generated_at") or ""}[sort]
+        next_cursor = "%s|%s" % (key, last["id"])
+    return {"items": items, "next_cursor": next_cursor,
+            "counts": _library_counts(conn), "stats": _library_stats_conn(conn)}
+
+
+def _library_counts(conn: sqlite3.Connection) -> dict:
+    total = conn.execute("SELECT COUNT(*) AS n FROM sessions "
+                         "WHERE deleted_at IS NULL").fetchone()["n"]
+    ready = conn.execute(
+        "SELECT COUNT(*) AS n FROM sessions s LEFT JOIN notes n "
+        "ON n.session_id=s.id WHERE s.deleted_at IS NULL AND "
+        "(n.state='ready' OR (n.state IS NULL AND EXISTS("
+        "SELECT 1 FROM summaries su WHERE su.session_id=s.id)))").fetchone()["n"]
+    running = conn.execute(
+        "SELECT COUNT(*) AS n FROM sessions s LEFT JOIN notes n "
+        "ON n.session_id=s.id WHERE s.deleted_at IS NULL AND "
+        "(n.state IN ('queued','running') OR EXISTS("
+        "SELECT 1 FROM analysis_runs r WHERE r.session_id=s.id "
+        "AND r.status IN ('queued','running')))").fetchone()["n"]
+    follows = conn.execute("SELECT COUNT(*) AS n FROM follows").fetchone()["n"]
+    live = conn.execute("SELECT COUNT(*) AS n FROM follows "
+                        "WHERE live_state='live'").fetchone()["n"]
+    return {"all": int(total or 0), "ready": int(ready or 0),
+            "running": int(running or 0), "follows": int(follows or 0),
+            "follows_live": int(live or 0)}
+
+
+def _library_stats_conn(conn: sqlite3.Connection) -> dict:
+    row = conn.execute(
+        "SELECT COUNT(*) AS n, COALESCE(SUM(duration_s),0) AS secs, "
+        "COALESCE(SUM((SELECT COUNT(*) FROM highlights h WHERE h.session_id=s.id)),0) AS hl "
+        "FROM sessions s WHERE s.deleted_at IS NULL").fetchone()
+    return {"sessions": int(row["n"] or 0), "seconds": float(row["secs"] or 0),
+            "highlights": int(row["hl"] or 0)}
+
+
+# ---------------------------------------------------------------- P1：问笔记
+
+def qa_create(conn: sqlite3.Connection, question: str, scope: dict) -> dict:
+    ts = now()
+    cur = conn.execute(
+        "INSERT INTO qa_answers(question,scope_json,state,created_at,updated_at) "
+        "VALUES (?,?,'running',?,?)",
+        (str(question or "")[:500], json.dumps(scope or {}, ensure_ascii=False),
+         ts, ts))
+    conn.commit()
+    return qa_get(conn, int(cur.lastrowid)) or {}
+
+
+def qa_update(conn: sqlite3.Connection, qid: int, **fields: Any) -> dict:
+    allowed = ("state", "answer", "engine", "feedback", "job_id", "error")
+    sets, vals = [], []
+    for k in allowed:
+        if k not in fields:
+            continue
+        v = fields[k]
+        if k == "citations":
+            continue
+        sets.append("%s=?" % k)
+        vals.append(str(v or ""))
+    if "citations" in fields:
+        sets.append("citations_json=?")
+        vals.append(json.dumps(fields["citations"] or [], ensure_ascii=False))
+    if not sets:
+        return qa_get(conn, qid) or {}
+    vals.extend([now(), int(qid)])
+    conn.execute("UPDATE qa_answers SET " + ",".join(sets) +
+                 ",updated_at=? WHERE id=?", vals)
+    conn.commit()
+    return qa_get(conn, qid) or {}
+
+
+def qa_get(conn: sqlite3.Connection, qid: int) -> dict | None:
+    row = rowdict(conn.execute("SELECT * FROM qa_answers WHERE id=?",
+                               (int(qid),)).fetchone())
+    return _qa_row(row)
+
+
+def _qa_row(row: dict | None) -> dict | None:
+    if not row:
+        return None
+    try:
+        row["scope"] = json.loads(row.pop("scope_json") or "{}")
+    except (TypeError, ValueError):
+        row["scope"] = {}
+    try:
+        row["citations"] = json.loads(row.pop("citations_json") or "[]")
+    except (TypeError, ValueError):
+        row["citations"] = []
+    return row
+
+
+def qa_recent(conn: sqlite3.Connection, limit: int = 10) -> list[dict]:
+    rows = [rowdict(r) for r in conn.execute(
+        "SELECT * FROM qa_answers ORDER BY id DESC LIMIT ?",
+        (max(1, min(50, int(limit))),))]
+    return [_qa_row(r) for r in rows if r]
+
+
+def qa_find_running(conn: sqlite3.Connection, question: str,
+                    session_id: str = "") -> dict | None:
+    row = conn.execute(
+        "SELECT * FROM qa_answers WHERE state='running' AND question=? "
+        "ORDER BY id DESC LIMIT 1", (str(question or "")[:500],)).fetchone()
+    if not row:
+        return None
+    d = _qa_row(dict(row))
+    if session_id and str((d.get("scope") or {}).get("session_id") or "") != session_id:
+        return None
+    return d
+
+
+def qa_prune(conn: sqlite3.Connection, keep: int = 200) -> int:
+    cur = conn.execute(
+        "DELETE FROM qa_answers WHERE id NOT IN "
+        "(SELECT id FROM qa_answers ORDER BY id DESC LIMIT ?)", (int(keep),))
+    conn.commit()
+    return int(cur.rowcount or 0)
+
+
+# ---------------------------------------------------------------- P1：周报
+
+def report_upsert(conn: sqlite3.Connection, kind: str, period: str,
+                  since: str, until: str, **fields: Any) -> dict:
+    allowed = ("state", "path", "title", "summary", "error", "generated_at")
+    row = conn.execute("SELECT id FROM reports WHERE kind=? AND period=?",
+                       (kind, period)).fetchone()
+    vals: dict[str, Any] = {"since": since, "until": until}
+    for k in allowed:
+        if k in fields:
+            vals[k] = fields[k]
+    if "data" in fields:
+        vals["data_json"] = json.dumps(fields["data"], ensure_ascii=False)
+    if row:
+        conn.execute("UPDATE reports SET " + ",".join("%s=?" % k for k in vals)
+                     + " WHERE id=?", list(vals.values()) + [int(row["id"])])
+        rid = int(row["id"])
+    else:
+        vals.setdefault("state", "queued")
+        cols = ["kind", "period"] + list(vals)
+        conn.execute("INSERT INTO reports(" + ",".join(cols) + ") VALUES ("
+                     + ",".join("?" for _ in cols) + ")",
+                     [kind, period] + list(vals.values()))
+        rid = int(conn.execute("SELECT last_insert_rowid() AS n").fetchone()["n"])
+    conn.commit()
+    return report_get(conn, rid) or {}
+
+
+def report_get(conn: sqlite3.Connection, rid: int = 0,
+               period: str = "", kind: str = "weekly") -> dict | None:
+    if rid:
+        row = conn.execute("SELECT * FROM reports WHERE id=?", (int(rid),)).fetchone()
+    else:
+        row = conn.execute("SELECT * FROM reports WHERE kind=? AND period=?",
+                           (kind, period)).fetchone()
+    if not row:
+        return None
+    d = dict(row)
+    try:
+        d["data"] = json.loads(d.pop("data_json") or "{}")
+    except (TypeError, ValueError):
+        d["data"] = {}
+    return d
+
+
+def report_list(conn: sqlite3.Connection, kind: str = "weekly",
+                limit: int = 12) -> list[dict]:
+    rows = [dict(r) for r in conn.execute(
+        "SELECT * FROM reports WHERE kind=? ORDER BY since DESC LIMIT ?",
+        (kind, max(1, min(60, int(limit)))))]
+    for r in rows:
+        try:
+            r["data"] = json.loads(r.pop("data_json") or "{}")
+        except (TypeError, ValueError):
+            r["data"] = {}
+    return rows
+
+
+def report_delete(conn: sqlite3.Connection, rid: int) -> None:
+    conn.execute("DELETE FROM reports WHERE id=?", (int(rid),))
+    conn.commit()

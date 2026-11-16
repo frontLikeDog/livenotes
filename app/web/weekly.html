@@ -1,0 +1,507 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#0A0C0F">
+<title>周报 · LiveNotes</title>
+<script>
+try{var _t=new URLSearchParams(location.search).get('theme');if(_t)document.documentElement.dataset.theme=(_t==='paper'?'light':'dark')}catch(e){}
+</script>
+<link rel="stylesheet" href="/static/css/p1.css">
+</head>
+<body>
+<script src="/static/js/embed.js"></script>
+
+<header class="topbar" data-ln-region="topbar">
+  <a class="brand" href="/">
+    <span class="brand-mark" aria-hidden="true">L</span>
+    <span class="brand-name">LiveNotes<span>实时语记</span></span>
+  </a>
+  <span class="topbar-divider" aria-hidden="true"></span>
+  <nav class="pagenav" aria-label="页面">
+    <a href="/library">笔记库</a>
+    <a href="/follows">关注</a>
+    <a href="/weekly" class="is-on" aria-current="page">周报</a>
+  </nav>
+  <span class="grow"></span>
+  <button class="top-search" type="button" data-p1-search aria-label="搜索笔记或提问">
+    <svg class="od-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+      stroke-linecap="round" aria-hidden="true" style="--od-icon-size:14px">
+      <circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/>
+    </svg>
+    <span>搜索笔记</span><kbd>Ctrl K</kbd>
+  </button>
+  <a class="icon-btn" href="/" title="返回首页" aria-label="返回首页">
+    <svg class="od-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+      stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="--od-icon-size:16px">
+      <path d="m4 10.5 8-6.5 8 6.5V20H4Z"/><path d="M9.5 20v-5.5h5V20"/>
+    </svg>
+  </a>
+</header>
+
+<main class="stage" data-ln-region="stage">
+  <div class="page page-wide">
+    <header class="page-head">
+      <div class="page-head-main">
+        <p class="eyebrow">WEEKLY REVIEW</p>
+        <h1>本周回看</h1>
+        <p class="page-lead" id="weeklyRange">正在读取这一周…</p>
+      </div>
+      <div class="page-actions weekly-nav">
+        <button class="icon-btn" type="button" id="weeklyPrev" aria-label="上一周">
+          <svg class="od-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"
+            aria-hidden="true" style="--od-icon-size:16px"><path d="M15 6l-6 6 6 6"/></svg>
+        </button>
+        <span class="week-label" id="weekLabel">—</span>
+        <button class="icon-btn" type="button" id="weeklyNext" aria-label="下一周">
+          <svg class="od-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"
+            aria-hidden="true" style="--od-icon-size:16px"><path d="M9 6l6 6-6 6"/></svg>
+        </button>
+        <button class="btn btn-ghost" type="button" id="weeklyExport">导出周报</button>
+      </div>
+    </header>
+
+    <div id="weeklyBody">
+      <div class="weekly-brief">
+        <span class="brief-mark" aria-hidden="true">L</span>
+        <div>
+          <h2>这周你追得最深的一条线</h2>
+          <p id="weeklyBrief">正在整理这一周的记录…</p>
+        </div>
+      </div>
+      <div class="stat-row weekly-stats">
+        <div class="stat-cell"><span>记录场次</span><strong id="weeklySessions">—</strong><p id="weeklySessionsSub">共 0 小时</p></div>
+        <div class="stat-cell"><span>记录时长</span><strong id="weeklyHours">—</strong><p>本机音频</p></div>
+        <div class="stat-cell"><span>标记高光</span><strong id="weeklyHighlights">—</strong><p>段 · 可回听</p></div>
+        <div class="stat-cell"><span>主题</span><strong id="weeklyTopicsCount">—</strong><p>个 · 反复出现</p></div>
+      </div>
+    </div>
+
+    <div class="weekly-empty" id="weeklyEmpty" hidden>
+      <span class="empty-kicker" id="weeklyEmptyKicker">这一周还没有记录</span>
+      <h2 id="weeklyEmptyTitle">等这一周有内容了，周报会自动生成。</h2>
+      <p id="weeklyEmptyText">周报只在本机生成，不会上传。记录几场直播后再回来看看。</p>
+      <button class="btn btn-primary" type="button" id="weeklyBuild">生成这一周的周报</button>
+    </div>
+
+    <div id="weeklyContent" hidden>
+      <div class="weekly-grid">
+        <section class="weekly-card" aria-labelledby="weeklyChartTitle">
+          <header class="card-head">
+            <div>
+              <h2 id="weeklyChartTitle">每天听了多久</h2>
+              <p>柱体是当天记录的时长</p>
+            </div>
+            <span class="card-note" id="weeklyTotal">共 0 小时</span>
+          </header>
+          <div class="weekly-chart" id="weeklyChart" role="img" aria-label="每天记录时长"></div>
+        </section>
+
+        <section class="weekly-card" aria-labelledby="weeklyActionTitle">
+          <header class="card-head">
+            <div>
+              <h2 id="weeklyActionTitle">下周可以做</h2>
+              <p>从这周的内容里挑出来的几件事</p>
+            </div>
+          </header>
+          <ol class="action-list" id="weeklyActions"></ol>
+        </section>
+      </div>
+
+      <section class="weekly-topics" aria-labelledby="weeklyTopicsTitle">
+        <header class="section-head">
+          <h2 id="weeklyTopicsTitle">反复出现的主题</h2>
+          <span class="card-note">按提及次数排序</span>
+        </header>
+        <div class="topic-list" id="weeklyTopicList"></div>
+      </section>
+
+      <section class="weekly-replay" aria-labelledby="weeklyReplayTitle">
+        <header class="section-head">
+          <h2 id="weeklyReplayTitle">值得回看</h2>
+          <span class="card-note">来自这一周的要点原话</span>
+        </header>
+        <div class="replay-list" id="weeklyReplay"></div>
+      </section>
+    </div>
+
+    <p class="page-footnote">周报每周一在本机生成，不会上传。只有开启「周报」后才会自动生成与通知。</p>
+  </div>
+</main>
+
+<script src="/static/js/p1.js"></script>
+<script>
+(function () {
+  'use strict';
+  var S = { period: '', report: null, reports: [], loading: false, maxFuture: 0 };
+
+  function pad(n) { return (n < 10 ? '0' : '') + n; }
+  function isoMonday(period) {
+    var m = /^(\d{4})-W(\d{1,2})$/.exec(String(period || ''));
+    if (!m) return null;
+    var year = parseInt(m[1], 10), week = parseInt(m[2], 10);
+    var jan4 = new Date(Date.UTC(year, 0, 4));
+    var shift = (jan4.getUTCDay() + 6) % 7;
+    var monday = new Date(jan4.getTime() - shift * 86400000 + (week - 1) * 7 * 86400000);
+    return monday;
+  }
+  function periodOf(date) {
+    var d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
+    var day = d.getUTCDay() || 7;
+    d.setUTCDate(d.getUTCDate() + 4 - day);
+    var yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+    var week = Math.ceil((((d - yearStart) / 86400000) + 1) / 7);
+    return d.getUTCFullYear() + '-W' + pad(week);
+  }
+  function shift(period, delta) {
+    var monday = isoMonday(period);
+    if (!monday) return period;
+    monday = new Date(monday.getTime() + delta * 7 * 86400000);
+    return periodOf(monday);
+  }
+  function currentPeriod() { return periodOf(new Date()); }
+  function lastPeriod() { return shift(currentPeriod(), -1); }
+  function rangeText(period) {
+    var monday = isoMonday(period);
+    if (!monday) return '';
+    var sunday = new Date(monday.getTime() + 6 * 86400000);
+    var a = monday.toISOString().slice(5, 10);
+    var b = sunday.toISOString().slice(5, 10);
+    return a + ' 至 ' + b;
+  }
+  function weekLabel(period) {
+    if (period === currentPeriod()) return '本周';
+    if (period === lastPeriod()) return '上周';
+    var m = /W(\d+)/.exec(period);
+    return m ? 'W' + m[1] : period;
+  }
+
+  function heading() {
+    P1.$('#weeklyRange').textContent = rangeText(S.period)
+      + ' · 把这一周听过的东西，收成几件能做的事。';
+    P1.$('#weekLabel').textContent = weekLabel(S.period);
+    P1.$('#weeklyNext').disabled = S.period >= currentPeriod();
+  }
+
+  function setBody(data) {
+    var stats = data.stats || {};
+    var sessions = data.sessions || [];
+    P1.$('#weeklyBody').hidden = false;
+    P1.$('#weeklyEmpty').hidden = true;
+    P1.$('#weeklyContent').hidden = false;
+
+    var brief = data.brief || (data.summary || '');
+    P1.$('#weeklyBrief').textContent = brief || '这周的记录还不多，先从记录一场开始。';
+    P1.$('#weeklySessions').textContent = String(stats.sessions || sessions.length || 0);
+    P1.$('#weeklySessionsSub').textContent = '共 ' + hoursText(stats.seconds || 0);
+    P1.$('#weeklyHours').textContent = hoursValue(stats.seconds || 0);
+    P1.$('#weeklyHighlights').textContent = String(stats.highlights || (data.highlights || []).length);
+    P1.$('#weeklyTopicsCount').textContent = String(stats.topics || (data.topics || []).length);
+    P1.$('#weeklyTotal').textContent = '共 ' + hoursText(stats.seconds || 0);
+
+    renderChart(sessions);
+    renderActions(data);
+    renderTopics(data.topics || []);
+    renderReplay(data.highlights || []);
+  }
+
+  function hoursText(seconds) {
+    var h = (Number(seconds) || 0) / 3600;
+    if (h >= 1) return (Math.round(h * 10) / 10) + ' 小时';
+    return Math.round((Number(seconds) || 0) / 60) + ' 分钟';
+  }
+  function hoursValue(seconds) {
+    var h = (Number(seconds) || 0) / 3600;
+    return h >= 10 ? String(Math.round(h)) : (Math.round(h * 10) / 10).toString();
+  }
+
+  function renderChart(sessions) {
+    var chart = P1.$('#weeklyChart');
+    chart.innerHTML = '';
+    var monday = isoMonday(S.period) || new Date();
+    var days = [0, 0, 0, 0, 0, 0, 0];
+    sessions.forEach(function (session) {
+      var day = String(session.day || session.started_at || '').slice(0, 10);
+      if (!day) return;
+      var d = new Date(day + 'T00:00:00Z');
+      if (isNaN(d.getTime())) return;
+      var idx = Math.round((d - monday) / 86400000);
+      if (idx >= 0 && idx < 7) days[idx] += Number(session.duration_s || 0);
+    });
+    var max = Math.max.apply(null, days.concat([1]));
+    var today = new Date();
+    var todayKey = periodOf(today) === S.period
+      ? (today.getUTCDay() + 6) % 7 : -1;
+    ['一', '二', '三', '四', '五', '六', '日'].forEach(function (name, i) {
+      var col = document.createElement('div');
+      col.className = 'chart-col' + (i === todayKey ? ' is-today' : '');
+      var track = document.createElement('div');
+      track.className = 'chart-track';
+      var bar = document.createElement('i');
+      bar.className = 'chart-bar is-read';
+      bar.style.setProperty('--h', Math.max(2, Math.round(days[i] / max * 100)) + '%');
+      bar.title = '周' + name + ' · ' + P1.durText(days[i]);
+      track.appendChild(bar);
+      col.appendChild(track);
+      col.appendChild(Object.assign(document.createElement('span'),
+        { className: 'chart-day', textContent: name }));
+      chart.appendChild(col);
+    });
+  }
+
+  function renderActions(data) {
+    var list = P1.$('#weeklyActions');
+    list.innerHTML = '';
+    var actions = [];
+    var topics = data.topics || [];
+    if (topics.length) {
+      actions.push(['继续跟进「' + topics[0].name + '」',
+        '这周提到 ' + topics[0].count + ' 次，可以挑一篇相关笔记重看。']);
+    }
+    var highlights = data.highlights || [];
+    if (highlights.length) {
+      actions.push(['回看 ' + Math.min(3, highlights.length) + ' 段高光',
+        '从这一周的原话开始，比重新听一遍快。']);
+    }
+    var sessions = data.sessions || [];
+    var withoutPoints = sessions.filter(function (s) { return !s.n_points; })[0];
+    if (withoutPoints) {
+      actions.push(['补一篇要点',
+        '《' + (withoutPoints.title || '未命名直播') + '》还没有要点，可以重新整理。']);
+    } else if (sessions.length) {
+      actions.push(['整理一条可执行的结论',
+        '从这周的要点里挑一条，写进自己的笔记里。']);
+    }
+    if (!actions.length) {
+      actions.push(['记录一场', '这周还没有记录，先开始一场直播。']);
+    }
+    actions.slice(0, 3).forEach(function (action, index) {
+      var item = document.createElement('li');
+      item.className = 'action-item';
+      var num = document.createElement('b');
+      num.textContent = pad(index + 1);
+      var body = document.createElement('div');
+      var strong = document.createElement('strong');
+      strong.textContent = action[0];
+      body.appendChild(strong);
+      body.appendChild(document.createTextNode(action[1]));
+      item.appendChild(num);
+      item.appendChild(body);
+      list.appendChild(item);
+    });
+  }
+
+  function renderTopics(topics) {
+    var list = P1.$('#weeklyTopicList');
+    list.innerHTML = '';
+    if (!topics.length) {
+      list.innerHTML = '<p class="aside-note">这周还没有反复出现的主题。</p>';
+      return;
+    }
+    topics.slice(0, 8).forEach(function (topic, index) {
+      var row = document.createElement('div');
+      row.className = 'topic-row';
+      var rank = document.createElement('span');
+      rank.className = 'topic-rank';
+      rank.textContent = pad(index + 1);
+      var name = document.createElement('span');
+      name.className = 'topic-name';
+      name.textContent = topic.name;
+      var track = document.createElement('span');
+      track.className = 'topic-track';
+      var fill = document.createElement('i');
+      fill.style.setProperty('--w', Math.max(2, topic.pct || 0) + '%');
+      track.appendChild(fill);
+      var count = document.createElement('span');
+      count.className = 'topic-count';
+      count.textContent = topic.count + ' 次';
+      row.appendChild(rank);
+      row.appendChild(name);
+      row.appendChild(track);
+      row.appendChild(count);
+      list.appendChild(row);
+    });
+  }
+
+  function renderReplay(highlights) {
+    var list = P1.$('#weeklyReplay');
+    list.innerHTML = '';
+    if (!highlights.length) {
+      list.innerHTML = '<p class="aside-note">这周还没有可回看的原话。</p>';
+      return;
+    }
+    highlights.slice(0, 6).forEach(function (h) {
+      var card = document.createElement('button');
+      card.type = 'button';
+      card.className = 'replay-card';
+      var time = document.createElement('b');
+      time.textContent = h.t_text || P1.fmtDur(h.t || 0);
+      var quote = document.createElement('strong');
+      quote.textContent = h.quote || '';
+      var meta = document.createElement('span');
+      meta.textContent = (h.title || '未命名直播') + (h.speaker ? ' · ' + h.speaker : '');
+      card.appendChild(time);
+      card.appendChild(quote);
+      card.appendChild(meta);
+      card.addEventListener('click', function () {
+        P1.metric('weekly_open', { session_id: h.session_id, kind: 'replay' });
+        P1.goNote(h.session_id, h.t);
+      });
+      list.appendChild(card);
+    });
+  }
+
+  function emptyState(row) {
+    P1.$('#weeklyContent').hidden = true;
+    P1.$('#weeklyBody').hidden = true;
+    P1.$('#weeklyEmpty').hidden = false;
+    var isCurrent = S.period === currentPeriod();
+    if (row && row.state === 'running') {
+      P1.$('#weeklyEmptyKicker').textContent = '正在生成';
+      P1.$('#weeklyEmptyTitle').textContent = '这一周的周报正在整理。';
+      P1.$('#weeklyEmptyText').textContent = '可以先去做别的，稍后回来刷新。';
+      P1.$('#weeklyBuild').hidden = true;
+      return;
+    }
+    if (row && row.state === 'failed') {
+      P1.$('#weeklyEmptyKicker').textContent = '这次没有生成';
+      P1.$('#weeklyEmptyTitle').textContent = '周报没有整理出来。';
+      P1.$('#weeklyEmptyText').textContent = '记录和笔记都还在，可以重试一次。';
+      P1.$('#weeklyBuild').hidden = false;
+      P1.$('#weeklyBuild').textContent = '重新生成';
+      return;
+    }
+    if (isCurrent) {
+      P1.$('#weeklyEmptyKicker').textContent = '本周还在进行';
+      P1.$('#weeklyEmptyTitle').textContent = '等周日结束后，下周一会自动生成这一周的周报。';
+      P1.$('#weeklyEmptyText').textContent = '也可以现在生成一份阶段版，只统计已经记录的内容。';
+    } else {
+      P1.$('#weeklyEmptyKicker').textContent = '这一周还没有周报';
+      P1.$('#weeklyEmptyTitle').textContent = '这一周没有记录，或周报还没生成。';
+      P1.$('#weeklyEmptyText').textContent = '记录过内容的话，可以现在生成；没有内容就先开始记录。';
+    }
+    P1.$('#weeklyBuild').hidden = false;
+    P1.$('#weeklyBuild').textContent = '生成这一周的周报';
+  }
+
+  function load(period) {
+    if (S.loading) return;
+    S.loading = true;
+    S.period = period || S.period;
+    heading();
+    P1.$('#weeklyBody').hidden = false;
+    P1.$('#weeklyContent').hidden = true;
+    P1.$('#weeklyEmpty').hidden = true;
+    P1.$('#weeklyBrief').textContent = '正在整理这一周的记录…';
+    P1.api('/api/reports/get?period=' + encodeURIComponent(S.period)).then(function (row) {
+      S.loading = false;
+      if (!row || row.error) {
+        S.report = null;
+        emptyState(null);
+        return;
+      }
+      S.report = row;
+      if (row.state === 'ready' && row.data && (row.data.stats || {}).sessions > 0) {
+        setBody(Object.assign({ summary: row.summary }, row.data));
+        P1.metric('weekly_open', { kind: S.period });
+      } else {
+        emptyState(row);
+      }
+    }).catch(function () {
+      S.loading = false;
+      emptyState(null);
+    });
+  }
+
+  function build() {
+    var button = P1.$('#weeklyBuild');
+    button.disabled = true;
+    button.textContent = '正在整理…';
+    P1.post('/api/reports/build', { period: S.period }).then(function (row) {
+      button.disabled = false;
+      if (row.error) { P1.toast(row.error); load(S.period); return; }
+      S.report = row;
+      if (row.state === 'ready') {
+        P1.toast('周报已生成');
+        setBody(Object.assign({ summary: row.summary }, row.data || {}));
+      } else if (row.state === 'empty') {
+        P1.toast('这一周还没有记录');
+        emptyState(row);
+      } else {
+        emptyState(row);
+      }
+    }).catch(function () {
+      button.disabled = false;
+      button.textContent = '生成这一周的周报';
+      P1.toast('生成没有完成，稍后再试。');
+    });
+  }
+
+  function exportMarkdown() {
+    if (!S.report || !S.report.data) { P1.toast('这一周还没有可导出的周报。'); return; }
+    var data = S.report.data;
+    var lines = ['# 周报 · ' + rangeText(S.period), '', data.brief || '', '',
+      '- 记录场次：' + ((data.stats || {}).sessions || 0),
+      '- 记录时长：' + hoursText((data.stats || {}).seconds || 0),
+      '- 标记高光：' + ((data.stats || {}).highlights || 0),
+      '- 主题：' + ((data.stats || {}).topics || 0), '', '## 记录', ''];
+    (data.sessions || []).forEach(function (s) {
+      lines.push('- ' + String(s.day || '').slice(5) + ' 《' + (s.title || '未命名直播')
+        + '》 ' + P1.durText(s.duration_s));
+    });
+    if ((data.topics || []).length) {
+      lines.push('', '## 主题', '');
+      (data.topics || []).forEach(function (t) {
+        lines.push('- ' + t.name + '（' + t.count + ' 次）');
+      });
+    }
+    if ((data.highlights || []).length) {
+      lines.push('', '## 值得回看', '');
+      (data.highlights || []).forEach(function (h) {
+        lines.push('- ' + (h.t_text || '') + ' ' + (h.quote || '')
+          + ' —— 《' + (h.title || '') + '》');
+      });
+    }
+    lines.push('', '> 由 LiveNotes 在本机生成。');
+    var blob = new Blob([lines.join('\n')], { type: 'text/markdown;charset=utf-8' });
+    var url = URL.createObjectURL(blob);
+    P1.download(url, 'LiveNotes-周报-' + S.period + '.md');
+    setTimeout(function () { URL.revokeObjectURL(url); }, 4000);
+    P1.metric('weekly_open', { kind: 'export' });
+    P1.toast('正在导出周报');
+  }
+
+  P1.$('#weeklyPrev').addEventListener('click', function () {
+    load(shift(S.period, -1));
+  });
+  P1.$('#weeklyNext').addEventListener('click', function () {
+    if (S.period >= currentPeriod()) return;
+    load(shift(S.period, 1));
+  });
+  P1.$('#weeklyExport').addEventListener('click', exportMarkdown);
+  P1.$('#weeklyBuild').addEventListener('click', build);
+
+  P1.api('/api/reports?limit=12').then(function (d) {
+    S.reports = d.items || [];
+    var want = '';
+    try { want = new URLSearchParams(location.search).get('period') || ''; } catch (e) {}
+    var period = /^\d{4}-W\d{1,2}$/.test(want) ? want : '';
+    if (period) { load(period); return; }
+    if (S.reports.length) {
+      var latest = S.reports.filter(function (r) { return r.period < currentPeriod(); })[0]
+        || S.reports[0];
+      period = latest.period;
+    } else {
+      period = lastPeriod();
+    }
+    load(period);
+  }).catch(function () {
+    load(lastPeriod());
+  });
+})();
+</script>
+</body>
+</html>

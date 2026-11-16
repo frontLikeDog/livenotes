@@ -34,8 +34,21 @@ KINDS: tuple[dict[str, str], ...] = (
     {"kind": "disk_low", "label": "磁盘不足", "desc": "剩余空间可能不够继续录"},
     {"kind": "engine_error", "label": "记录程序异常", "desc": "本地引擎断开或重启"},
     {"kind": "tray_hint", "label": "托盘提示", "desc": "第一次收进托盘时说明"},
+    {"kind": "follow_live", "label": "关注开播", "desc": "关注的直播间开播时提醒"},
+    {"kind": "auto_record", "label": "自动记录", "desc": "关注开播后自动开始记录"},
+    {"kind": "auto_record_failed", "label": "自动记录失败", "desc": "自动记录没开始，需要手动处理"},
+    {"kind": "weekly_ready", "label": "周报", "desc": "上周的周报生成好了"},
 )
 KIND_KEYS = tuple(k["kind"] for k in KINDS)
+
+#: 设置页分组。壳按分组渲染，不在前端硬编码。
+GROUP = {
+    "stream_stalled": "录音", "stream_recovered": "录音", "silent": "录音",
+    "live_ended": "录音", "note_ready": "笔记", "note_failed": "笔记",
+    "disk_low": "系统", "engine_error": "系统", "tray_hint": "系统",
+    "follow_live": "关注", "auto_record": "关注", "auto_record_failed": "关注",
+    "weekly_ready": "周报",
+}
 # 失败通知优先级更高，前端用不同颜色。
 LEVELS = ("info", "warn", "error")
 
@@ -226,15 +239,17 @@ def settings_view() -> dict:
         "enabled": bool(p.get("notify_enabled", True)),
         "system": bool(p.get("notify_system", True)),
         "sound": bool(p.get("notify_sound", True)),
+        "detail": bool(p.get("notify_detail", True)),
         "muted": list(p.get("notify_muted") or []),
-        "kinds": [dict(k) for k in KINDS],
+        "kinds": [dict(k, group=GROUP.get(k["kind"], "其他")) for k in KINDS],
     }
 
 
 def update_settings(patch: dict) -> dict:
     """壳/设置页保存通知偏好。白名单在 settings.DEFAULT_PREFS 里。"""
     allowed = {k: patch[k] for k in
-               ("notify_enabled", "notify_system", "notify_sound", "notify_muted")
+               ("notify_enabled", "notify_system", "notify_sound",
+                "notify_muted", "notify_detail")
                if k in (patch or {})}
     if allowed:
         settings.set_prefs(allowed)
@@ -378,3 +393,75 @@ def check_disk(min_bytes: int | None = None) -> dict | None:
     if free >= threshold:
         return None
     return disk_low(free)
+
+
+# ---------------------------------------------------------------- P1：关注 / 周报
+
+def _detail() -> bool:
+    """关闭后通知不显示直播标题/主播名，只留「你关注的主播」「一场直播」。"""
+    return bool(settings.prefs().get("notify_detail", True))
+
+
+def _name(name: str, generic: str = "你关注的主播") -> str:
+    return (str(name or "").strip() or generic) if _detail() else generic
+
+
+def _started_text(started_at: str) -> str:
+    if not started_at:
+        return "刚刚开播"
+    try:
+        t = datetime.fromisoformat(str(started_at))
+        mins = max(0, int((datetime.now(t.tzinfo) - t).total_seconds() // 60))
+    except (ValueError, TypeError, OSError):
+        return "刚刚开播"
+    if mins < 1:
+        return "刚刚开播"
+    if mins < 60:
+        return "已开播 %d 分钟" % mins
+    return "已开播 %d 小时" % (mins // 60)
+
+
+def follow_live(fid: int, name: str, episode: str, title: str = "",
+                started_at: str = "") -> dict | None:
+    who = _name(name)
+    body = "《%s》正在直播 · %s" % (who, _started_text(started_at))
+    if _detail() and title:
+        body += " · " + str(title)[:60]
+    return emit(
+        "follow_live", "你关注的主播开播了", body,
+        level="info", action=_action("follow", follow_id=int(fid)),
+        dedupe_key="follow_live:%d:%s" % (int(fid), episode or _now()))
+
+
+def auto_record(fid: int, sid: str, name: str, episode: str) -> dict | None:
+    who = _name(name)
+    return emit(
+        "auto_record", "已自动开始记录《%s》" % who,
+        "结束记录后会自动生成笔记。",
+        session_id=sid, level="info",
+        action=_action("hud", session_id=sid, follow_id=int(fid)),
+        dedupe_key="auto_record:%s" % (sid or episode or _now()))
+
+
+def auto_record_failed(fid: int, name: str, reason: str,
+                       episode: str = "") -> dict | None:
+    who = _name(name)
+    why = str(reason or "").strip().splitlines()[0][:100] if str(reason or "").strip() else ""
+    body = (why + "。点开关注列表可以手动开始记录。") if why else \
+        "这次没能自动开始，点开关注列表可以手动开始记录。"
+    return emit(
+        "auto_record_failed", "《%s》没能自动开始记录" % who, body,
+        level="warn", action=_action("follows", follow_id=int(fid)),
+        dedupe_key="auto_record_failed:%d:%s" % (
+            int(fid), episode or _now()))
+
+
+def weekly_ready(period: str, summary: str = "", *, since: str = "",
+                 until: str = "") -> dict | None:
+    """每周一条。同一 period 只发一次；周三后不补发（由调用方判断）。"""
+    body = str(summary or "").strip() or "上周的笔记已经整理好了。"
+    return emit(
+        "weekly_ready", "上周的周报出来了", body,
+        level="info", action={"view": "weekly", "period": period,
+                              "since": since, "until": until},
+        dedupe_key="weekly:%s" % period)

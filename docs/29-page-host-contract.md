@@ -105,7 +105,7 @@ desktop/web/                     桌面皮肤（overlay，只有资源，没有�
 |---|---|
 | `index.html` | `topbar` · `workbench` · `sidebar` · `stage` · `inspector` · `transport` · `notice` |
 | `rooms.html` | `topbar` · `stage` |
-| `library / people / reader / highlights / live / pushes / glossary` | `topbar` · `stage` |
+| `library / files / note / follows / weekly / people / reader / highlights / live / pushes / glossary` | `topbar` · `stage` |
 | `metrics.html` | `topbar` · `stage` |
 
 新增页面时，只要会被 `?embed=1` 打开，就必须带 `topbar` 和 `stage`

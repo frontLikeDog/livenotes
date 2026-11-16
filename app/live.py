@@ -55,6 +55,7 @@ from .config import (
     LIVE_PARTIAL_INTERVAL_S,
     LIVE_PARTIAL_MAX_S,
     LIVE_PARTIAL_MIN_S,
+    partials_enabled,
     LIVE_STALL_IDLE_S,
     LIVE_STALL_MIN_S,
     LIVE_STALL_S,
@@ -421,6 +422,8 @@ class LiveSession:
         self.paused = False                # 客户端暂停推流时置位，计时随 total_samples 一起冻结
         self.flush_req = threading.Event()  # 暂停时请求工作线程把半句立刻切出来
         self.marks: list[dict] = []        # 本场打点（同时落库，回看时仍可见）
+        # 本场实时高光候选（只在本机展示，进不进通知中心是另一回事）
+        self.live_highlights: list[dict] = []
         self.n_utts = 0                    # 本场已落库的发言条数（status 只回最后 60 句，数不了总数）
         self.last_speech_s = 0.0           # 最后一次判定"有人说话"的秒数，用来算静默了多久
         self.level = 0.0                   # 最近一块的 RMS，用来判断标签页是不是静音
@@ -775,6 +778,7 @@ class LiveSession:
                     pbuf.clear()
                     self._drop_partial()
                 elif (pbuf and LIVE_PARTIAL_INTERVAL_S > 0
+                      and partials_enabled()
                       and now_s - last_partial >= LIVE_PARTIAL_INTERVAL_S
                       and vad.is_speech_detected()):
                     # 当前这句还没到切点：先把已收到的部分识别出来，当灰色临时字幕
@@ -1030,6 +1034,24 @@ class LiveSession:
         """一条事件 -> 一次推送。上限在发送前挡住，别让一场直播响个没完。"""
         if self.cancelled:
             return
+        # 本地实时高光卡和飞书推送是两条路：推送有场次上限，本地展示不该被
+        # 同一个预算拦掉；低配模式下由前端决定不展示（服务端仍保留）。
+        try:
+            self.live_highlights.append({
+                "id": "lh_%s" % str(ev.get("peak_t") or 0).replace(".", "_"),
+                "t0": float(ev.get("t_start") or 0),
+                "t1": float(ev.get("t_end") or 0),
+                "peak_t": float(ev.get("peak_t") or 0),
+                "quote": str(ev.get("text") or "")[:200],
+                "speaker": str(ev.get("speaker_label") or ""),
+                "kind": str(ev.get("kind") or "info"),
+                "level": str(ev.get("level") or "P1"),
+                "score": float(ev.get("score") or 0),
+                "why": str(ev.get("why") or ""),
+            })
+            self.live_highlights = self.live_highlights[-10:]
+        except Exception:
+            traceback.print_exc()
         if self.pushed >= PUSH_SESSION_CAP:
             self._log_skip(ev.get("peak_t") or 0, "session_cap",
                            ev.get("score") or 0, ev.get("why") or "",
@@ -1321,6 +1343,7 @@ class LiveSession:
                 if self.n_utts else None,
                 "chars": self.chars, "questions": self.questions,
                 "marks": list(self.marks),
+                "live_highlights": list(self.live_highlights[-3:]),
                 "error": self.error, "engine": "SenseVoiceSmall-int8 + CAM++",
                 "pushed": self.pushed, "started_utc": self.started_utc,
                 "tz_offset_min": self.tz_offset_min,
@@ -2094,20 +2117,76 @@ def set_paused(sid: str, paused: bool) -> dict:
     return s.status()
 
 
-def mark(sid: str, note: str = "") -> dict:
+def mark(sid: str, note: str = "", t: float | None = None,
+         kind: str = "mark") -> dict:
     s = _SESSIONS.get(sid)
     if not s:
         raise LiveError("会话不存在或已结束")
-    t = round(s.total_samples / SAMPLE_RATE, 1)
+    if t is None:
+        t = s.total_samples / SAMPLE_RATE
+    t = round(max(0.0, float(t)), 1)
     conn = store.connect()
     try:
-        m = store.insert_mark(conn, sid, t, note[:80])
+        m = store.insert_mark(conn, sid, t, str(note or "")[:80], kind=kind)
     finally:
         conn.close()
     with s.lock:
         s.marks.append(m)
         marks = list(s.marks)
     return {"mark": m, "marks": marks}
+
+
+def delete_mark(sid: str, mark_id: int) -> dict:
+    conn = store.connect()
+    try:
+        n = store.delete_mark(conn, sid, int(mark_id))
+    finally:
+        conn.close()
+    s = _SESSIONS.get(sid)
+    if s:
+        with s.lock:
+            s.marks = [m for m in s.marks if int(m.get("id") or 0) != int(mark_id)]
+    return {"ok": bool(n), "deleted": int(n)}
+
+
+def live_highlights(sid: str, since: float = 0.0) -> dict:
+    """HUD 轮询：返回本场实时高光候选（不落库，收藏才落）。"""
+    s = _SESSIONS.get(sid)
+    if not s:
+        raise LiveError("会话不存在或已结束")
+    with s.lock:
+        items = [dict(h) for h in s.live_highlights
+                 if float(h.get("peak_t") or 0) > float(since or 0)]
+    return {"items": items[-3:], "elapsed": round(
+        s.total_samples / SAMPLE_RATE, 1)}
+
+
+def save_live_highlight(conn, sid: str, t0: float, t1: float,
+                        quote: str = "", kind: str = "info",
+                        speaker: str = "", score: float = 0.0,
+                        why: str = "") -> dict:
+    """收藏一条实时高光：保留评分类型，来源写 live（重算高光时不会被抹掉）。"""
+    t0 = max(0.0, float(t0 or 0))
+    t1 = max(t0, float(t1 or 0))
+    kind = kind if kind in ("info", "live", "both") else "info"
+    row = {
+        "session_id": sid, "t_start": t0, "t_end": t1, "peak_t": t0,
+        "kind": kind, "level": "P0", "score": float(score or 0),
+        "info_z": 0.0, "arousal_z": 0.0,
+        "why": str(why or "你收藏的实时高光")[:120],
+        "speaker_label": str(speaker or "")[:80],
+        "text": str(quote or "")[:500], "n_utts": 1, "features_json": "{}",
+        "feedback": 0, "feedback_at": None, "utterance_id": 0,
+        "hook": str(quote or "")[:60], "tag": "实时高光",
+        "quote": str(quote or "")[:500], "scene_json": "[]", "source": "live",
+    }
+    out = store.save_highlight(conn, row)
+    try:
+        from . import notes
+        notes.index_session(conn, sid)
+    except Exception:
+        traceback.print_exc()
+    return out
 
 
 def stop(sid: str, finalize: bool = True) -> dict:

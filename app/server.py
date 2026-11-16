@@ -13,17 +13,17 @@ import time
 import traceback
 import wave
 import zipfile
-from datetime import datetime
+from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
-from . import (analysis, analysis_job, audio, classify, coach, diagnostics, export,
-               feedback, glossary, highlight, lan, live, livebrief, llm, logs,
-               metrics, notify, polish, profile, reader, rooms, runtime, scheduler,
-               seed_demo, settings, share, store, tasks, timefmt, titles, voiceprint,
-               webroot)
+from . import (analysis, analysis_job, audio, classify, coach, config, copy,
+               diagnostics, export, feedback, follows, glossary, highlight, lan,
+               live, livebrief, llm, logs, metrics, notes, notify, polish, profile,
+               qa, qr, reader, rooms, runtime, scheduler, seed_demo, settings,
+               share, store, tasks, timefmt, titles, voiceprint, webroot, weekly)
 from .config import (AUDIO_DIR, HOST, LIVE_STALL_STOP_S, LIVE_STALL_WARN_S,
                      LIVE_ZERO_STOP_S, LIVE_ZERO_WARN_S, PORT, WEB_DIR)
 
@@ -991,8 +991,17 @@ p{font-size:14px;line-height:1.75;margin:8px 0}
                 return self._file(WEB_DIR / "index.html")
             if p in ("/reader", "/reader.html"):
                 return self._file(WEB_DIR / "reader.html")
+            # /library 从这一版起是「笔记库」；文件中心迁到 /files。
             if p in ("/library", "/library.html"):
                 return self._file(WEB_DIR / "library.html")
+            if p in ("/files", "/files.html"):
+                return self._file(WEB_DIR / "files.html")
+            if p in ("/note", "/note.html"):
+                return self._file(WEB_DIR / "note.html")
+            if p in ("/follows", "/follows.html"):
+                return self._file(WEB_DIR / "follows.html")
+            if p in ("/weekly", "/weekly.html"):
+                return self._file(WEB_DIR / "weekly.html")
             if p in ("/people", "/people.html"):
                 return self._file(WEB_DIR / "people.html")
             if p in ("/highlights", "/highlights.html"):
@@ -1073,6 +1082,36 @@ p{font-size:14px;line-height:1.75;margin:8px 0}
                 limit=int(_num(q.get("limit"), 50) or 50)))
         if p == "/api/notifications/settings":
             return self._json(notify.settings_view())
+        if p == "/api/follows":
+            return self._json(follows.list_view())
+        if p == "/api/reports":
+            return self._json({"items": weekly.list_reports(
+                int(_num(q.get("limit"), 12) or 12))})
+        if p == "/api/reports/get":
+            rid = int(_num(q.get("id"), 0) or 0)
+            row = weekly.get(rid, str(q.get("period") or ""))
+            if not row:
+                return self._json({"error": "还没有这周的周报"}, 404)
+            return self._json(row)
+        if p == "/api/qa/answer":
+            qid = int(_num(q.get("id"), 0) or 0)
+            row = store.qa_get(conn, qid) if qid else None
+            if not row:
+                return self._json({"error": "这个问题不存在"}, 404)
+            row.pop("job_id", None)
+            return self._json(row)
+        if p == "/api/qa/history":
+            return self._json({"items": qa.history(
+                int(_num(q.get("limit"), 10) or 10))})
+        if p == "/api/qa/suggest":
+            return self._json({"items": qa.suggest(str(q.get("session_id") or ""))})
+        if p == "/api/perf":
+            return self._json(config.perf())
+        if p == "/api/product/metrics":
+            # 本机口径：只给诊断页看，不上传。
+            snap = metrics.build_snapshot()
+            return self._json({"metrics": snap.get("counters") or {},
+                               "events": store.list_metric_events(limit=20)})
         if p == "/api/metrics":
             return self._get_metrics(q)
         if p == "/api/metrics/events":
@@ -1224,6 +1263,13 @@ p{font-size:14px;line-height:1.75;margin:8px 0}
                 return self._json(live.status(str(q.get("id") or q.get("session_id") or "")))
             except live.LiveError as e:
                 return self._json({"error": str(e)}, 404)
+        if p == "/api/live/highlights":
+            sid = str(q.get("id") or q.get("session_id") or "")
+            try:
+                return self._json(live.live_highlights(
+                    sid, float(_num(q.get("since"), 0) or 0)))
+            except live.LiveError as e:
+                return self._json({"items": [], "error": str(e)}, 404)
         if p == "/api/live/utterances":
             # 工作台往上翻：只回 before_t 之前的 N 条，避免整场重传
             sid = str(q.get("id") or q.get("session_id") or "")
@@ -1242,6 +1288,30 @@ p{font-size:14px;line-height:1.75;margin:8px 0}
                     exclude_low=_flag(q.get("exclude_low"))))
             except ValueError as e:
                 return self._json({"error": str(e)}, 404)
+        if p == "/api/note":
+            sid = str(q.get("session_id") or "")
+            out = notes.build_note(conn, sid)
+            if not out.get("ok"):
+                return self._json(out, 404)
+            # 打开笔记顺手写一行状态：历史场次从此有 notes 行，卡片状态更准。
+            try:
+                store.upsert_note(conn, sid, state=out["note_state"],
+                                  progress=int(out.get("progress") or 0),
+                                  generated_at=out.get("generated_at") or
+                                  store.now())
+            except Exception:
+                traceback.print_exc()
+            return self._json(out)
+        if p == "/api/library/cards":
+            today = datetime.now().replace(hour=0, minute=0, second=0,
+                                           microsecond=0)
+            monday = today - timedelta(days=today.weekday())
+            return self._json(store.library_cards(
+                conn, limit=int(_num(q.get("limit"), 24) or 24),
+                cursor=str(q.get("cursor") or ""),
+                filter=str(q.get("filter") or "all"),
+                sort=str(q.get("sort") or "time"),
+                since=monday.isoformat(timespec="seconds")))
         if p == "/api/library":
             return self._json({"sessions": _library_rows(conn, False),
                                "stats": _library_stats(conn)})
@@ -1259,12 +1329,36 @@ p{font-size:14px;line-height:1.75;margin:8px 0}
         if p == "/api/search":
             qtext = str(q.get("q") or "").strip()
             limit = min(200, int(_num(q.get("limit"), 60) or 60))
+            types = {t.strip() for t in str(q.get("types") or "").split(",") if t.strip()}
+            # 默认行为不变：只搜逐字稿。笔记库/搜索面板显式传 types=notes,utterances。
+            want_notes = "notes" in types
+            want_utts = (not types) or "utterances" in types
             # 术语表参与检索：OPC政策 拆成 OPC + 政策，别名（欧匹西）也能搜到
             expanded = glossary.expand_query(qtext) or [qtext]
-            rows = (store.search_multi(conn, expanded, limit) if len(expanded) > 1
-                    else store.search_all(conn, qtext, limit))
+            rows: list[dict] = []
+            if want_notes and qtext:
+                for u in store.search_note_units(conn, expanded, limit=limit):
+                    rows.append({
+                        "kind": str(u.get("kind") or "point"),
+                        "id": int(u.get("id") or 0),
+                        "session_id": str(u.get("session_id") or ""),
+                        "session_title": str(u.get("title") or ""),
+                        "t_start": u.get("t"), "t_end": u.get("t"),
+                        "speaker_label": str(u.get("speaker") or ""),
+                        "text": str(u.get("text") or ""),
+                        "title": str(u.get("title") or ""),
+                    })
+            if want_utts:
+                urows = (store.search_multi(conn, expanded, limit)
+                         if len(expanded) > 1 else store.search_all(conn, qtext, limit))
+                for r in urows:
+                    r = dict(r)
+                    r["kind"] = "utterance"
+                    rows.append(r)
+            rows = rows[:limit]
             return self._json({"q": qtext, "count": len(rows), "rows": rows,
-                               "expanded": expanded if len(expanded) > 1 else []})
+                               "expanded": expanded if len(expanded) > 1 else [],
+                               "types": sorted(types)})
         if p == "/api/polish":
             sid = str(q.get("session_id") or "")
             try:
@@ -1290,6 +1384,14 @@ p{font-size:14px;line-height:1.75;margin:8px 0}
                 return self._json({"error": "场次不存在"}, 404)
             body, ctype, name = export.build(conn, sid, str(q.get("format") or "md"))
             return self._attachment(body, ctype, name)
+        if p == "/api/qr":
+            text = str(q.get("text") or "")[:1200]
+            if not text:
+                return self._json({"error": "缺少要编码的内容"}, 400)
+            try:
+                return self._json(qr.text_rows(text))
+            except ValueError as e:
+                return self._json({"error": str(e)}, 400)
         if p == "/api/share/info":
             sid = str(q.get("session_id") or "")
             s = store.get_session(conn, sid)
@@ -1303,11 +1405,20 @@ p{font-size:14px;line-height:1.75;margin:8px 0}
             fmt = str(s.get("audio_format") or "")
             if not fmt and ap.suffix:
                 fmt = ap.suffix.lower().lstrip(".")
+            lan_info = lan.status()
+            base = str(lan_info.get("url") or "").rstrip("/")
             return self._json({"ok": True, "session_id": sid,
+                               "title": s.get("title") or "",
                                "minutes_url": s.get("minutes_url") or "",
                                "audio_format": fmt, "audio_bytes": size,
                                "has_audio": bool(size),
-                               "has_recording": bool(size)})
+                               "has_recording": bool(size),
+                               # 二维码只在局域网可访问时生成；关闭时前端不显示。
+                               "lan_enabled": bool(lan_info.get("enabled")),
+                               "note_url": (base + "/note?session=" + quote(sid)
+                                            + "&share=1") if base else "",
+                               "share_url": (base + "/note?session=" + quote(sid)
+                                             + "&share=1") if base else ""})
         if p == "/api/share/package":
             sid = str(q.get("session_id") or "")
             try:
@@ -1649,6 +1760,23 @@ p{font-size:14px;line-height:1.75;margin:8px 0}
         finally:
             self._record_request("POST", p, t0)
 
+    def do_DELETE(self) -> None:
+        t0 = time.perf_counter()
+        u = urlparse(self.path)
+        p, q = unquote(u.path), _flat(parse_qs(u.query, keep_blank_values=True))
+        try:
+            if p == "/api/live/mark":
+                sid = str(q.get("session_id") or "")
+                mark_id = int(_num(q.get("mark_id") or q.get("mark"), 0) or 0)
+                if not mark_id:
+                    mark_id = int(_num(q.get("id"), 0) or 0)
+                if not sid or not mark_id:
+                    return self._json({"error": "缺少 session_id / id"}, 400)
+                return self._json(live.delete_mark(sid, mark_id))
+            return self._json({"error": "不支持的操作"}, 404)
+        finally:
+            self._record_request("DELETE", p, t0)
+
     def _live_chunk(self) -> None:
         sid = self.headers.get("X-Live-Id") or ""
         try:
@@ -1667,6 +1795,86 @@ p{font-size:14px;line-height:1.75;margin:8px 0}
             return self._json({"error": str(e)}, 404)
 
     def _post_api(self, p: str, b: dict, conn) -> None:
+        if p == "/api/follows":
+            try:
+                item = follows.add(str(b.get("url") or ""),
+                                   str(b.get("platform") or ""),
+                                   str(b.get("name") or ""))
+            except ValueError as e:
+                return self._json({"error": str(e)}, 400)
+            metrics.METRICS.inc("p1.follow_add")
+            return self._json({"ok": True, "item": item,
+                               **follows.list_view()}, 201)
+        if p == "/api/follows/update":
+            try:
+                fid = int(b.get("id") or 0)
+            except (TypeError, ValueError):
+                return self._json({"error": "缺少关注编号"}, 400)
+            if not follows.update(fid, **{k: b[k] for k in
+                                         ("name", "notify", "auto_record")
+                                         if k in b}):
+                return self._json({"error": "关注不存在"}, 404)
+            return self._json({"ok": True, **follows.list_view()})
+        if p == "/api/follows/remove":
+            try:
+                fid = int(b.get("id") or 0)
+            except (TypeError, ValueError):
+                return self._json({"error": "缺少关注编号"}, 400)
+            if not follows.remove(fid):
+                return self._json({"error": "关注不存在"}, 404)
+            return self._json({"ok": True, **follows.list_view()})
+        if p == "/api/follows/check":
+            fid = int(_num(b.get("id"), 0) or 0)
+            out = follows.check(fid)
+            return self._json({"ok": True, **out, **follows.list_view()})
+        if p == "/api/watch/precheck":
+            out = follows.precheck(str(b.get("url") or ""))
+            return self._json(out)
+        if p == "/api/qa/ask":
+            if not settings.prefs().get("qa_enabled", True):
+                return self._json({"error": "问笔记已经在设置里关掉了"}, 400)
+            try:
+                out = qa.ask(str(b.get("question") or ""),
+                             str(b.get("session_id") or ""))
+            except ValueError as e:
+                return self._json({"error": str(e)}, 400)
+            metrics.METRICS.inc("p1.qa_ask")
+            return self._json(out)
+        if p == "/api/qa/feedback":
+            return self._json(qa.feedback(int(_num(b.get("id"), 0) or 0),
+                                          str(b.get("feedback") or "")))
+        if p == "/api/reports/build":
+            period = str(b.get("period") or "")
+            row = weekly.build(period, use_llm=b.get("llm") is not False,
+                               notify_user=False)
+            return self._json(row)
+        if p == "/api/reports/push":
+            return self._json({"ok": False,
+                               "error": "P1 暂不支持从周报页直接推送飞书"})
+        if p == "/api/note/rebuild":
+            sid = str(b.get("session_id") or "")
+            if not store.get_session(conn, sid):
+                return self._json({"error": "场次不存在"}, 404)
+            n = notes.index_session(conn, sid)
+            return self._json({"ok": True, "units": n,
+                               "note": notes.build_note(conn, sid)})
+        if p == "/api/metric/event":
+            name = str(b.get("event") or "").strip()
+            allowed = {"app_open", "record_start", "record_stop", "note_ready",
+                       "note_open", "library_open", "card_click", "search_submit",
+                       "search_click", "bookmark_add", "highlight_save",
+                       "follow_add", "follow_notify_click", "auto_record_start",
+                       "auto_record_fail", "weekly_open", "weekly_notify_click",
+                       "qa_ask", "qa_cite_click", "qa_feedback", "share_card_export",
+                       "export", "perf_mode_set"}
+            if name not in allowed:
+                return self._json({"error": "未知事件"}, 400)
+            store.record_metric_event("info", name,
+                                      session_id=str(b.get("session_id") or ""),
+                                      fields={k: b[k] for k in
+                                              ("kind", "count", "ms", "follow_id")
+                                              if k in b})
+            return self._json({"ok": True})
         if p == "/api/rooms":
             url = str(b.get("url") or "")
             try:
@@ -1992,10 +2200,35 @@ p{font-size:14px;line-height:1.75;margin:8px 0}
                 return self._json({"error": str(e)}, 404)
         if p == "/api/live/mark":
             try:
-                return self._json(live.mark(str(b.get("session_id") or ""),
-                                            str(b.get("note") or "")))
+                t = b.get("t")
+                t = float(t) if t is not None and str(t) != "" else None
+            except (TypeError, ValueError):
+                t = None
+            try:
+                out = live.mark(str(b.get("session_id") or ""),
+                                str(b.get("note") or ""), t=t,
+                                kind=str(b.get("kind") or "mark"))
+                metrics.METRICS.inc("p1.bookmark_add")
+                return self._json(out)
             except live.LiveError as e:
                 return self._json({"error": str(e)}, 404)
+        if p == "/api/highlights/save":
+            sid = str(b.get("session_id") or "")
+            if not sid or not store.get_session(conn, sid):
+                return self._json({"error": "场次不存在"}, 404)
+            try:
+                t0 = float(b.get("t0") or 0)
+                t1 = float(b.get("t1") or t0)
+            except (TypeError, ValueError):
+                return self._json({"error": "时间码不对"}, 400)
+            row = live.save_live_highlight(
+                conn, sid, t0, t1, quote=str(b.get("quote") or ""),
+                kind=str(b.get("kind") or "info"),
+                speaker=str(b.get("speaker") or ""),
+                score=float(_num(b.get("score"), 0) or 0),
+                why=str(b.get("why") or ""))
+            metrics.METRICS.inc("p1.highlight_save")
+            return self._json({"ok": True, "highlight": row})
         if p == "/api/live/reject_hint":
             sid = str(b.get("session_id") or "")
             spk = str(b.get("speaker_id") or "")
@@ -2075,7 +2308,15 @@ p{font-size:14px;line-height:1.75;margin:8px 0}
         if p == "/api/notifications/clear":
             return self._json({"ok": True, "removed": notify.clear()})
         if p == "/api/settings/prefs":
-            return self._json(settings.set_prefs(b if isinstance(b, dict) else {}))
+            out = settings.set_prefs(b if isinstance(b, dict) else {})
+            try:
+                # 设置页改档位后立即应用：ASR 参数下一场生效，UI/轮询立即生效。
+                config.apply_perf_mode(out.get("perf_mode") or "auto")
+                if "perf_mode" in (b or {}):
+                    metrics.METRICS.inc("p1.perf_mode_set")
+            except Exception:
+                traceback.print_exc()
+            return self._json(out)
         if p == "/api/settings":
             if not isinstance(b, dict):
                 return self._json({"error": "格式不对"}, 400)
@@ -2154,7 +2395,7 @@ p{font-size:14px;line-height:1.75;margin:8px 0}
             raw_ids = b.get("session_ids")
             ids = [str(x) for x in raw_ids] if isinstance(raw_ids, list) else []
             fmt = str(b.get("format") or "md").lower()
-            if fmt not in ("md", "srt", "txt"):
+            if fmt not in ("md", "srt", "txt", "note_md"):
                 fmt = "md"
             buf = io.BytesIO()
             n = 0

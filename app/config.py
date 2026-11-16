@@ -154,6 +154,8 @@ def asr_workers() -> int:
     """ASR 调度线程数。默认给 10 路并发留足并行槽位，但不把线程开满。"""
     if LIVE_ASR_WORKERS > 0:
         return max(1, min(16, LIVE_ASR_WORKERS))
+    if _PERF_MODE == "lite":
+        return 2
     n = os.cpu_count() or 2
     if n <= 4:
         return 2
@@ -164,8 +166,97 @@ def asr_threads() -> int:
     """单个解码请求使用的 ONNX Runtime intra-op 线程数（共享会话）。"""
     if LIVE_ASR_THREADS > 0:
         return max(1, min(8, LIVE_ASR_THREADS))
+    if _PERF_MODE == "lite":
+        return 2
     n = os.cpu_count() or 2
     return max(1, min(4, n // 2))
+
+
+# ---------------------------------------------------------------- 性能档位
+# config 不导入 settings（会循环）：run.py / server.py 读设置后调用
+# apply_perf_mode()，环境变量始终优先。
+_PERF_MODE = "full"          # 未应用前的默认：按现有流畅参数跑
+_PERF_DETECTED: dict = {}
+
+
+def _ram_mb() -> int:
+    try:
+        if os.name == "nt":
+            import ctypes
+
+            class _Mem(ctypes.Structure):
+                _fields_ = [("dwLength", ctypes.c_ulong),
+                            ("dwMemoryLoad", ctypes.c_ulong),
+                            ("ullTotalPhys", ctypes.c_ulonglong),
+                            ("ullAvailPhys", ctypes.c_ulonglong),
+                            ("ullTotalPageFile", ctypes.c_ulonglong),
+                            ("ullAvailPageFile", ctypes.c_ulonglong),
+                            ("ullTotalVirtual", ctypes.c_ulonglong),
+                            ("ullAvailVirtual", ctypes.c_ulonglong),
+                            ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+            m = _Mem()
+            m.dwLength = ctypes.sizeof(_Mem)
+            ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(m))
+            return int(m.ullTotalPhys // (1024 * 1024))
+        return int(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+                   // (1024 * 1024))
+    except Exception:
+        return 0
+
+
+def detect_hardware() -> dict:
+    global _PERF_DETECTED
+    if not _PERF_DETECTED:
+        _PERF_DETECTED = {"cores": os.cpu_count() or 2, "ram_mb": _ram_mb()}
+    return dict(_PERF_DETECTED)
+
+
+def auto_mode() -> str:
+    """≤4 核或 ≤8GB -> 低配；检测不到内存时只看核数。"""
+    d = detect_hardware()
+    if int(d.get("cores") or 0) <= 4:
+        return "lite"
+    ram = int(d.get("ram_mb") or 0)
+    if 0 < ram <= 8 * 1024:
+        return "lite"
+    return "full"
+
+
+def apply_perf_mode(mode: str = "auto") -> dict:
+    """应用性能档位。引擎级参数对下一场生效，不中断当前录音。"""
+    global _PERF_MODE
+    mode = str(mode or "auto").strip().lower()
+    if mode not in ("auto", "full", "lite"):
+        mode = "auto"
+    _PERF_MODE = auto_mode() if mode == "auto" else mode
+    return perf()
+
+
+def perf() -> dict:
+    d = detect_hardware()
+    lite = _PERF_MODE == "lite"
+    effective = {
+        "asr_workers": asr_workers(), "asr_threads": asr_threads(),
+        "partials": not lite, "highlight_llm": not lite,
+        "live_highlight_card": not lite,
+        "follow_interval_min_s": 180 if lite else 60,
+        "notify_poll_s": 6 if lite else 4,
+        "live_poll_s": 5 if lite else 3,
+        "library_page": 16 if lite else 24,
+        "transcript_window": 80 if lite else 200,
+        "qa_top_k": 6 if lite else 10,
+        "qa_tokens": 1800 if lite else 3000,
+        "animations": not lite,
+    }
+    advice = "lite" if int(d.get("cores") or 0) <= 4 or (
+        0 < int(d.get("ram_mb") or 0) <= 8 * 1024) else "full"
+    return {"mode": _PERF_MODE, "detected": d, "effective": effective,
+            "advice": advice,
+            "note": "引擎参数在下一场记录生效；界面与轮询立即生效。"}
+
+
+def partials_enabled() -> bool:
+    return _PERF_MODE != "lite"
 
 
 # 直播中的「疑似认人」：只影响展示与飞书文案，不写底库、不标 verified。

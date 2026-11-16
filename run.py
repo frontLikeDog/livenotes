@@ -93,7 +93,8 @@ if _overlay is not None:
         raise SystemExit("--web-overlay 目录不存在：%s" % _overlay_path)
     os.environ["LIVENOTES_WEB_OVERLAY"] = str(_overlay_path)
 
-from app import live, logs, metrics, notify, scheduler, seed_demo, store, runtime  # noqa: E402
+from app import (config, follows, live, logs, metrics, notes, notify, qa,  # noqa: E402
+                 scheduler, seed_demo, settings, store, runtime, weekly)
 from app import audio, lan  # noqa: E402
 from app.config import (HOST, METRICS_SAMPLE_S, PORT, RESUME_ROOMS,  # noqa: E402
                         ensure_dirs)
@@ -391,6 +392,39 @@ def main() -> int:
         seeded = True
     print(f"[init] 已有 {len(n) + (1 if seeded else 0)} 个场次；"
           f"FTS5 trigram = {store.FTS_TRIGRAM}", flush=True)
+    # 性能档位：环境变量优先（config 内部处理），否则读设置。
+    try:
+        perf = config.apply_perf_mode(settings.prefs().get("perf_mode") or "auto")
+        print("[perf] 模式=%s 核数=%s 内存=%sMB" % (
+            perf["mode"], (perf.get("detected") or {}).get("cores"),
+            (perf.get("detected") or {}).get("ram_mb")), flush=True)
+    except Exception as e:
+        print("[perf] 应用失败：%s" % e, flush=True)
+    # 全库检索索引：只补「有总结但还没索引」的历史场次，后台慢慢来。
+    try:
+        conn = store.connect()
+        try:
+            made = notes.ensure_index(conn)
+        finally:
+            conn.close()
+        if made:
+            print("[notes] 已补 %d 场笔记索引" % made, flush=True)
+    except Exception as e:
+        print("[notes] 索引补齐失败：%s" % e, flush=True)
+    try:
+        conn = store.connect()
+        try:
+            qa.prune(200)
+        finally:
+            conn.close()
+    except Exception:
+        pass
+    try:
+        migrated = weekly.migrate_old_files()
+        if migrated:
+            print("[weekly] 已补 %d 份旧周报" % migrated, flush=True)
+    except Exception as e:
+        print("[weekly] 旧周报迁移失败：%s" % e, flush=True)
     conn.close()
     # 磁盘不足不该等到第一次断流才发现：启动时先看一眼，同一天只提醒一次。
     try:
@@ -403,6 +437,9 @@ def main() -> int:
     # 指标采样与停滞巡检：必须在 init_db 之后启动，否则第一批快照写不进表。
     metrics.METRICS.start_sampler(METRICS_SAMPLE_S)
     live.start_watchdog()
+    # 关注检测与周报 tick 都是 daemon，应用退出即停。
+    follows.start_worker()
+    weekly.start_worker()
     logs.log_event("app.start", db=str(store.DB_PATH), host=HOST, port=PORT,
                    sample_s=METRICS_SAMPLE_S)
     repaired = live.recover_spools()
@@ -464,6 +501,8 @@ def main() -> int:
     finally:
         parent_watch_stop.set()
         _stop_helpers(helpers)
+        follows.stop_worker()
+        weekly.stop_worker()
         live.shutdown()                 # 停止采集，并把各场的收尾任务排进调度器
         scheduler.SCHEDULER.shutdown(grace=5)   # 给正在跑的模型请求 5 秒收尾
         metrics.METRICS.stop_sampler()

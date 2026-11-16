@@ -1,0 +1,531 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#0A0C0F">
+<title>关注 · LiveNotes</title>
+<script>
+try{var _t=new URLSearchParams(location.search).get('theme');if(_t)document.documentElement.dataset.theme=(_t==='paper'?'light':'dark')}catch(e){}
+</script>
+<link rel="stylesheet" href="/static/css/p1.css">
+</head>
+<body>
+<script src="/static/js/embed.js"></script>
+
+<header class="topbar" data-ln-region="topbar">
+  <a class="brand" href="/">
+    <span class="brand-mark" aria-hidden="true">L</span>
+    <span class="brand-name">LiveNotes<span>实时语记</span></span>
+  </a>
+  <span class="topbar-divider" aria-hidden="true"></span>
+  <nav class="pagenav" aria-label="页面">
+    <a href="/library">笔记库</a>
+    <a href="/follows" class="is-on" aria-current="page">关注</a>
+    <a href="/weekly">周报</a>
+  </nav>
+  <span class="grow"></span>
+  <button class="top-search" type="button" data-p1-search aria-label="搜索笔记或提问">
+    <svg class="od-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+      stroke-linecap="round" aria-hidden="true" style="--od-icon-size:14px">
+      <circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/>
+    </svg>
+    <span>搜索笔记</span><kbd>Ctrl K</kbd>
+  </button>
+  <a class="icon-btn" href="/" title="返回首页" aria-label="返回首页">
+    <svg class="od-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+      stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="--od-icon-size:16px">
+      <path d="m4 10.5 8-6.5 8 6.5V20H4Z"/><path d="M9.5 20v-5.5h5V20"/>
+    </svg>
+  </a>
+</header>
+
+<main class="stage" data-ln-region="stage">
+  <div class="page page-wide">
+    <header class="page-head">
+      <div class="page-head-main">
+        <p class="eyebrow">FOLLOWING</p>
+        <h1>关注的主播</h1>
+        <p class="page-lead">开播时提醒你，也可以设成自动开始记录。检测在本机完成，关注只保存在这台电脑。</p>
+      </div>
+      <div class="page-actions">
+        <button class="btn btn-ghost" type="button" id="followCheckAll">立即检测</button>
+        <button class="btn btn-primary" type="button" id="followAdd">+ 关注主播</button>
+      </div>
+    </header>
+
+    <div class="stat-row">
+      <div class="stat-cell"><span>正在直播</span><strong id="followStatLive">0</strong><p>开播未记录</p></div>
+      <div class="stat-cell"><span>正在记录</span><strong id="followStatRecording">0</strong><p>本次已开始</p></div>
+      <div class="stat-cell"><span>上次检测</span><strong class="stat-text" id="followStatChecked">—</strong><p id="followStatInterval">每 2 分钟检测一次</p></div>
+    </div>
+
+    <div class="list-toolbar">
+      <div class="chip-row" id="followFilters" role="group" aria-label="筛选关注">
+        <button class="chip is-on" type="button" data-follow-filter="all">全部</button>
+        <button class="chip" type="button" data-follow-filter="live">直播中</button>
+        <button class="chip" type="button" data-follow-filter="offline">未开播</button>
+        <button class="chip" type="button" data-follow-filter="unknown">检测失败</button>
+      </div>
+      <label class="switch-line toolbar-switch">
+        <input type="checkbox" id="followNotifyAll">
+        <span>开播时通知</span>
+      </label>
+    </div>
+
+    <div class="follow-page-list" id="followList" role="list" aria-label="关注的主播列表"></div>
+
+    <div class="page-empty" id="followEmpty" hidden>
+      <span class="empty-kicker">还没有关注</span>
+      <h2>关注一个主播，开播时就不用守着。</h2>
+      <p>粘贴直播间链接即可添加，支持抖音、快手和 B 站。最多 50 个。</p>
+      <button class="btn btn-primary" type="button" id="followEmptyAdd">添加第一个关注</button>
+    </div>
+
+    <p class="page-footnote">移除关注不会删除历史笔记；自动记录只对设为「自动」的主播生效。检测与提醒都在本机完成。</p>
+  </div>
+</main>
+
+<dialog class="p1-dialog" id="followDialog" aria-labelledby="followDialogTitle">
+  <div class="dialog-head">
+    <div>
+      <h2 id="followDialogTitle">关注一个主播</h2>
+      <p>粘贴直播间链接。检测在本机完成，不需要登录平台。</p>
+    </div>
+    <button class="icon-btn" type="button" data-close-dialog aria-label="关闭">
+      <svg class="od-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+        stroke-linecap="round" aria-hidden="true" style="--od-icon-size:16px">
+        <path d="M6 6l12 12M18 6 6 18"/>
+      </svg>
+    </button>
+  </div>
+  <div class="dialog-body">
+    <div class="field">
+      <label for="followUrl">直播间链接<span class="req">必填</span></label>
+      <input id="followUrl" type="url" autocomplete="off" spellcheck="false"
+        placeholder="https://live.douyin.com/…">
+      <p class="field-error" id="followUrlError" hidden></p>
+    </div>
+    <div class="field">
+      <label for="followName">显示名称<span class="opt">可留空</span></label>
+      <input id="followName" type="text" autocomplete="off" maxlength="40"
+        placeholder="自动读取，读不到时可以自己填">
+    </div>
+    <div class="auto-room" id="followPreview" hidden>
+      <span class="follow-avatar tone-1" id="followPreviewAvatar" aria-hidden="true">·</span>
+      <div>
+        <strong id="followPreviewName">正在识别…</strong>
+        <span id="followPreviewText">稍等一下</span>
+      </div>
+    </div>
+    <label class="check-line"><input type="checkbox" id="followAuto">开播后自动开始记录</label>
+    <p class="dialog-note" id="followDialogNote">添加后可以在列表里随时改；自动记录仍受同时记录数量限制。</p>
+  </div>
+  <div class="dialog-foot">
+    <button class="btn btn-ghost" type="button" data-close-dialog>取消</button>
+    <button class="btn btn-primary" type="button" id="followSubmit">关注</button>
+  </div>
+</dialog>
+
+<script src="/static/js/p1.js"></script>
+<script>
+(function () {
+  'use strict';
+  var S = { items: [], stats: {}, filter: 'all', interval: 120, maxRooms: 5,
+    checking: false, previewOk: false, previewPlatform: '', preview: null, seq: 0 };
+
+  function visible() {
+    return S.items.filter(function (item) {
+      if (S.filter === 'all') return true;
+      var state = item.recording ? 'live' : item.live_state;
+      return state === S.filter;
+    });
+  }
+
+  function stateText(item) {
+    if (item.recording) {
+      return '正在记录 · 结束后自动生成笔记';
+    }
+    if (item.live_state === 'live') {
+      return (item.live_title ? '「' + item.live_title + '」' : '正在直播')
+        + (item.live_started_at ? ' · ' + P1.relTime(item.live_started_at) + '开播' : '');
+    }
+    if (item.live_state === 'unknown') {
+      return item.last_error ? '上次没检测到：' + item.last_error : '暂时检测不到，可能链接失效了';
+    }
+    if (item.last_live_at) return '上次开播 ' + P1.relTime(item.last_live_at);
+    return '还没有检测到开播';
+  }
+
+  function row(item) {
+    var node = document.createElement('div');
+    node.className = 'fl-row';
+    node.setAttribute('role', 'listitem');
+
+    var avatar = document.createElement('span');
+    var name = item.name || item.room_key || '未命名主播';
+    avatar.className = 'fl-avatar ' + P1.tone(name);
+    avatar.textContent = P1.initial(name);
+    avatar.setAttribute('aria-hidden', 'true');
+
+    var main = document.createElement('div');
+    main.className = 'fl-main';
+    var top = document.createElement('div');
+    top.className = 'fl-top';
+    var strong = document.createElement('strong');
+    strong.className = 'fl-name';
+    strong.textContent = name;
+    var platform = document.createElement('span');
+    platform.className = 'follow-platform';
+    platform.textContent = P1.platformName(item.platform);
+    var state = item.recording ? 'recording' : item.live_state || 'offline';
+    var badge = document.createElement('span');
+    badge.className = 'fl-badge is-' + state;
+    badge.innerHTML = '<i></i>';
+    badge.appendChild(document.createTextNode(
+      state === 'recording' ? '正在记录' : state === 'live' ? '直播中'
+        : state === 'unknown' ? '检测失败' : '未开播'));
+    top.appendChild(strong);
+    top.appendChild(platform);
+    top.appendChild(badge);
+    var stateLine = document.createElement('span');
+    stateLine.className = 'fl-state';
+    stateLine.textContent = stateText(item);
+    main.appendChild(top);
+    main.appendChild(stateLine);
+
+    var actions = document.createElement('div');
+    actions.className = 'fl-actions';
+    if (item.recording) {
+      var back = document.createElement('button');
+      back.type = 'button';
+      back.className = 'btn btn-ghost btn-sm';
+      back.textContent = '回到记录';
+      back.addEventListener('click', function () {
+        P1.nav('/?room=' + encodeURIComponent(item.room_id || ''));
+      });
+      actions.appendChild(back);
+    } else if (item.live_state === 'live') {
+      var record = document.createElement('button');
+      record.type = 'button';
+      record.className = 'btn btn-ghost btn-sm';
+      record.textContent = '记录这一场';
+      record.addEventListener('click', function () { startRecord(item, record); });
+      actions.appendChild(record);
+    } else if (item.live_state === 'unknown') {
+      var retry = document.createElement('button');
+      retry.type = 'button';
+      retry.className = 'link-btn';
+      retry.textContent = '重新检测';
+      retry.addEventListener('click', function () { checkOne(item, retry); });
+      actions.appendChild(retry);
+    }
+    var auto = document.createElement('label');
+    auto.className = 'fl-auto';
+    var box = document.createElement('input');
+    box.type = 'checkbox';
+    box.checked = !!item.auto_record;
+    box.setAttribute('aria-label', '开播后自动记录 ' + name);
+    box.addEventListener('change', function () {
+      box.disabled = true;
+      P1.post('/api/follows/update', { id: item.id, auto_record: box.checked })
+        .then(function (d) {
+          box.disabled = false;
+          if (d.error) { box.checked = !box.checked; P1.toast(d.error); return; }
+          item.auto_record = box.checked;
+          P1.toast(box.checked ? '开播后会自动开始记录' : '开播后只提醒，不自动记录');
+        }).catch(function () { box.disabled = false; box.checked = !box.checked; });
+    });
+    auto.appendChild(box);
+    auto.appendChild(document.createTextNode('自动记录'));
+
+    var remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'link-btn is-muted';
+    remove.textContent = '移除';
+    remove.addEventListener('click', function () {
+      if (!confirm('不再关注「' + name + '」？历史笔记会保留。')) return;
+      P1.post('/api/follows/remove', { id: item.id }).then(function (d) {
+        if (d.error) { P1.toast(d.error); return; }
+        S.items = d.items || [];
+        S.stats = d.stats || {};
+        render();
+        P1.toast('已移除关注，历史笔记还在');
+      });
+    });
+
+    actions.appendChild(auto);
+    actions.appendChild(remove);
+    node.appendChild(avatar);
+    node.appendChild(main);
+    node.appendChild(actions);
+    return node;
+  }
+
+  function render() {
+    var list = P1.$('#followList');
+    list.innerHTML = '';
+    var rows = visible();
+    rows.forEach(function (item) { list.appendChild(row(item)); });
+    P1.$('#followEmpty').hidden = rows.length > 0;
+    if (!rows.length && S.items.length) {
+      P1.$('#followEmpty').querySelector('.empty-kicker').textContent = '没有符合条件的关注';
+      P1.$('#followEmpty').querySelector('h2').textContent = '这个筛选下暂时没有主播。';
+      P1.$('#followEmpty').querySelector('p').textContent = '换一个筛选，或查看全部关注。';
+      P1.$('#followEmptyAdd').textContent = '查看全部';
+    } else if (!rows.length) {
+      P1.$('#followEmpty').querySelector('.empty-kicker').textContent = '还没有关注';
+      P1.$('#followEmpty').querySelector('h2').textContent = '关注一个主播，开播时就不用守着。';
+      P1.$('#followEmpty').querySelector('p').textContent =
+        '粘贴直播间链接即可添加，支持抖音、快手和 B 站。最多 50 个。';
+      P1.$('#followEmptyAdd').textContent = '添加第一个关注';
+    }
+
+    var stats = S.stats || {};
+    P1.$('#followStatLive').textContent = String(stats.live || 0);
+    P1.$('#followStatRecording').textContent = String(stats.recording || 0);
+    var checked = S.items.map(function (i) { return i.last_checked_at; })
+      .filter(Boolean).sort().pop();
+    P1.$('#followStatChecked').textContent = checked ? P1.relTime(checked) : '还没检测';
+    P1.$('#followStatInterval').textContent = '每 ' + Math.round((S.interval || 120) / 60)
+      + ' 分钟检测一次';
+
+    var notify = P1.$('#followNotifyAll');
+    var on = S.items.filter(function (i) { return i.notify; }).length;
+    notify.checked = on > 0;
+    notify.indeterminate = on > 0 && on < S.items.length;
+    notify.disabled = !S.items.length;
+    P1.$('#followCheckAll').disabled = S.checking || !S.items.length;
+  }
+
+  function apply(d) {
+    S.items = d.items || [];
+    S.stats = d.stats || {};
+    if (d.interval_s) S.interval = d.interval_s;
+    if (d.max_rooms) S.maxRooms = d.max_rooms;
+    render();
+  }
+
+  function load() {
+    P1.api('/api/follows').then(apply).catch(function () {
+      P1.toast('关注列表没有加载出来，稍后再试。');
+    });
+  }
+
+  function checkOne(item, button) {
+    button.disabled = true;
+    P1.toast('正在检测…');
+    P1.post('/api/follows/check', { id: item.id }).then(function (d) {
+      button.disabled = false;
+      if (d.error) { P1.toast(d.error); return; }
+      apply(d);
+      var updated = (d.items || []).filter(function (x) { return x.id === item.id; })[0];
+      P1.toast(updated && updated.live_state === 'live' ? '正在直播'
+        : updated && updated.live_state === 'offline' ? '现在没有开播'
+        : '还是检测不到，稍后再试');
+    }).catch(function () {
+      button.disabled = false;
+      P1.toast('检测没有完成，稍后再试。');
+    });
+  }
+
+  function checkAll() {
+    if (S.checking) return;
+    S.checking = true;
+    P1.$('#followCheckAll').disabled = true;
+    P1.$('#followCheckAll').textContent = '检测中…';
+    P1.post('/api/follows/check', {}).then(function (d) {
+      S.checking = false;
+      P1.$('#followCheckAll').textContent = '立即检测';
+      if (d.error) { P1.toast(d.error); render(); return; }
+      apply(d);
+      P1.toast('检测完成');
+    }).catch(function () {
+      S.checking = false;
+      P1.$('#followCheckAll').textContent = '立即检测';
+      P1.toast('检测没有完成，稍后再试。');
+      render();
+    });
+  }
+
+  function startRecord(item, button) {
+    button.disabled = true;
+    P1.post('/api/rooms', { url: item.url, resolved_from: 'follow', name: item.name || '' })
+      .then(function (d) {
+        button.disabled = false;
+        if (d.error) { P1.toast(d.error); return; }
+        P1.metric('record_start', { follow_id: item.id, kind: 'follow' });
+        P1.toast('已开始记录，正在打开这一场');
+        setTimeout(function () {
+          P1.nav('/?room=' + encodeURIComponent((d.room || {}).id || ''));
+        }, 300);
+      }).catch(function () {
+        button.disabled = false;
+        P1.toast('没能开始记录，稍后再试。');
+      });
+  }
+
+  /* ---------------- 添加 ---------------- */
+  var precheckTimer = 0;
+  function openAdd() {
+    var dialog = P1.$('#followDialog');
+    P1.$('#followUrl').value = '';
+    P1.$('#followName').value = '';
+    P1.$('#followAuto').checked = false;
+    P1.$('#followUrlError').hidden = true;
+    P1.$('#followPreview').hidden = true;
+    P1.$('#followSubmit').disabled = true;
+    S.previewOk = false;
+    S.previewPlatform = '';
+    S.preview = null;
+    P1.$('#followDialogNote').textContent =
+      '添加后可以在列表里随时改；自动记录仍受同时记录数量限制。';
+    if (!dialog.open) dialog.showModal();
+    setTimeout(function () { P1.$('#followUrl').focus(); }, 40);
+  }
+
+  function precheck() {
+    var url = P1.$('#followUrl').value.trim();
+    var error = P1.$('#followUrlError');
+    S.previewOk = false;
+    S.preview = null;
+    P1.$('#followSubmit').disabled = true;
+    error.hidden = true;
+    if (!url) return;
+    if (!/^https?:\/\//i.test(url)) {
+      error.textContent = '请粘贴完整的直播间链接（以 http 开头）。';
+      error.hidden = false;
+      return;
+    }
+    var preview = P1.$('#followPreview');
+    preview.hidden = false;
+    P1.$('#followPreviewName').textContent = '正在识别…';
+    P1.$('#followPreviewText').textContent = '会读取平台和主播名，不会登录。';
+    var seq = ++S.seq;
+    P1.post('/api/watch/precheck', { url: url }).then(function (d) {
+      if (seq !== S.seq) return;
+      if (!d.ok) {
+        preview.hidden = true;
+        error.textContent = d.error || '这个链接还不能自动检测。';
+        error.hidden = false;
+        return;
+      }
+      S.preview = d;
+      S.previewPlatform = d.platform || '';
+      if (d.followed) {
+        preview.hidden = true;
+        error.textContent = '这个直播间已经在关注列表里了。';
+        error.hidden = false;
+        return;
+      }
+      S.previewOk = true;
+      P1.$('#followSubmit').disabled = false;
+      var name = d.name || '未命名主播';
+      P1.$('#followPreviewAvatar').textContent = P1.initial(name);
+      P1.$('#followPreviewAvatar').className = 'follow-avatar ' + P1.tone(name);
+      P1.$('#followPreviewName').textContent = name;
+      P1.$('#followPreviewText').textContent = P1.platformName(d.platform)
+        + (d.live_state === 'live' ? ' · 正在直播' : d.live_state === 'offline'
+          ? ' · 现在没有开播' : ' · 暂时读不到开播状态');
+      if (!P1.$('#followName').value) P1.$('#followName').placeholder = name;
+    }).catch(function () {
+      if (seq !== S.seq) return;
+      preview.hidden = true;
+      error.textContent = '识别没有完成，稍后再试。';
+      error.hidden = false;
+    });
+  }
+
+  function submit() {
+    var url = P1.$('#followUrl').value.trim();
+    var name = P1.$('#followName').value.trim();
+    if (!url) { P1.$('#followUrl').focus(); return; }
+    var button = P1.$('#followSubmit');
+    button.disabled = true;
+    button.textContent = '正在添加…';
+    P1.post('/api/follows', { url: url, platform: S.previewPlatform, name: name })
+      .then(function (d) {
+        button.disabled = false;
+        button.textContent = '关注';
+        if (d.error) {
+          var error = P1.$('#followUrlError');
+          error.textContent = d.error;
+          error.hidden = false;
+          return;
+        }
+        var created = d.item || {};
+        if (P1.$('#followAuto').checked && created.id) {
+          P1.post('/api/follows/update', { id: created.id, auto_record: true });
+        }
+        P1.$('#followDialog').close();
+        apply(d);
+        P1.metric('follow_add', { follow_id: created.id || 0, kind: S.previewPlatform });
+        P1.toast('已关注 · 开播时会提醒你');
+      }).catch(function () {
+        button.disabled = false;
+        button.textContent = '关注';
+        P1.toast('添加没有完成，稍后再试。');
+      });
+  }
+
+  P1.$('#followFilters').addEventListener('click', function (e) {
+    var button = e.target.closest('[data-follow-filter]');
+    if (!button) return;
+    S.filter = button.getAttribute('data-follow-filter');
+    P1.$$('#followFilters .chip').forEach(function (chip) {
+      chip.classList.toggle('is-on', chip === button);
+    });
+    render();
+  });
+
+  P1.$('#followNotifyAll').addEventListener('change', function (e) {
+    var want = e.target.checked;
+    e.target.disabled = true;
+    var targets = S.items.filter(function (item) { return !!item.notify !== want; });
+    var chain = Promise.resolve();
+    targets.forEach(function (item) {
+      chain = chain.then(function () {
+        return P1.post('/api/follows/update', { id: item.id, notify: want });
+      });
+    });
+    chain.then(function () {
+      e.target.disabled = false;
+      S.items.forEach(function (item) { item.notify = want; });
+      render();
+      P1.toast(want ? '开播时会通知你' : '已关闭开播提醒');
+    }).catch(function () {
+      e.target.disabled = false;
+      P1.toast('设置没有保存成功，稍后再试。');
+    });
+  });
+
+  P1.$('#followAdd').addEventListener('click', openAdd);
+  P1.$('#followEmptyAdd').addEventListener('click', function () {
+    if (!S.items.length) { openAdd(); return; }
+    S.filter = 'all';
+    P1.$$('#followFilters .chip').forEach(function (chip) {
+      chip.classList.toggle('is-on', chip.getAttribute('data-follow-filter') === 'all');
+    });
+    render();
+  });
+  P1.$('#followCheckAll').addEventListener('click', checkAll);
+  P1.$('#followSubmit').addEventListener('click', submit);
+  P1.$('#followUrl').addEventListener('input', function () {
+    clearTimeout(precheckTimer);
+    precheckTimer = setTimeout(precheck, 500);
+  });
+  P1.$('#followUrl').addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') { e.preventDefault(); precheck(); }
+  });
+  P1.$$('#followDialog [data-close-dialog]').forEach(function (button) {
+    button.addEventListener('click', function () { P1.$('#followDialog').close(); });
+  });
+  P1.$('#followDialog').addEventListener('click', function (e) {
+    if (e.target === P1.$('#followDialog')) P1.$('#followDialog').close();
+  });
+
+  load();
+})();
+</script>
+</body>
+</html>

@@ -56,6 +56,19 @@ def build_package(conn, sid: str, out_dir: Path | str | None = None,
     srt = export.to_srt(conn, sid)
     (out / "summary.md").write_text(summary, encoding="utf-8")
     (out / "transcript.srt").write_text(srt, encoding="utf-8")
+    # v2：一篇可直接读的笔记 + 结构化书签。生成失败不影响分享包主体。
+    try:
+        (out / "note.md").write_text(export.to_note_md(conn, sid),
+                                    encoding="utf-8")
+    except Exception:
+        (out / "note.md").write_text(summary, encoding="utf-8")
+    try:
+        from . import notes as _notes
+        marks = _notes.bookmarks(conn, sid)
+        (out / "bookmarks.json").write_text(
+            json.dumps(marks, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        (out / "bookmarks.json").write_text("[]", encoding="utf-8")
 
     audio_name = ""
     if include_audio:
@@ -74,10 +87,12 @@ def build_package(conn, sid: str, out_dir: Path | str | None = None,
     (out / "README.md").write_text(
         _readme(s, audio_name, str(s.get("minutes_url") or "")), encoding="utf-8")
     meta = {
+        "version": 2,
         "session_id": sid, "title": s.get("title") or "",
         "started_at": s.get("started_at") or "",
         "duration_s": float(s.get("duration_s") or 0),
         "audio": audio_name, "minutes_url": s.get("minutes_url") or "",
+        "note": "note.md", "bookmarks": "bookmarks.json",
         "built_at": store.now(),
     }
     (out / "meta.json").write_text(

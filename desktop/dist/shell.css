@@ -128,7 +128,9 @@ html[data-theme="light"] .theme-toggle .icon-moon{display:block}
 .rail{
   background:var(--bg-rail);border-right:1px solid var(--line);
   display:flex;flex-direction:column;align-items:center;padding:10px 0 8px;gap:4px;z-index:20;
+  overflow-y:auto;overflow-x:hidden;scrollbar-width:none;
 }
+.rail::-webkit-scrollbar{display:none}
 .rail-item{
   width:60px;height:54px;border-radius:10px;display:flex;flex-direction:column;
   align-items:center;justify-content:center;gap:5px;color:var(--faint);position:relative;
@@ -624,6 +626,9 @@ html[data-theme="light"] .theme-toggle .icon-moon{display:block}
 .set-note{margin:0;padding:10px 16px;background:var(--panel-2);color:var(--faint);font-size:10px;
   line-height:1.7;border-top:1px solid var(--line)}
 .set-group>.set-note:first-child{border-top:0}
+.perf-out{margin:0;padding:12px 16px;border-top:1px solid var(--line);background:var(--panel-2);
+  color:var(--muted);font:10.5px/1.7 var(--mono);white-space:pre-wrap;word-break:break-word}
+.perf-out[hidden]{display:none}
 .ctrl{display:flex;align-items:center;gap:8px;justify-self:end}
 .ctrl.wide{width:min(360px,46vw);justify-self:stretch}
 .ctrl select,.ctrl input[type="text"],.ctrl input[type="password"],.ctrl input[type="number"],.ctrl input:not([type]){
@@ -746,7 +751,16 @@ html[data-theme="light"] .theme-toggle .icon-moon{display:block}
   position:fixed;left:50%;top:60px;transform:translateX(-50%);z-index:90;
   background:var(--toast-bg);border:1px solid var(--line-2);border-radius:8px;color:var(--toast-ink);
   padding:8px 14px;font-size:11px;box-shadow:0 18px 60px rgba(0,0,0,.45);max-width:70vw;
+  display:flex;align-items:center;gap:12px;
 }
+.toast[hidden]{display:none}
+.toast-act{padding:0;border:0;background:none;color:var(--amber);font-size:11px;
+  font-weight:600;white-space:nowrap}
+.toast-act:hover{text-decoration:underline}
+body.perf-lite .rail-item, body.perf-lite .btn, body.perf-lite .notice,
+body.perf-lite .notif-drawer, body.perf-lite .palette{transition:none!important}
+body.perf-lite .notice{animation:none!important}
+body.perf-lite .scope{opacity:.8}
 .ctx-menu{
   position:fixed;z-index:95;min-width:212px;max-width:280px;padding:5px;
   background:var(--panel-2);border:1px solid var(--line-2);border-radius:9px;

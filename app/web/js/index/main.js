@@ -161,7 +161,7 @@ function bindUI(){
     window.open('/highlights?session='+encodeURIComponent(S.session),'_blank');
   };
   $('#btnLiveHub').onclick=function(){ window.open('/rooms','_blank') };
-  $('#btnLib').onclick=function(){ window.open('/library','_blank') };
+  $('#btnLib').onclick=function(){ window.open('/files','_blank') };
 $('#btnPeople').onclick=function(){ window.open('/people','_blank') };
   $('#gq').addEventListener('input',function(){
     clearTimeout(_gqTimer);

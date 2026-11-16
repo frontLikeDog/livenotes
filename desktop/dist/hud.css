@@ -27,6 +27,20 @@
 .hud-card[data-state="paused"] .hud-timer{opacity:.4}
 .hud-stats{font-size:11.5px;color:var(--muted);font-variant-numeric:tabular-nums;
   min-height:18px;letter-spacing:.2px}
+.hud-highlight{width:100%;margin-top:16px;padding:10px 13px;border-radius:9px;
+  border:1px solid var(--amber-line);background:var(--amber-soft);text-align:left}
+.hud-highlight .hh-head{display:flex;align-items:baseline;gap:8px;font-size:10px;
+  color:var(--amber);letter-spacing:.04em}
+.hud-highlight .hh-head b{margin-left:auto;font:500 10px var(--mono);
+  font-variant-numeric:tabular-nums;color:var(--muted);letter-spacing:0}
+.hud-highlight .hh-quote{margin:7px 0 9px;font-size:12.5px;line-height:1.65;
+  color:var(--ink);word-break:break-word}
+.hud-highlight .hh-actions{display:flex;gap:6px}
+.hud-highlight .hh-actions button{height:24px;padding:0 10px;border-radius:5px;
+  border:1px solid var(--line-2);color:var(--muted);font-size:10px}
+.hud-highlight .hh-actions button:hover{border-color:var(--amber-line);color:var(--amber)}
+.hud-highlight .hh-actions button[data-hh="save"]{color:var(--amber);
+  border-color:var(--amber-line)}
 .hud-actions{display:flex;align-items:center;gap:8px;margin:24px 0 0;flex-wrap:wrap;
   justify-content:center}
 .hud-actions .btn{height:34px;padding:0 16px;font-size:12px;border-radius:8px}
@@ -174,6 +188,8 @@ html[data-theme="light"] .notif-dot{border-color:var(--panel)}
 .np-row b{font-weight:500;color:var(--ink);font-size:10.5px}
 .np-row span{font-size:9px;color:var(--faint)}
 .np-sep{height:1px;background:var(--line);margin:2px 0}
+.np-group{font-size:8.5px;font-weight:600;letter-spacing:.12em;text-transform:uppercase;
+  color:var(--faint);padding:5px 0 1px}
 .np-test{height:24px;padding:0 9px;font-size:9.5px;align-self:flex-start}
 
 /* 应用内通知 toast：右下角，最多 3 条，点击才跳转，不自动抢焦点 */

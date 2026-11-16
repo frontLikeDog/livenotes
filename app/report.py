@@ -1026,3 +1026,104 @@ def cleanup(days: int = REPORT_RETENTION_DAYS) -> int:
         except OSError:
             pass
     return n
+
+
+# ---------------------------------------------------------------- P1：站内周报
+
+def last_week(today: date | None = None) -> tuple[date, date]:
+    """上一个完整自然周（周一至周日）。周一生成时就是刚结束的那周。"""
+    today = today or date.today()
+    this_monday = today - timedelta(days=today.weekday())
+    return this_monday - timedelta(days=7), this_monday - timedelta(days=1)
+
+
+def period_of(d: date) -> str:
+    iso = d.isocalendar()
+    return "%04d-W%02d" % (iso[0], iso[1])
+
+
+def _topic_rows(materials: list[dict]) -> list[dict]:
+    tally: dict[str, int] = {}
+    for m in materials:
+        for t in m.get("topics") or []:
+            t = str(t).strip()
+            if t:
+                tally[t] = tally.get(t, 0) + 1
+    total = sum(tally.values()) or 1
+    rows = [{"name": k, "count": v, "pct": round(v * 100.0 / total)}
+            for k, v in sorted(tally.items(), key=lambda kv: (-kv[1], kv[0]))[:8]]
+    return rows
+
+
+def _highlight_rows(materials: list[dict], limit: int = 5) -> list[dict]:
+    out: list[dict] = []
+    for m in materials:
+        for p in (m.get("points") or []):
+            quote = _clean(p.get("quote"), 120)
+            if not quote:
+                continue
+            out.append({"session_id": m["session_id"], "title": m["title"],
+                        "day": m["day"].isoformat(),
+                        "t": p.get("t_from"), "t_text": _span_text(p),
+                        "speaker": _clean(p.get("speaker"), 24),
+                        "quote": quote,
+                        "score": float(p.get("score") or p.get("importance") or 0)})
+    out.sort(key=lambda x: (-float(x.get("score") or 0),
+                            str(x.get("day") or "")))
+    return out[:limit]
+
+
+def structured(result: dict, conn=None) -> dict:
+    """把 build() 的结果整理成周报页要的结构化数据。"""
+    materials = result.get("sessions") or []
+    stats = result.get("stats") or {}
+    days: dict[str, list[dict]] = {}
+    sessions = []
+    for m in materials:
+        row = {"session_id": m.get("session_id"),
+               "title": m.get("title"), "day": m.get("day").isoformat()
+               if m.get("day") else "", "started_at": m.get("started_at"),
+               "duration_s": float(m.get("duration_s") or 0),
+               "overview": _clean(m.get("overview"), 120),
+               "topics": (m.get("topics") or [])[:4],
+               "n_points": len(m.get("points") or []),
+               "streamer": ""}
+        sessions.append(row)
+        days.setdefault(row["day"], []).append(row)
+    if conn is not None:
+        # 主播名取本场说话时长最长的人；只为了周报展示，取不到就留空。
+        for row in sessions:
+            try:
+                r = conn.execute(
+                    "SELECT display_name FROM speakers WHERE session_id=? "
+                    "ORDER BY speaker_id LIMIT 1", (row["session_id"],)).fetchone()
+                row["streamer"] = str((r or {})["display_name"] or "") if r else ""
+            except Exception:
+                pass
+    narrative = result.get("narrative") or {}
+    brief = ""
+    if isinstance(narrative, dict):
+        brief = str(narrative.get("lead") or narrative.get("summary") or "")
+    topic_rows = _topic_rows(materials)
+    if not brief:
+        names = "、".join("「%s」" % t["name"] for t in topic_rows[:2])
+        brief = "上周你记录了 %d 场直播%s。" % (
+            len(materials), ("，主题集中在" + names) if names else "")
+    hl_rows = _highlight_rows(materials)
+    daily = [{"day": d, "sessions": rows}
+             for d, rows in sorted(days.items())]
+    return {
+        "period": period_of(result["since"]),
+        "since": result["since"].isoformat(),
+        "until": result["until"].isoformat(),
+        "label": range_label(result["since"], result["until"]),
+        "brief": _clean(brief, 200),
+        "stats": {"sessions": int(stats.get("sessions") or len(materials)),
+                  "seconds": float(stats.get("duration_s") or 0),
+                  "highlights": len(hl_rows),
+                  "topics": len(topic_rows)},
+        "sessions": sessions,
+        "daily": daily,
+        "topics": topic_rows,
+        "highlights": hl_rows,
+    }
