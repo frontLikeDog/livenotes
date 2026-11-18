@@ -32,6 +32,9 @@ CREATE TABLE IF NOT EXISTS sessions (
     audio_bytes           INTEGER,            -- 当前可播文件大小
     audio_transcoded_at   TEXT,               -- 收尾转码完成时间
     minutes_url           TEXT,               -- 飞书妙记分享链接（人工回填）
+    drive_token           TEXT,               -- 飞书云空间 file_token（整场归档）
+    drive_url             TEXT,               -- 云空间文件链接
+    drive_uploaded_at     TEXT,               -- 最近一次上传成功时间
     overlap_seconds       REAL DEFAULT 0,     -- 被判定为重叠、未转写的时长
     untranscribed_seconds REAL DEFAULT 0,     -- 冷场/BGM/丢帧等无人声时长
     warnings_json         TEXT DEFAULT '[]',
@@ -445,7 +448,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
     # 录音归档：老库补列后 audio_format 为空，读取时按 audio_path 后缀兜底。
     for name, typ in (("audio_format", "TEXT"), ("audio_original_path", "TEXT"),
                       ("audio_bytes", "INTEGER"), ("audio_transcoded_at", "TEXT"),
-                      ("minutes_url", "TEXT")):
+                      ("minutes_url", "TEXT"), ("drive_token", "TEXT"),
+                      ("drive_url", "TEXT"), ("drive_uploaded_at", "TEXT")):
         if name not in cols:
             conn.execute("ALTER TABLE sessions ADD COLUMN %s %s" % (name, typ))
     ucols = {r["name"] for r in conn.execute("PRAGMA table_info(utterances)")}
@@ -773,7 +777,8 @@ def finish_session(conn: sqlite3.Connection, sid: str, duration_s: float,
 
 
 _AUDIO_META_COLS = ("audio_path", "audio_format", "audio_original_path",
-                    "audio_bytes", "audio_transcoded_at", "minutes_url")
+                    "audio_bytes", "audio_transcoded_at", "minutes_url",
+                    "drive_token", "drive_url", "drive_uploaded_at")
 
 
 def set_audio_meta(conn: sqlite3.Connection, sid: str, **fields: Any) -> int:

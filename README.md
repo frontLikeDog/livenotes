@@ -173,6 +173,11 @@ python tools/fetch_models.py           # 约 270MB 本地模型
 `data/feishu.json` 的 `chat_ids`，机器人只响应白名单群里 **@机器人** 的消息。
 想试自然语言再设 `FEISHU_NL_ENABLED=1`，仍然只认白名单群和 `@`，总结照旧先确认。
 
+整场录音可以存进飞书云空间：文件中心的「存入云空间」或全文稿页的「☁ 云空间」。
+应用把录音上传到 `FEISHU_AUDIO_FOLDER_TOKEN`（不填则复用 `FEISHU_DOC_FOLDER_TOKEN`）
+指定的文件夹，再授权给主人；**分享仍然在飞书里选人/选群**，不做接收人选择器。
+单文件超过 20 MB 自动分片上传。不配置文件夹 token 时入口会提示未配置，本地录音不受影响。
+
 ### 日常启动：三个进程
 
 | # | 进程 | 命令 | 干什么 |
@@ -290,6 +295,8 @@ data/               数据库、录音、日志（不提交）
 | `LIVENOTES_PARTIAL_TTL_S` | `2.5` | 临时字幕排队超过该秒数直接丢弃 |
 | `LIVENOTES_PUSH_COOLDOWN` / `_SESSION_CAP` / `_CAP` / `_DIGEST` / `_CARD` | 600 / 3 / 5 / 1 / 1 | 飞书推送节奏与卡片，见 [docs/08](docs/08-feishu-push-time.md) |
 | `FEISHU_OWNER_OPEN_ID` / `FEISHU_CHAT_IDS` | 空 | 主人 open_id；群聊白名单 `chat_id`（逗号分隔） |
+| `FEISHU_AUDIO_FOLDER_TOKEN` | 空 | 云空间归档文件夹 token；空 = 复用 `FEISHU_DOC_FOLDER_TOKEN` |
+| `FEISHU_DRIVE_URL_BASE` | 空 | 拼云空间文件链接的前缀，如 `https://xxx.feishu.cn/file/` |
 | `FEISHU_NL_ENABLED` | `0` | 1 = 白名单群里 `@机器人` 可用自然语言；总结仍需确认 |
 | `LIVENOTES_BRIEF_LLM` / `_DAILY_CAP` / `_SESSION_TOKEN_CAP` | 1 / 30 / 30000 | 简报模型开关、每日调用上限、单场 token 软上限 |
 | `LIVENOTES_BRIEF_TOPICS_COOLDOWN` / `_SUMMARY_COOLDOWN` | 60 / 120 | 同一房间话题/总结的最短间隔（秒） |

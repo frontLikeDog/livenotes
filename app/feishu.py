@@ -50,6 +50,12 @@ def load_config() -> dict:
     env_ids = os.environ.get("FEISHU_CHAT_IDS") or ""
     if env_ids:
         chat_ids = [x.strip() for x in re.split(r"[,，\s]+", env_ids) if x.strip()]
+    doc_folder = (os.environ.get("FEISHU_DOC_FOLDER_TOKEN")
+                  or str(raw.get("doc_folder_token") or ""))
+    # 音频归档文件夹：没单独配就复用云文档文件夹，少一个必填项。
+    audio_folder = (os.environ.get("FEISHU_AUDIO_FOLDER_TOKEN")
+                    or str(raw.get("audio_folder_token") or "")
+                    or doc_folder)
     return {
         "app_id": os.environ.get("FEISHU_APP_ID") or str(raw.get("app_id") or ""),
         "app_secret": os.environ.get("FEISHU_APP_SECRET") or str(raw.get("app_secret") or ""),
@@ -58,10 +64,14 @@ def load_config() -> dict:
         "chat_ids": chat_ids,
         # 云文档：folder_token 为空时建在机器人自己的空间；doc_url_base 用来拼
         # 租户域名（如 https://xxx.feishu.cn/docx/），不填用飞书通用域名。
-        "doc_folder_token": (os.environ.get("FEISHU_DOC_FOLDER_TOKEN")
-                             or str(raw.get("doc_folder_token") or "")),
+        "doc_folder_token": doc_folder,
         "doc_url_base": (os.environ.get("FEISHU_DOC_URL_BASE")
                          or str(raw.get("doc_url_base") or "")),
+        # 云空间音频：folder_token 为空 = 没开归档；drive_url_base 用来拼
+        # 文件链接（https://xxx.feishu.cn/file/），不填用飞书通用域名。
+        "audio_folder_token": audio_folder,
+        "drive_url_base": (os.environ.get("FEISHU_DRIVE_URL_BASE")
+                           or str(raw.get("drive_url_base") or "")),
     }
 
 

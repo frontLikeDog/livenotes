@@ -128,6 +128,7 @@ article{padding-top:10px}
   <button id="btnRename">✎ 改标题</button>
   <button id="btnMd">⬇ 纪要</button>
   <button id="btnSrt">⬇ 字幕</button>
+  <button id="btnCloud" title="把整场录音存入飞书云空间，之后在飞书里选人/选群分享">☁ 云空间</button>
 </div>
 
 <div class="wrap" data-ln-region="stage">
@@ -562,6 +563,18 @@ function doRename(){
   });
   $('#btnMd').onclick=function(){ location.href='/api/export?session_id='+encodeURIComponent(S.sid)+'&format=md' };
   $('#btnSrt').onclick=function(){ location.href='/api/export?session_id='+encodeURIComponent(S.sid)+'&format=srt' };
+  $('#btnCloud').onclick=function(){
+    var btn=this;
+    if(!confirm('把整场录音存入飞书云空间？会占用租户云空间配额。'))return;
+    btn.disabled=true;
+    toastOnHost('正在上传到云空间…');
+    postJson('/api/cloud/save',{session_id:S.sid}).then(function(r){
+      btn.disabled=false;
+      if(!r.ok){toastOnHost('存入失败：'+(r.error||'未知错误'));return}
+      toastOnHost(r.shared?'已存入云空间，可到飞书里转发':'已存入，但授权失败，点开可能无权限');
+      if(r.url)window.open(r.url,'_blank');
+    }).catch(function(e){btn.disabled=false;toastOnHost('存入失败：'+e.message)});
+  };
   fetch('/api/reader?session_id='+encodeURIComponent(S.sid))
     .then(function(r){return r.json()})
     .then(function(d){

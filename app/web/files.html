@@ -273,6 +273,9 @@ function renderRows(){
       : '<button class="act" data-a="read" data-id="'+esc(r.id)+'">阅读</button>'+
         '<button class="act" data-a="play" data-id="'+esc(r.id)+'">播放</button>'+
         (r.has_audio?'<button class="act" data-a="download" data-id="'+esc(r.id)+'">下载</button>':'')+
+        (r.has_audio?(r.drive_url
+          ? '<button class="act" data-a="cloud-open" data-id="'+esc(r.id)+'">云空间</button>'
+          : '<button class="act" data-a="cloud" data-id="'+esc(r.id)+'">存入云空间</button>'):'')+
         '<button class="act" data-a="rename" data-id="'+esc(r.id)+'">改名</button>'+
         (r.has_audio?'<button class="act" data-a="audio" data-id="'+esc(r.id)+'">只删录音</button>':'')+
         '<button class="act danger" data-a="trash" data-id="'+esc(r.id)+'">删除</button>';
@@ -365,6 +368,18 @@ async function action(a,id){
       if(!confirm('彻底删除，不可恢复（含逐字稿与音频）。\n\n'+(row.title||'')))return;
       await post('/api/library/purge',{session_id:id});
       toast('已彻底删除');await load();return;
+    }
+    if(a==='cloud'){
+      if(!confirm('把这场录音存入飞书云空间？会占用租户云空间配额。\n\n'+(row.title||'')))return;
+      toast('正在上传到云空间…');
+      var d=await post('/api/cloud/save',{session_id:id});
+      if(!d.ok){toast('存入失败：'+(d.error||'未知错误'));return}
+      toast(d.shared?'已存入云空间':'已存入，但授权失败，点开可能无权限');
+      await load();return;
+    }
+    if(a==='cloud-open'){
+      if(row.drive_url)window.open(row.drive_url,'_blank');
+      return;
     }
   }catch(e){toast('操作失败：'+e.message)}
 }

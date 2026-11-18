@@ -20,10 +20,11 @@ from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from . import (analysis, analysis_job, audio, classify, coach, config, copy,
-               diagnostics, export, feedback, follows, glossary, highlight, lan,
-               live, livebrief, llm, logs, metrics, notes, notify, polish, profile,
-               qa, qr, reader, rooms, runtime, scheduler, seed_demo, settings,
-               share, store, tasks, timefmt, titles, voiceprint, webroot, weekly)
+               diagnostics, export, feishu_drive, feedback, follows, glossary,
+               highlight, lan, live, livebrief, llm, logs, metrics, notes, notify,
+               polish, profile, qa, qr, reader, rooms, runtime, scheduler,
+               seed_demo, settings, share, store, tasks, timefmt, titles,
+               voiceprint, webroot, weekly)
 from .config import (AUDIO_DIR, HOST, LIVE_STALL_STOP_S, LIVE_STALL_WARN_S,
                      LIVE_ZERO_STOP_S, LIVE_ZERO_WARN_S, PORT, WEB_DIR)
 
@@ -2347,6 +2348,17 @@ p{font-size:14px;line-height:1.75;margin:8px 0}
                 return self._json({"error": "妙记链接要以 http:// 或 https:// 开头"}, 400)
             store.set_minutes_url(conn, sid, url or None)
             return self._json({"ok": True, "session_id": sid, "minutes_url": url})
+        if p == "/api/cloud/save":
+            # 整场归档到飞书云空间（应用空间 + 授权给 owner）。上传在请求线程里
+            # 同步做：m4a 通常 10~60 MB，分片上传几秒到几十秒，比引入队列简单。
+            sid = str((b or {}).get("session_id") or "")
+            s = store.get_session(conn, sid)
+            if not s:
+                return self._json({"error": "场次不存在"}, 404)
+            if s.get("deleted_at"):
+                return self._json({"error": "这场在回收站里，先还原再上传"}, 400)
+            out = feishu_drive.archive_session(conn, s)
+            return self._json(out, 200 if out.get("ok") else 502)
         if p == "/api/library/batch":
             action = str(b.get("action") or "")
             raw_ids = b.get("session_ids")
