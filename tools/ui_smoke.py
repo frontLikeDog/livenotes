@@ -55,6 +55,7 @@ PAGES = [
     ("follows", "/follows", ["#followStatLive", "#followFilters", "#followList"]),
     ("weekly", "/weekly", ["#weekLabel", "#weeklyRange", "#weeklyBody"]),
     ("note", "/note?session=" + DEMO, ["#notePage", "#noteDoc", "#noteTitle"]),
+    ("delivery", "/delivery", ["#dlvFilters", "#dlvList", "#dlvNew"]),
     ("people", "/people", ["#cards", "#plist", "#q"]),
     ("highlights", "/highlights?session=" + DEMO, ["#list", "#fbStat", "#title"]),
     ("capture", "/capture", ["#state", "#dot", "#err"]),
@@ -98,13 +99,14 @@ def find_chrome(explicit: str | None = None) -> str | None:
 
 def start_server(tmp: Path):
     """起一个用临时数据库的服务，端口交给系统分配，不碰真实 data/。"""
-    from app import live, server, store
+    from app import delivery, live, server, store
 
     # 请求日志会把真正的失败信息埋掉：这里只关心浏览器端的报错
     server.Handler.log_message = lambda *a, **k: None
     tmp.mkdir(parents=True, exist_ok=True)
     store.DB_PATH = tmp / "smoke.db"
     store.ensure_dirs = lambda: None
+    delivery.DELIVERIES_DIR = tmp / "deliveries"
     live.DATA_DIR = tmp
     live.AUDIO_DIR = tmp / "audio"
     live.FINISH_LOG = tmp / "finalize.log"

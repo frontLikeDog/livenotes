@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#0A0C0F">
+<title>精修交付 · LiveNotes</title>
+<script>
+try{var _t=new URLSearchParams(location.search).get('theme');if(_t)document.documentElement.dataset.theme=(_t==='paper'?'light':'dark')}catch(e){}
+</script>
+<link rel="stylesheet" href="/static/css/p1.css">
+<link rel="stylesheet" href="/static/css/delivery.css">
+</head>
+<body>
+<script src="/static/js/embed.js"></script>
+
+<header class="topbar" data-ln-region="topbar">
+  <a class="brand" href="/">
+    <span class="brand-mark" aria-hidden="true">L</span>
+    <span class="brand-name">LiveNotes<span>实时语记</span></span>
+  </a>
+  <span class="topbar-divider" aria-hidden="true"></span>
+  <nav class="pagenav" aria-label="页面">
+    <a href="/library">笔记库</a>
+    <a href="/follows">关注</a>
+    <a href="/weekly">周报</a>
+    <a href="/delivery" class="is-on" aria-current="page">交付</a>
+  </nav>
+  <span class="grow"></span>
+  <a class="icon-btn" href="/" title="返回首页" aria-label="返回首页">
+    <svg class="od-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+      stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="--od-icon-size:16px">
+      <path d="m4 10.5 8-6.5 8 6.5V20H4Z"/><path d="M9.5 20v-5.5h5V20"/>
+    </svg>
+  </a>
+</header>
+
+<main class="stage" data-ln-region="stage">
+  <div class="page page-wide">
+    <header class="page-head">
+      <div class="page-head-main">
+        <p class="eyebrow">DELIVERY</p>
+        <h1>精修交付</h1>
+        <p class="page-lead">把一场直播做成客户能直接用的报告包：草稿、人工校对、质检、打包、交付与修订都在这一页。</p>
+      </div>
+      <div class="page-actions">
+        <button class="btn btn-primary" type="button" id="dlvNew">+ 新建交付</button>
+      </div>
+    </header>
+
+    <div class="stat-row">
+      <div class="stat-cell"><span>制作中</span><strong id="dlvStatActive">0</strong><p>草稿或制作中</p></div>
+      <div class="stat-cell"><span>待交付</span><strong id="dlvStatReview">0</strong><p>已打包，等客户确认</p></div>
+      <div class="stat-cell"><span>已交付</span><strong id="dlvStatDelivered">0</strong><p>累计交付</p></div>
+      <div class="stat-cell"><span>本月交付额</span><strong class="stat-text" id="dlvStatRevenue">—</strong><p>按已交付项目计</p></div>
+    </div>
+
+    <div class="dlv-layout">
+      <aside class="dlv-list-pane" aria-label="交付项目">
+        <div class="chip-row" id="dlvFilters" role="group" aria-label="筛选交付项目">
+          <button class="chip is-on" type="button" data-dlv-filter="all">全部</button>
+          <button class="chip" type="button" data-dlv-filter="active">制作中</button>
+          <button class="chip" type="button" data-dlv-filter="review">待交付</button>
+          <button class="chip" type="button" data-dlv-filter="delivered">已交付</button>
+        </div>
+        <div class="dlv-list" id="dlvList" role="list"></div>
+        <div class="page-empty dlv-empty" id="dlvEmpty" hidden>
+          <span class="empty-kicker">还没有交付项目</span>
+          <h2>把一场录完的直播做成报告包。</h2>
+          <p>选一场已经有逐字稿的直播，填客户和截止时间，草稿会自动生成。</p>
+          <button class="btn btn-primary" type="button" id="dlvEmptyNew">新建第一个交付</button>
+        </div>
+      </aside>
+
+      <section class="dlv-detail" id="dlvDetail" aria-label="交付详情" hidden>
+        <div class="dlv-detail-head">
+          <div class="dlv-detail-title">
+            <p class="eyebrow" id="dlvKicker">DELIVERY PROJECT</p>
+            <h2 id="dlvTitle">—</h2>
+            <p class="dlv-sub" id="dlvSub">—</p>
+          </div>
+          <div class="dlv-head-side">
+            <label class="dlv-state-field">
+              <span>状态</span>
+              <select id="dlvState" aria-label="项目状态">
+                <option value="draft">草稿</option>
+                <option value="producing">制作中</option>
+                <option value="review">待交付</option>
+                <option value="delivered">已交付</option>
+                <option value="revising">修订中</option>
+              </select>
+            </label>
+            <span class="dlv-due" id="dlvDueChip">—</span>
+          </div>
+        </div>
+
+        <div class="dlv-fields">
+          <label>活动 / 场次名称<input id="dlvEvent" maxlength="120" autocomplete="off"></label>
+          <label>客户<input id="dlvClient" maxlength="80" autocomplete="off"></label>
+          <label>套餐
+            <select id="dlvPackage">
+              <option value="standard">标准复盘</option>
+              <option value="deep">深度复盘</option>
+              <option value="event">活动 / 峰会</option>
+            </select>
+          </label>
+          <label>截止日期<input id="dlvDue" type="date"></label>
+          <label>价格（元）<input id="dlvPrice" type="number" min="0" step="1"></label>
+        </div>
+
+        <div class="dlv-actionbar">
+          <button class="btn btn-ghost" type="button" data-dlv-act="draft">重新生成草稿</button>
+          <button class="btn btn-primary" type="button" data-dlv-act="save">保存报告</button>
+          <button class="btn btn-ghost" type="button" data-dlv-act="qa">质检</button>
+          <button class="btn btn-ghost" type="button" data-dlv-act="build">生成交付包</button>
+          <span class="grow"></span>
+          <a class="link-btn" id="dlvDownload" href="#" hidden>下载交付包</a>
+          <button class="link-btn" type="button" data-dlv-act="revision">记录修订</button>
+          <button class="link-btn is-muted" type="button" data-dlv-act="remove">删除</button>
+        </div>
+
+        <div class="dlv-grid">
+          <section class="dlv-block">
+            <div class="dlv-block-head">
+              <h3>交付检查</h3>
+              <span class="dlv-block-note" id="dlvChecklistStat">—</span>
+            </div>
+            <div class="dlv-checklist" id="dlvChecklist"></div>
+          </section>
+
+          <section class="dlv-block">
+            <div class="dlv-block-head">
+              <h3>质检</h3>
+              <span class="dlv-block-note" id="dlvQaStat">—</span>
+            </div>
+            <div class="dlv-qa" id="dlvQa"></div>
+          </section>
+        </div>
+
+        <section class="dlv-block">
+          <div class="dlv-block-head">
+            <h3>报告正文</h3>
+            <span class="dlv-block-note">草稿由本机笔记与高光拼成；直接改文字，保存后生成新版本。</span>
+          </div>
+          <div class="dlv-sections" id="dlvSections"></div>
+        </section>
+
+        <section class="dlv-block">
+          <div class="dlv-block-head">
+            <h3>交付包</h3>
+            <span class="dlv-block-note" id="dlvPackageStat">还没有打包</span>
+          </div>
+          <div class="dlv-package" id="dlvPackage"></div>
+        </section>
+
+        <section class="dlv-block">
+          <div class="dlv-block-head">
+            <h3>项目备注</h3>
+            <button class="link-btn" type="button" id="dlvSaveNotes">保存备注</button>
+          </div>
+          <textarea class="dlv-notes" id="dlvNotes" rows="4"
+            placeholder="客户偏好、交付渠道、修订记录、需要特别说明的口径……"></textarea>
+        </section>
+      </section>
+
+      <div class="dlv-placeholder" id="dlvPlaceholder">
+        <span class="empty-kicker">交付工作台</span>
+        <h2>从左边选一个项目。</h2>
+        <p>或者新建一个：选一场直播，填客户和截止时间，系统会先用现有笔记生成草稿。</p>
+      </div>
+    </div>
+  </div>
+</main>
+
+<dialog class="p1-dialog" id="dlvDialog" aria-labelledby="dlvDialogTitle">
+  <div class="dialog-head">
+    <div>
+      <h2 id="dlvDialogTitle">新建交付</h2>
+      <p>选一场已经有逐字稿的直播。草稿会用现有总结/高光生成，不会重新转写。</p>
+    </div>
+    <button class="icon-btn" type="button" data-close-dialog aria-label="关闭">
+      <svg class="od-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+        stroke-linecap="round" aria-hidden="true" style="--od-icon-size:16px">
+        <path d="M6 6l12 12M18 6 6 18"/>
+      </svg>
+    </button>
+  </div>
+  <div class="dialog-body">
+    <div class="field">
+      <label for="dlvSession">直播场次<span class="req">必填</span></label>
+      <select id="dlvSession"></select>
+      <p class="field-hint" id="dlvSessionHint">正在读取最近的场次…</p>
+    </div>
+    <div class="field">
+      <label for="dlvNewEvent">活动 / 场次名称<span class="opt">可留空</span></label>
+      <input id="dlvNewEvent" type="text" maxlength="120" autocomplete="off"
+        placeholder="如：11-18 选品专场 · 客户内部复盘">
+    </div>
+    <div class="field">
+      <label for="dlvNewClient">客户<span class="opt">可留空</span></label>
+      <input id="dlvNewClient" type="text" maxlength="80" autocomplete="off"
+        placeholder="客户或团队名称">
+    </div>
+    <div class="dlv-form-row">
+      <div class="field">
+        <label for="dlvNewPackage">套餐</label>
+        <select id="dlvNewPackage">
+          <option value="standard">标准复盘 · ¥999</option>
+          <option value="deep">深度复盘 · ¥1999</option>
+          <option value="event">活动 / 峰会 · ¥4999</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="dlvNewDue">截止日期</label>
+        <input id="dlvNewDue" type="date">
+      </div>
+      <div class="field">
+        <label for="dlvNewPrice">价格（元）</label>
+        <input id="dlvNewPrice" type="number" min="0" step="1" value="999">
+      </div>
+    </div>
+    <p class="dialog-note">创建后会立即生成一版草稿；音频片段在「生成交付包」时才切，不影响当前录音。</p>
+  </div>
+  <div class="dialog-foot">
+    <button class="btn btn-ghost" type="button" data-close-dialog>取消</button>
+    <button class="btn btn-primary" type="button" id="dlvCreate">创建并生成草稿</button>
+  </div>
+</dialog>
+
+<script src="/static/js/p1.js"></script>
+<script src="/static/js/delivery.js"></script>
+</body>
+</html>

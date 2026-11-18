@@ -20,10 +20,11 @@ from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from . import (analysis, analysis_job, audio, classify, coach, config, copy,
-               diagnostics, export, feedback, follows, glossary, highlight, lan,
-               live, livebrief, llm, logs, metrics, notes, notify, polish, profile,
-               qa, qr, reader, rooms, runtime, scheduler, seed_demo, settings,
-               share, store, tasks, timefmt, titles, voiceprint, webroot, weekly)
+               delivery, diagnostics, export, feedback, follows, glossary,
+               highlight, lan, live, livebrief, llm, logs, metrics, notes, notify,
+               polish, profile, qa, qr, reader, rooms, runtime, scheduler,
+               seed_demo, settings, share, store, tasks, timefmt, titles,
+               voiceprint, webroot, weekly)
 from .config import (AUDIO_DIR, HOST, LIVE_STALL_STOP_S, LIVE_STALL_WARN_S,
                      LIVE_ZERO_STOP_S, LIVE_ZERO_WARN_S, PORT, WEB_DIR)
 
@@ -1002,6 +1003,8 @@ p{font-size:14px;line-height:1.75;margin:8px 0}
                 return self._file(WEB_DIR / "follows.html")
             if p in ("/weekly", "/weekly.html"):
                 return self._file(WEB_DIR / "weekly.html")
+            if p in ("/delivery", "/delivery.html"):
+                return self._file(WEB_DIR / "delivery.html")
             if p in ("/people", "/people.html"):
                 return self._file(WEB_DIR / "people.html")
             if p in ("/highlights", "/highlights.html"):
@@ -1305,6 +1308,31 @@ p{font-size:14px;line-height:1.75;margin:8px 0}
             except Exception:
                 traceback.print_exc()
             return self._json(out)
+        if p == "/api/delivery/projects":
+            return self._json(delivery.list_projects(conn, str(q.get("state") or "")))
+        if p == "/api/delivery/project":
+            try:
+                return self._json(delivery.get_project(conn, str(q.get("id") or "")))
+            except ValueError as e:
+                return self._json({"error": str(e)}, 404)
+        if p == "/api/delivery/report":
+            try:
+                got = delivery.get_project(conn, str(q.get("id") or ""))
+            except ValueError as e:
+                return self._json({"error": str(e)}, 404)
+            fmt = str(q.get("format") or "md").lower()
+            if fmt == "html":
+                body = delivery.render_html(got["project"], got.get("report"))
+                return self._attachment(body, "text/html; charset=utf-8",
+                                        "report.html")
+            body = delivery.render_markdown(got["project"], got.get("report"))
+            return self._attachment(body, "text/markdown; charset=utf-8",
+                                    "report.md")
+        if p == "/api/delivery/download":
+            z = delivery.package_path(conn, str(q.get("id") or ""))
+            if not z:
+                return self._json({"error": "交付包还没生成"}, 404)
+            return self._file_attachment(z, "application/zip", z.name)
         if p == "/api/library/cards":
             today = datetime.now().replace(hour=0, minute=0, second=0,
                                            microsecond=0)
@@ -1861,6 +1889,75 @@ p{font-size:14px;line-height:1.75;margin:8px 0}
             n = notes.index_session(conn, sid)
             return self._json({"ok": True, "units": n,
                                "note": notes.build_note(conn, sid)})
+        if p == "/api/delivery/create":
+            try:
+                out = delivery.create_project(
+                    conn, str(b.get("session_id") or ""),
+                    client_name=str(b.get("client_name") or ""),
+                    event_name=str(b.get("event_name") or ""),
+                    package=str(b.get("package") or "standard"),
+                    due_at=str(b.get("due_at") or ""),
+                    price_cents=(int(b["price_cents"])
+                                 if b.get("price_cents") not in (None, "") else None),
+                    notes=str(b.get("notes") or ""))
+                out = delivery.build_draft(conn, out["project"]["id"])
+            except (ValueError, TypeError) as e:
+                return self._json({"error": str(e)}, 400)
+            return self._json(out, 201)
+        if p == "/api/delivery/update":
+            pid = str(b.get("id") or "")
+            fields = {k: b[k] for k in ("client_name", "event_name", "package",
+                                        "state", "due_at", "price_cents",
+                                        "notes", "checklist") if k in b}
+            try:
+                return self._json(delivery.update_project(conn, pid, **fields))
+            except (ValueError, TypeError) as e:
+                return self._json({"error": str(e)}, 400)
+        if p == "/api/delivery/draft":
+            try:
+                return self._json(delivery.build_draft(
+                    conn, str(b.get("id") or ""), force=b.get("force") is True))
+            except ValueError as e:
+                return self._json({"error": str(e)}, 400)
+        if p == "/api/delivery/save":
+            try:
+                return self._json(delivery.save_report(
+                    conn, str(b.get("id") or ""), b.get("sections"),
+                    engine=str(b.get("engine") or "manual")))
+            except ValueError as e:
+                return self._json({"error": str(e)}, 400)
+        if p == "/api/delivery/qa":
+            try:
+                got = delivery.get_project(conn, str(b.get("id") or ""))
+            except ValueError as e:
+                return self._json({"error": str(e)}, 404)
+            return self._json({"ok": True, "qa": got["qa"],
+                               "checklist": got["checklist"]})
+        if p == "/api/delivery/build":
+            try:
+                return self._json(delivery.build_package(
+                    conn, str(b.get("id") or ""),
+                    include_audio=b.get("audio") is not False))
+            except (ValueError, OSError) as e:
+                return self._json({"error": str(e)}, 400)
+        if p == "/api/delivery/deliver":
+            try:
+                return self._json(delivery.mark_delivered(
+                    conn, str(b.get("id") or "")))
+            except ValueError as e:
+                return self._json({"error": str(e)}, 400)
+        if p == "/api/delivery/revision":
+            try:
+                return self._json(delivery.add_revision(
+                    conn, str(b.get("id") or ""), str(b.get("note") or "")))
+            except ValueError as e:
+                return self._json({"error": str(e)}, 400)
+        if p == "/api/delivery/remove":
+            try:
+                delivery.remove_project(conn, str(b.get("id") or ""))
+            except ValueError as e:
+                return self._json({"error": str(e)}, 404)
+            return self._json({"ok": True})
         if p == "/api/metric/event":
             name = str(b.get("event") or "").strip()
             allowed = {"app_open", "record_start", "record_stop", "note_ready",

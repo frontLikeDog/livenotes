@@ -264,6 +264,7 @@ const CTX_ICONS = {
   retry: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M20 11a8 8 0 1 0-2 5"/><path d="M20 4v7h-7"/></svg>',
   stop: '<svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="1.5"/></svg>',
   remove: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M6 6l12 12M18 6L6 18"/></svg>',
+  record: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3M9 21h6"/></svg>',
 };
 function ctxIcon(name) { return CTX_ICONS[name] || ''; }
 
@@ -681,6 +682,7 @@ const VIEW_META = {
   follows: { title: '关注', sub: '开播提醒与自动记录', side: false, insp: false },
   library: { title: '笔记库', sub: '每一场的要点与高光', side: false, insp: false },
   weekly: { title: '周报', sub: '这一周的回看', side: false, insp: false },
+  delivery: { title: '精修交付', sub: '报告与交付包', side: false, insp: false },
   note: { title: '笔记', sub: '要点、高光与原话', side: false, insp: false },
   files: { title: '文件中心', sub: '录音与回放', side: false, insp: false },
   people: { title: '人物档案', sub: '声纹与确认', side: false, insp: false },
@@ -692,9 +694,14 @@ const VIEW_META = {
 function switchView(view, opts) {
   opts = opts || {};
   // 多路时 HUD 不抢岗位：设计上 2 路以上留在收听多路视图，用户选一路再进记录卡。
+  // 但拦截必须给下一步：toast 直接把人带到舞台上方那条 picker（renderMultiBar），
+  // 否则用户只会看到一句「先在这里选一路」，而收听页没有任何入口。
   if (view === 'hud' && !opts.force && !S.finish && liveRooms().length > 1) {
     view = 'listen';
-    toast('有 ' + liveRooms().length + ' 个直播间在记录，先在这里选一路。');
+    toast('有 ' + liveRooms().length + ' 个直播间在记录，先在这里选一路。', {
+      label: '选一路',
+      run: () => pickMultiRoom(),
+    });
   }
   if (S.view === 'listen' && view !== 'listen') closeStageView();
   if (S.paletteOpen) closePalette();
@@ -717,7 +724,7 @@ function switchView(view, opts) {
   $('#wbView').hidden = view !== 'workbench';
   $('#setView').hidden = view !== 'settings';
   $('#frameView').hidden = !['files', 'people', 'live', 'frame',
-    'follows', 'library', 'weekly', 'note'].includes(view);
+    'follows', 'library', 'weekly', 'delivery', 'note'].includes(view);
 
   if (view === 'hud') {
     if (opts.room) S.hudRoomId = opts.room;
@@ -763,6 +770,13 @@ function switchView(view, opts) {
     setFrame(API + '/weekly?' + q,
       API + '/weekly' + (period ? '?period=' + encodeURIComponent(period) : ''),
       '周报', period || '这一周的回看', false);
+    S.frameBackView = 'listen';
+  } else if (view === 'delivery') {
+    const pid = String(opts.id || '');
+    const q = 'embed=1' + (pid ? '&id=' + encodeURIComponent(pid) : '');
+    setFrame(API + '/delivery?' + q,
+      API + '/delivery' + (pid ? '?id=' + encodeURIComponent(pid) : ''),
+      '精修交付', '报告与交付包', false);
     S.frameBackView = 'listen';
   } else if (view === 'note') {
     const sid = opts.session || S.selectedSession || '';
@@ -936,6 +950,58 @@ function renderSidebar() {
   setList('');
 }
 
+function renderMultiBar() {
+  const bar = $('#multiBar');
+  if (!bar) return;
+  const live = liveRooms();
+  // 标注台是全高工作台，这条条会把画面挤矮；那一页的右栏仍有「进入记录卡」。
+  if (S.view !== 'listen' || S.stage === 'annotate' || live.length < 2) {
+    bar.hidden = true;
+    return;
+  }
+  bar.hidden = false;
+  $('#multiBarText').textContent = live.length + ' 个直播间正在记录';
+  // 每条路一个 CH 按钮：点谁就进谁的记录卡。最多 5 路，一行放得下。
+  // 轮询每 2 秒会重绘舞台；内容没变就不重建，别把键盘焦点打断。
+  const wrap = $('#multiRooms');
+  const born = live.map((r) => r.id + '·' + roomCh(r) + '·' + roomName(r)).join('|');
+  if (wrap.dataset.born !== born) {
+    wrap.dataset.born = born;
+    wrap.innerHTML = live.map((r) => {
+      const on = r.id === S.selectedId ? ' on' : '';
+      return '<button class="mb-room' + on + '" data-mb-room="' + esc(r.id) + '"' +
+        ' title="进入「' + esc(roomName(r)) + '」的记录卡">' +
+        '<i></i>' + esc(roomCh(r)) + '</button>';
+    }).join('');
+  } else {
+    $$('#multiRooms .mb-room').forEach((b, i) => {
+      b.classList.toggle('on', live[i] && live[i].id === S.selectedId);
+    });
+  }
+  const cur = selectedRoom();
+  const go = $('#multiBarGo');
+  go.disabled = !cur || !canEnterHud(cur);
+  go.textContent = cur && canEnterHud(cur) ? '进入 ' + roomCh(cur) + ' 记录卡' : '进入记录卡';
+}
+
+/* 多路提示里那个「选一路」：把注意力落回舞台上方那条 picker，
+   不另开对话框——用户已经在这页了，多一个浮层只是多一次关闭。 */
+function pickMultiRoom() {
+  const bar = $('#multiBar');
+  if (!bar) return;
+  // 标注页没有这条条（见 renderMultiBar）；先退回信号舞台再高亮。
+  if (S.stage === 'annotate') setStage('signal');
+  renderMultiBar();
+  bar.classList.remove('flash');
+  // 重新触发一次高亮：连续点两次也要有反馈。
+  void bar.offsetWidth;
+  bar.classList.add('flash');
+  const first = $('#multiRooms .mb-room');
+  if (first) first.focus({ preventScroll: true });
+  clearTimeout(pickMultiRoom._t);
+  pickMultiRoom._t = setTimeout(() => bar.classList.remove('flash'), 1600);
+}
+
 function roomRowHtml(r) {
   const st = stateInfo(r);
   const s = sessionFor(r);
@@ -972,6 +1038,9 @@ function renderStage() {
     const b = $(sel);
     if (b) b.hidden = !room || isWall || isAnnot;
   });
+  // 多路时导航栏的「记录」会被拦回收听页（见 switchView 的多路分支），
+  // 所以入口放在舞台上方那条常驻条里（renderMultiBar），这里只留语义。
+  renderMultiBar();
   $('#btnWall').textContent = isWall ? '信号' : '监控墙';
   $$('#stageSeg button').forEach((b) => {
     b.classList.toggle('on', !isWall && b.dataset.stage === S.stage);
@@ -1305,6 +1374,9 @@ function renderAnnotInspector(room) {
   scroll.scrollTop = top;
 
   const acts = [];
+  if (canEnterHud(room)) {
+    acts.push('<button class="btn sm primary" data-act="hud" title="进入这一路的记录卡：暂停 / 标记 / 结束并生成笔记">进入记录卡</button>');
+  }
   acts.push('<button class="btn sm" data-act="page">显示页面</button>');
   acts.push('<button class="btn sm" data-act="live"' + (room.session_id ? '' : ' disabled') + '>实时字幕</button>');
   if (st.k === 'failed' || st.k === 'stopped') {
@@ -1691,6 +1763,9 @@ function renderInspector() {
   scroll.scrollTop = top;
 
   const acts = [];
+  if (canEnterHud(room)) {
+    acts.push('<button class="btn sm primary" data-act="hud" title="进入这一路的记录卡：暂停 / 标记 / 结束并生成笔记">进入记录卡</button>');
+  }
   acts.push('<button class="btn sm" data-act="page">' + (S.stage === 'page' ? '返回信号' : '显示页面') + '</button>');
   acts.push('<button class="btn sm" data-act="live"' + (room.session_id ? '' : ' disabled') + '>实时字幕</button>');
   if (st.k === 'failed' || st.k === 'stopped') acts.push('<button class="btn sm" data-act="retry">重试</button>');
@@ -3004,6 +3079,9 @@ function roomMenu(id, x, y) {
   if (!r) return;
   const st = stateInfo(r);
   showCtxMenu([
+    // 多路时 HUD 不能从导航直接进（见 switchView 的多路分支）；这条是「选一路」之后的入口。
+    { icon: 'record', label: '进入记录卡', hint: '暂停 / 标记 / 结束',
+      disabled: !canEnterHud(r), run: () => openHudFor(r) },
     { icon: 'play', label: '打开实时字幕', disabled: !r.session_id, run: () => {
       switchView('live', { session: r.session_id, back: 'listen' });
     } },
@@ -3509,6 +3587,7 @@ function paletteActions() {
     { id: 'library', label: '笔记库', hint: '每一场的要点与高光', icon: '▤', run: () => switchView('library') },
     { id: 'ask', label: '问笔记', hint: '用一句话问你的笔记，答案带出处', icon: '✦', run: () => switchView('library', { search: 'ask' }) },
     { id: 'weekly', label: '周报', hint: '这一周的回看', icon: '▦', run: () => switchView('weekly') },
+    { id: 'delivery', label: '精修交付', hint: '报告、质检与交付包', icon: '▥', run: () => switchView('delivery') },
     { id: 'cleanup', label: '体检清理', hint: '演示 / 空采集 / 重复场次', icon: '⌫', run: () => switchView('files', { tab: 'cleanup' }) },
     { id: 'trash', label: '回收站', hint: '还原或彻底删除', icon: '▤', run: () => switchView('files', { tab: 'trash' }) },
     { id: 'people', label: '人物档案', hint: '声纹与人名确认', key: '4', icon: '◎', run: () => switchView('people') },
@@ -3711,6 +3790,7 @@ function navigateToUrl(href) {
   }
   if (path === '/follows') return switchView('follows');
   if (path === '/weekly') return switchView('weekly', { period: u.searchParams.get('period') });
+  if (path === '/delivery') return switchView('delivery', { id: u.searchParams.get('id') });
   if (path === '/library') {
     return switchView('library', {
       search: u.searchParams.get('search'), q: u.searchParams.get('q'),
@@ -3752,6 +3832,7 @@ function notifActionLabel(item) {
   return {
     hud: '打开记录卡', note: '打开笔记', library: '打开笔记库',
     follow: '查看关注', follows: '查看关注', weekly: '打开周报',
+    delivery: '打开交付',
     storage: '打开存储设置', diagnostics: '检查问题',
   }[v] || '查看';
 }
@@ -3965,6 +4046,10 @@ function routeNotification(item) {
     switchView('weekly', { period: act.period });
     return;
   }
+  if (view === 'delivery') {
+    switchView('delivery');
+    return;
+  }
   if (view === 'library') {
     switchView('library');
     return;
@@ -4044,6 +4129,43 @@ function focusHudRoom(room) {
   S.hudRoomId = room.id;
   if (room.session_id) S.hudSid = room.session_id;
   return true;
+}
+/* 「进入记录卡」什么时候有意义：有会话（在录 / 已暂停 / 收尾中）才需要那张卡；
+   只有已停止且没有会话的一路不该把用户骗进去。 */
+function canEnterHud(room) {
+  if (!room || !room.session_id) return false;
+  const k = stateInfo(room).k;
+  return k === 'live' || k === 'pending';
+}
+/* 从收听页「选一路 → 进记录卡」。导航栏的 switchView('hud') 在多路时会被拦下
+   （见 switchView 里的多路分支），这条路径必须带上具体房间，否则记录卡还是
+   会停在上一路。从记录卡切回多路时也用它把收听页选中项落回刚看的那一路。 */
+function openHudFor(room) {
+  if (!room) { toast('先选一路直播间。'); return false; }
+  if (!room.session_id && stateInfo(room).k === 'stopped') {
+    toast('这一路已经结束，没有可继续记录的会话。');
+    return false;
+  }
+  if (S.pageOpen) closeStageView();
+  const changed = S.hudRoomId !== room.id;
+  focusHudRoom(room);
+  S.selectedId = room.id;
+  S.selectedSid = room.session_id || '';
+  // 记录卡和收听页共用 S.lines；换一路要立刻清掉上一路的字幕，
+  // 否则进卡的第一拍会先闪出另一路的句子。
+  if (changed) { S.lines = []; S.speakers = []; S.speakersSid = ''; }
+  switchView('hud', { force: true, room: room.id });
+  return true;
+}
+/* 记录卡里的「切换到多路」：回到收听页时把选中项落回刚看的那一路，
+   不然用户会看到上一次点过的另一路，以为记录卡记错了对象。 */
+function backToMulti() {
+  const room = hudRoom() || selectedRoom();
+  if (room) {
+    S.selectedId = room.id;
+    S.selectedSid = room.session_id || '';
+  }
+  switchView('listen', room ? { room: room.id } : undefined);
 }
 async function handleTrayAction(action) {
   const room = latestLiveRoom() || hudRoom();
@@ -4210,6 +4332,12 @@ function bind() {
   $('#stageRetry').onclick = () => retryRoom(selectedRoom());
   $('#stagePause').onclick = () => togglePause();
   $('#stageMarkBtn').onclick = () => markMoment();
+  $('#multiBarGo').onclick = () => openHudFor(selectedRoom());
+  $('#multiRooms').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-mb-room]');
+    if (!b) return;
+    openHudFor(findRoom(b.dataset.mbRoom));
+  });
   $('#emptyDemoBtn').onclick = () => loadDemo();
   $('#marksList').addEventListener('click', (e) => {
     const b = e.target.closest('[data-mark-seek]');
@@ -4419,6 +4547,7 @@ function bind() {
     if (!b) return;
     const room = selectedRoom();
     const act = b.dataset.act;
+    if (act === 'hud') return openHudFor(room);
     if (act === 'page') return setStage(S.stage === 'page' ? 'signal' : 'page');
     if (act === 'live' && room && room.session_id) return switchView('live', { session: room.session_id, back: 'listen' });
     if (act === 'retry') return retryRoom(room);
@@ -4430,7 +4559,7 @@ function bind() {
   $('#hudPause').onclick = () => togglePause();
   $('#hudMark').onclick = () => markMoment();
   $('#hudFinish').onclick = () => confirmFinish(hudRoom());
-  $('#hudMulti').onclick = () => switchView('listen');
+  $('#hudMulti').onclick = () => backToMulti();
   $('#hudStart').onclick = () => { switchView('listen'); openAdd(); };
   $('#hudAlert').addEventListener('click', (e) => {
     const b = e.target.closest('[data-hud-act]');
@@ -4542,9 +4671,8 @@ function bind() {
   $('#recPill').onclick = () => {
     const live = liveRooms();
     if (live.length === 1) {
-      S.hudRoomId = live[0].id;
-      S.hudSid = live[0].session_id || '';
-      switchView('hud', { force: true, room: live[0].id });
+      // 只有一路时「2 路在听」胶囊就是记录卡的快捷入口。
+      openHudFor(live[0]);
       return;
     }
     switchView('listen');

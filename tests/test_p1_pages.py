@@ -49,6 +49,7 @@ def test_p1_pages_keep_base_anchors(http_base):
     pages = [
         ("/follows", 'id="followList"'),
         ("/weekly", 'id="weeklyBody"'),
+        ("/delivery", 'id="dlvList"'),
         ("/note?session_id=DEMO", 'id="noteDoc"'),
     ]
     for path, marker in pages:

@@ -366,6 +366,8 @@ python tools/stress_live.py --tracks 1,3,5,10 --duration 7200 --warmup 60 \
 - [`docs/29-live-labeling.md`](docs/29-live-labeling.md) 直播标注
 - [`docs/30-scene-highlights-and-narrative-weekly.md`](docs/30-scene-highlights-and-narrative-weekly.md) 场面化高光与主线叙事周报：证据闸门、兜底与调参
 - [`docs/36-p1-second-visit-iteration-plan.md`](docs/36-p1-second-visit-iteration-plan.md) P1「让用户第二次打开」：关注、笔记库、书签、分享卡、周报、问笔记与低配模式
+- [`docs/38-p2-growth-and-monetization-options.md`](docs/38-p2-growth-and-monetization-options.md) P2 增长与商业化：9 条补充方案、收费边界与授权地基
+- [`docs/39-polish-delivery-implementation.md`](docs/39-polish-delivery-implementation.md) M4 精修交付：项目/报告版本/质检/打包工作台与人工交付 SOP
 
 ## 许可证
 

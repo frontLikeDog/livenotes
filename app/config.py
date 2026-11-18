@@ -382,6 +382,8 @@ AUDIO_RETENTION_DAYS = _env_int("LIVENOTES_AUDIO_RETENTION_DAYS", 0)
 # 飞书片段缓存与分享包输出目录（都在 data/ 下，不提交）
 CLIPS_DIR = DATA_DIR / "clips"
 SHARE_DIR = DATA_DIR / "share"
+# 精修交付：每个项目一个目录，放报告、逐字稿、片段与 zip。
+DELIVERIES_DIR = DATA_DIR / "deliveries"
 # 周报/复盘 Markdown：中间产物，默认保留 30 天（见 app/report.cleanup）。
 REPORTS_DIR = DATA_DIR / "reports"
 

@@ -396,6 +396,33 @@ def extract_opus(src: Path | str, dst: Path | str, start: float,
     return _run(args, timeout=120.0)
 
 
+def extract_m4a(src: Path | str, dst: Path | str, start: float,
+                duration: float) -> tuple[bool, str]:
+    """从 WAV/PCM/m4a/opus 切一段，输出交付包用的 AAC m4a。
+
+    和 extract_opus 的区别只有一个编码器：客户拿到的片段要能在 Windows
+    播放器/微信/飞书里直接播，opus 在部分环境下打不开。
+    """
+    src, dst = Path(src), Path(dst)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    duration = max(0.2, float(duration))
+    if src.suffix.lower() in (".wav", ".pcm"):
+        with tempfile.TemporaryDirectory(prefix="livenotes-clip-") as td:
+            tmp = Path(td) / "slice.wav"
+            ok = (_slice_pcm(src, tmp, start, duration) if src.suffix.lower() == ".pcm"
+                  else _slice_wav(src, tmp, start, duration))
+            if not ok:
+                return False, "这一段音频读不出来（可能已经写完了或文件被清理）"
+            return to_m4a(tmp, dst)
+    args = (["-hide_banner", "-loglevel", "error", "-y",
+             "-ss", "%.3f" % max(0.0, float(start)),
+             "-t", "%.3f" % duration, "-i", str(src), "-vn",
+             "-ac", "1", "-ar", str(SAMPLE_RATE),
+             "-c:a", "aac", "-b:a", AUDIO_AAC_BITRATE,
+             "-movflags", "+faststart", str(dst)])
+    return _run(args, timeout=120.0)
+
+
 def slice_wav_bytes(path: Path | str, t0: float, t1: float) -> bytes | None:
     """给 /api/audio?t_start=&t_end= 的兼容出口：非 WAV 文件用 ffmpeg 现切。"""
     path = Path(path)

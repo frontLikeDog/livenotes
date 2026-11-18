@@ -136,3 +136,44 @@ def test_batch_export_returns_zip(http_base, db):
         assert len(names) == 1
         assert names[0].endswith(".md")
         assert "要导出的内容" in z.read(names[0]).decode("utf-8")
+
+
+def test_delivery_endpoints_roundtrip(http_base, db):
+    add_session(db, "S_DLV", title="交付接口场", duration_s=60, speakers=[
+        {"speaker_id": "SPK_00", "display_name": "主播", "verified": 1}])
+    add_rows(db, "S_DLV", [utt_row(
+        0, "这是一段足够长的交付接口测试发言。", importance=0.8)])
+
+    code, created = _post(http_base, "/api/delivery/create", {
+        "session_id": "S_DLV", "event_name": "接口复盘", "client_name": "客户",
+        "package": "standard", "price_cents": 100000})
+    assert code == 201
+    pid = created["project"]["id"]
+    assert created["report"]["engine"] == "draft"
+
+    got = _get(http_base, "/api/delivery/project?id=" + pid)
+    assert got["project"]["event_name"] == "接口复盘"
+
+    code, saved = _post(http_base, "/api/delivery/save",
+                        {"id": pid, "sections": got["report"]["sections"]})
+    assert code == 200
+    assert saved["report"]["version"] == 2
+
+    code, built = _post(http_base, "/api/delivery/build", {"id": pid, "audio": False})
+    assert code == 200
+    assert "报告.md" in built["built"]["files"]
+
+    with urllib.request.urlopen(
+            http_base + "/api/delivery/download?id=" + pid, timeout=10) as r:
+        assert r.headers.get("Content-Type") == "application/zip"
+        data = r.read()
+    with zipfile.ZipFile(io.BytesIO(data)) as z:
+        assert "报告.md" in z.namelist()
+
+    code, delivered = _post(http_base, "/api/delivery/deliver", {"id": pid})
+    assert code == 200
+    assert delivered["project"]["state"] == "delivered"
+
+    rows = _get(http_base, "/api/delivery/projects?state=delivered")
+    assert pid in {x["id"] for x in rows["items"]}
+

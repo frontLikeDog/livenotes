@@ -19,8 +19,8 @@ for p in (str(ROOT), str(TESTS)):
         sys.path.insert(0, p)
 
 from app import audio as audio_mod  # noqa: E402
-from app import (clips, glossary, live, logs, metrics, profile, report,  # noqa: E402
-                 settings, store)
+from app import (clips, delivery, glossary, live, logs, metrics, profile,  # noqa: E402
+                 report, settings, store)
 
 
 @pytest.fixture(autouse=True)
@@ -41,6 +41,7 @@ def isolated_paths(tmp_path, monkeypatch):
     monkeypatch.setattr(live, "FINISH_LOG", data / "finalize.log")
     monkeypatch.setattr(logs, "LOG_DIR", data / "logs")
     monkeypatch.setattr(report, "REPORTS_DIR", data / "reports")
+    monkeypatch.setattr(delivery, "DELIVERIES_DIR", data / "deliveries")
     monkeypatch.setattr(glossary, "PATH", data / "glossary.json")
     monkeypatch.setattr(profile, "PATH", data / "profile.json")
     monkeypatch.setattr(settings, "_PATH", data / "settings.json")

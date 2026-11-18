@@ -384,6 +384,40 @@ CREATE TABLE IF NOT EXISTS reports (
 );
 CREATE INDEX IF NOT EXISTS idx_reports_kind ON reports(kind, since DESC);
 
+-- 精修交付：一场直播可以交付给多个客户，所以不对 session_id 做唯一约束。
+-- checklist/package 都是小 JSON：前者存人工勾选，后者存最近一次打包结果。
+CREATE TABLE IF NOT EXISTS delivery_projects (
+    id             TEXT PRIMARY KEY,          -- dlv_20261118_153000_ab12
+    session_id     TEXT NOT NULL,
+    client_name    TEXT NOT NULL DEFAULT '',
+    event_name     TEXT NOT NULL DEFAULT '',
+    package        TEXT NOT NULL DEFAULT 'standard',  -- standard|deep|event
+    state          TEXT NOT NULL DEFAULT 'draft',     -- draft|producing|review|delivered|revising
+    due_at         TEXT NOT NULL DEFAULT '',
+    price_cents    INTEGER NOT NULL DEFAULT 0,
+    checklist_json TEXT NOT NULL DEFAULT '{}',
+    package_json   TEXT NOT NULL DEFAULT '{}',
+    notes          TEXT NOT NULL DEFAULT '',
+    revision_count INTEGER NOT NULL DEFAULT 0,
+    delivered_at   TEXT NOT NULL DEFAULT '',
+    created_at     TEXT NOT NULL,
+    updated_at     TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_delivery_session ON delivery_projects(session_id);
+CREATE INDEX IF NOT EXISTS idx_delivery_state ON delivery_projects(state, updated_at DESC);
+
+-- 报告版本：每次生成草稿/保存都新增一版，交付包永远用最新一版。
+CREATE TABLE IF NOT EXISTS delivery_reports (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id   TEXT NOT NULL,
+    version      INTEGER NOT NULL,
+    sections_json TEXT NOT NULL DEFAULT '[]',
+    engine       TEXT NOT NULL DEFAULT 'draft',   -- draft|manual
+    created_at   TEXT NOT NULL,
+    UNIQUE(project_id, version)
+);
+CREATE INDEX IF NOT EXISTS idx_delivery_report ON delivery_reports(project_id, version DESC);
+
 -- 索引版本：note_units / FTS 重建的幂等依据。
 CREATE TABLE IF NOT EXISTS index_meta (
     key        TEXT PRIMARY KEY,

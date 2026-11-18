@@ -280,6 +280,33 @@ html[data-theme="light"] .theme-toggle .icon-moon{display:block}
   position:relative;flex:1;min-height:0;margin:12px 14px 14px;
   border:1px solid var(--line);border-radius:12px;overflow:hidden;background:var(--stage-bg);
 }
+/* 多路提示条：设计稿 35 §4.6 承诺的「N 个直播间正在记录 · 查看记录卡」。
+   它只是入口，不重复舞台上的状态信息。 */
+.multi-bar{
+  flex:0 0 auto;display:flex;align-items:center;gap:9px;
+  margin:12px 14px 0;padding:7px 10px 7px 12px;border-radius:9px;
+  background:var(--panel-2);border:1px solid var(--line);
+  font-size:10.5px;color:var(--muted);
+}
+.mb-dot{width:6px;height:6px;border-radius:50%;background:var(--red);
+  animation:pulse 1.8s ease-in-out infinite;flex:0 0 auto}
+.multi-bar b{color:var(--ink);font-weight:600;white-space:nowrap}
+.mb-hint{color:var(--faint);white-space:nowrap}
+.mb-rooms{display:flex;gap:4px;min-width:0;overflow:hidden}
+.mb-room{
+  display:inline-flex;align-items:center;gap:5px;height:22px;padding:0 7px;border-radius:5px;
+  font-family:var(--mono);font-size:9.5px;color:var(--faint);
+  border:1px solid var(--line);background:var(--panel);white-space:nowrap;
+}
+.mb-room i{width:4px;height:4px;border-radius:50%;background:var(--jade);flex:0 0 auto}
+.mb-room:hover{color:var(--ink);border-color:var(--line-2)}
+.mb-room.on{color:var(--amber);border-color:var(--amber-line);background:var(--amber-soft)}
+.multi-bar .btn{height:23px;padding:0 9px;font-size:10px;flex:0 0 auto}
+.multi-bar.flash{animation:mb-flash 1.6s ease-out}
+@keyframes mb-flash{
+  0%{border-color:var(--amber);box-shadow:0 0 0 3px var(--amber-soft)}
+  100%{border-color:var(--line);box-shadow:none}
+}
 #scope{position:absolute;inset:0;width:100%;height:100%;display:block}
 .stage-watermark{
   position:absolute;left:18px;bottom:14px;font-family:var(--mono);font-size:10px;
@@ -443,6 +470,8 @@ html[data-theme="light"] .theme-toggle .icon-moon{display:block}
   border-top:1px solid var(--line);
 }
 .insp-actions .btn{flex:1;justify-content:center}
+/* 「进入记录卡」是右栏唯一的下一步：占满一行，其余次要操作在下一行平分。 */
+.insp-actions .btn[data-act="hud"]{flex:0 0 100%}
 .insp-foot{padding:0 16px 12px;font-size:9.5px;color:var(--faint);line-height:1.7}
 
 /* ------------------------------------------------------------ workbench */
@@ -1113,6 +1142,8 @@ body.splitting .annot-page{pointer-events:none}
   .stage-empty .steps{grid-template-columns:1fr}
   .monitor-meta{display:none}
   .filter-meta{margin-left:0}
+  /* 窄窗先把提示里的说明行去掉，保留 CH 切换和主按钮。 */
+  .mb-hint{display:none}
 }
 @media (max-width:1080px){
   .trow{grid-template-columns:32px 78px minmax(0,1fr)}

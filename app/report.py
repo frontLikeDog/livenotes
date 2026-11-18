@@ -369,6 +369,15 @@ def _material(conn, session: dict) -> dict:
     }
 
 
+def session_material(conn, session: dict) -> dict:
+    """公开入口：一场的要点/高光/概览，供精修交付草稿复用。
+
+    内部仍走 ``_material``，保证周报、笔记与交付报告用的是同一套
+    「总结优先 → 高光 → 原句」降级顺序和证据字段。
+    """
+    return _material(conn, session)
+
+
 def sessions_between(conn, since: date, until: date) -> list[dict]:
     out = []
     for s in store.list_sessions(conn):
