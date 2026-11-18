@@ -1,5 +1,31 @@
 <!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><title>LiveNotes · 引擎未启动</title>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<script>
+(function(){
+  function paint(v){
+    var dark = v === 'dark' || (v === 'system' && window.matchMedia &&
+      window.matchMedia('(prefers-color-scheme: dark)').matches);
+    var r = document.documentElement;
+    r.dataset.theme = dark ? 'dark' : 'light';
+    try { r.style.colorScheme = dark ? 'dark' : 'light'; } catch (e) {}
+  }
+  var choice = 'dark';
+  try { choice = localStorage.getItem('ln.theme') || 'dark'; } catch (e) {}
+  paint(choice);
+  window.addEventListener('storage', function(e){
+    if (e.key !== 'ln.theme') return;
+    choice = e.newValue || 'dark';
+    paint(choice);
+  });
+  try {
+    var mq = window.matchMedia('(prefers-color-scheme: dark)');
+    var onScheme = function(){ if (choice === 'system') paint(choice); };
+    if (mq.addEventListener) mq.addEventListener('change', onScheme);
+    else if (mq.addListener) mq.addListener(onScheme);
+  } catch (e) {}
+})();
+</script>
+<title>LiveNotes · 引擎未启动</title>
 <style>
   body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",system-ui;
     background:#f4f6f9;color:#1d2330}
@@ -16,6 +42,17 @@
   button.primary:hover{filter:brightness(1.06);color:#fff}
   button:disabled{opacity:.55;cursor:default}
   #result{font-size:12px;color:#465062;line-height:1.8;margin-top:12px;word-break:break-all}
+</style>
+<style>
+html[data-theme="dark"] body{background:#0A0C0F;color:#ECE9E2}
+html[data-theme="dark"] .card{background:#0F1318;border-color:rgba(233,124,112,.32)}
+html[data-theme="dark"] h1{color:#E97C70}
+html[data-theme="dark"] p{color:#9AA4B0}
+html[data-theme="dark"] code{background:#1A2028;color:#ECE9E2}
+html[data-theme="dark"] button{background:#141920;border-color:#2B333D;color:#ECE9E2}
+html[data-theme="dark"] button:hover{border-color:#E7B669;color:#E7B669}
+html[data-theme="dark"] button.primary{background:#E7B669;border-color:#E7B669;color:#231704}
+html[data-theme="dark"] #result{color:#9AA4B0}
 </style>
 </head>
 <body>

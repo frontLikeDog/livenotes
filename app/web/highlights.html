@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>高光榜 · 直播语记</title>
+<script src="/static/js/theme.js"></script>
 <style>
 :root{
   --ink:#1d2330; --muted:#6b7480; --faint:#9aa3b0; --line:#e6e9ef;
@@ -94,6 +95,7 @@ h1{font-size:22px;line-height:1.45;margin:0 0 8px}
   border:1px solid #d8dde6;background:#fff;color:#3c4757}
 .player .tm{font-size:11.5px;color:var(--faint);font-variant-numeric:tabular-nums}
 </style>
+<link rel="stylesheet" href="/static/css/theme-dark.css">
 </head>
 <body>
 <script src="/static/js/embed.js"></script>
@@ -307,7 +309,7 @@ function vote(hid, v){
     paintStat();
     render();
   }).catch(function(e){
-    $('#fbStat').innerHTML = '<span style="color:#b3261e">打标失败：' + esc(e.message) + '</span>';
+    $('#fbStat').innerHTML = '<span style="color:var(--danger)">打标失败：' + esc(e.message) + '</span>';
   });
 }
 

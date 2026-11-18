@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import struct
 import subprocess
 import tempfile
 import threading
@@ -23,8 +24,9 @@ import wave
 from pathlib import Path
 
 from . import logs, store
-from .config import (AUDIO_AAC_BITRATE, AUDIO_OPUS_BITRATE, AUDIO_RETENTION_DAYS,
-                     CLIPS_DIR, SAMPLE_RATE, WAV_RETENTION_DAYS)
+from .config import (AUDIO_AAC_BITRATE, AUDIO_DIR, AUDIO_OPUS_BITRATE,
+                     AUDIO_RETENTION_DAYS, CLIPS_DIR, SAMPLE_RATE,
+                     WAV_RETENTION_DAYS)
 
 _CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 _FFMPEG: str | None | bool = False      # False = 还没探测过
@@ -60,6 +62,44 @@ def is_audio(path: Path | str) -> bool:
     return Path(path).suffix.lower() in AUDIO_TYPES
 
 
+def mp4_has_moov(path: Path | str) -> bool:
+    """MP4/M4A 是否完整：能顺着顶层 box 走到 moov。
+
+    转码中途被杀（桌面壳退出会连 ffmpeg 一起回收）留下的是 ftyp + 半截
+    mdat，没有 moov，播放器和 ffmpeg 都解不了。只看「存在且非空」会把
+    这种半成品当成归档，等原 WAV 过保留期被清理就真丢了。
+    """
+    try:
+        path = Path(path)
+        size = path.stat().st_size
+        if size < 16:
+            return False
+        with open(path, "rb") as f:
+            off = 0
+            while off + 8 <= size:
+                f.seek(off)
+                head = f.read(8)
+                if len(head) < 8:
+                    return False
+                box = struct.unpack(">I", head[:4])[0]
+                kind = head[4:8]
+                if box == 1:                       # 64 位扩展长度
+                    ext = f.read(8)
+                    if len(ext) < 8:
+                        return False
+                    box = struct.unpack(">Q", ext)[0]
+                elif box == 0:                     # 一直到文件末尾
+                    box = size - off
+                if kind == b"moov":
+                    return box >= 8 and off + box <= size
+                if box < 8:
+                    return False
+                off += box
+        return False
+    except OSError:
+        return False
+
+
 def _run(args: list[str], timeout: float = 1800.0) -> tuple[bool, str]:
     ff = ffmpeg_path()
     if not ff:
@@ -83,14 +123,40 @@ def _input_args(src: Path) -> list[str]:
 
 
 def to_m4a(src: Path | str, dst: Path | str, bitrate: str | None = None) -> tuple[bool, str]:
-    """转 AAC-LC 单声道 m4a。保留 +faststart，网页拖动时不用等整段下载。"""
+    """转 AAC-LC 单声道 m4a。保留 +faststart，网页拖动时不用等整段下载。
+
+    先写同目录临时文件，确认完整后再原子替换 dst：桌面壳退出会连 ffmpeg
+    一起回收，直接写 dst 会留下没有 moov 的半截文件，下次启动还会被
+    当成「已经转过了」。
+    """
     src, dst = Path(src), Path(dst)
     dst.parent.mkdir(parents=True, exist_ok=True)
-    args = (["-hide_banner", "-loglevel", "error", "-y"] + _input_args(src)
-            + ["-i", str(src), "-vn", "-ac", "1", "-ar", str(SAMPLE_RATE),
-               "-c:a", "aac", "-b:a", bitrate or AUDIO_AAC_BITRATE,
-               "-movflags", "+faststart", str(dst)])
-    return _run(args)
+    fd, tmp_name = tempfile.mkstemp(prefix=dst.stem + ".", suffix=".part.m4a",
+                                    dir=str(dst.parent))
+    os.close(fd)
+    tmp = Path(tmp_name)
+    try:
+        args = (["-hide_banner", "-loglevel", "error", "-y"] + _input_args(src)
+                + ["-i", str(src), "-vn", "-ac", "1", "-ar", str(SAMPLE_RATE),
+                   "-c:a", "aac", "-b:a", bitrate or AUDIO_AAC_BITRATE,
+                   "-movflags", "+faststart", str(tmp)])
+        ok, err = _run(args)
+        if not ok:
+            return False, err
+        if not tmp.is_file() or tmp.stat().st_size <= 0:
+            return False, "转码没有输出文件"
+        if not mp4_has_moov(tmp):
+            return False, "转码输出不完整（缺少 moov）"
+        try:
+            os.replace(tmp, dst)
+        except OSError as e:
+            return False, str(e)
+        return True, ""
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def to_opus(src: Path | str, dst: Path | str, bitrate: str | None = None) -> tuple[bool, str]:
@@ -127,13 +193,19 @@ def transcode_session(sid: str, wav_path: Path | str | None = None,
             return None
         dst = src.parent / (sid + ".m4a")
         if dst.is_file() and dst.stat().st_size > 0 and dst.stat().st_mtime >= src.stat().st_mtime:
-            # 已经转过了（服务重启/重复收尾），不重复跑 ffmpeg
-            _mark(conn, sid, dst, src)
-            return dst
+            # 已经转过了（服务重启/重复收尾），不重复跑 ffmpeg。
+            # 但必须确认它是完整 MP4：转码中途被杀留下的是没有 moov 的半截
+            # 文件，把它当成品写库会让这一场永远播不出来。
+            if mp4_has_moov(dst):
+                _mark(conn, sid, dst, src)
+                return dst
+            logs.log_event("audio.archive_invalid", level="warn", session_id=sid,
+                           path=str(dst))
         ok, err = to_m4a(src, dst)
         if not ok or not dst.is_file() or dst.stat().st_size <= 0:
             logs.log_event("audio.transcode_failed", level="warn", session_id=sid,
                            src=str(src), error=err)
+            _fallback_to_original(conn, sid, src, dst)
             return None
         _mark(conn, sid, dst, src)
         logs.log_event("audio.transcoded", session_id=sid, src=str(src),
@@ -152,6 +224,24 @@ def _mark(conn, sid: str, dst: Path, src: Path) -> None:
                          audio_bytes=dst.stat().st_size,
                          audio_transcoded_at=store.now(),
                          audio_original_path=str(src))
+
+
+def _fallback_to_original(conn, sid: str, src: Path, failed: Path) -> None:
+    """归档补不出来时退回原 WAV：宁可文件大，也不能让库指向播不了的 m4a。"""
+    if src.suffix.lower() != ".wav":
+        return
+    s = store.get_session(conn, sid) or {}
+    if str(s.get("audio_path") or "") != str(failed):
+        return
+    try:
+        size = src.stat().st_size
+    except OSError:
+        return
+    store.set_audio_meta(conn, sid, audio_path=str(src), audio_format="wav",
+                         audio_bytes=size, audio_transcoded_at=None,
+                         audio_original_path=None)
+    logs.log_event("audio.archive_fallback", level="warn", session_id=sid,
+                   path=str(src), archive=str(failed))
 
 
 def schedule_transcode(sid: str, wav_path: Path | str | None = None) -> None:
@@ -199,6 +289,12 @@ def cleanup_originals(conn=None, days: int | None = None) -> int:
             try:
                 same = cur and cur.is_file() and cur.resolve() == orig.resolve()
                 if same or not cur.is_file():
+                    continue
+                if cur.suffix.lower() in (".m4a", ".mp4") and not mp4_has_moov(cur):
+                    # 归档本身是半截文件：原 WAV 是唯一能播的那份，先留着。
+                    logs.log_event("audio.original_kept", level="warn",
+                                   session_id=r["id"], path=str(orig),
+                                   archive=str(cur))
                     continue
                 if orig.stat().st_mtime > cutoff:
                     continue
@@ -250,7 +346,7 @@ def cleanup_expired(conn=None, days: int | None = None) -> int:
 
 
 def backfill_wavs(conn=None, limit: int = 0) -> int:
-    """把历史 WAV 逐场转成 m4a。顺序执行，避免和采集抢 CPU/内存。
+    """把历史 WAV 逐场转成 m4a；顺带修复被转码中断弄坏的归档。
 
     老库没有 audio_original_path，转码成功后由 _mark 补上；这样保留期清理
     才有依据。limit=0 表示不限场次（CLI/启动补转用）。
@@ -259,15 +355,23 @@ def backfill_wavs(conn=None, limit: int = 0) -> int:
     conn = conn or store.connect()
     n = 0
     try:
-        sql = ("SELECT id, audio_path FROM sessions "
-               "WHERE audio_path LIKE '%.wav' "
-               "AND (audio_format IS NULL OR audio_format = 'wav') "
+        sql = ("SELECT id, audio_path, audio_original_path FROM sessions "
+               "WHERE (audio_path LIKE '%.wav' "
+               "       AND (audio_format IS NULL OR audio_format = 'wav')) "
+               "   OR (audio_path LIKE '%.m4a' AND audio_original_path IS NOT NULL "
+               "       AND audio_original_path <> '') "
                "ORDER BY started_at ASC")
         if limit and limit > 0:
             sql += " LIMIT %d" % int(limit)
         rows = conn.execute(sql).fetchall()
         for r in rows:
-            if transcode_session(r["id"], r["audio_path"], conn=conn):
+            ap = str(r["audio_path"] or "")
+            is_m4a = ap.lower().endswith((".m4a", ".mp4"))
+            if is_m4a and mp4_has_moov(ap):
+                continue          # 归档完整，不用每次都过一遍 ffmpeg
+            # 修复时要从原 WAV 重转，不能把坏掉的 m4a 当输入
+            hint = r["audio_original_path"] if is_m4a else r["audio_path"]
+            if transcode_session(r["id"], hint, conn=conn):
                 n += 1
         return n
     finally:
@@ -306,6 +410,22 @@ def cleanup_clips(max_age_s: float = 86400.0) -> int:
     return n
 
 
+def cleanup_partials(max_age_s: float = 86400.0) -> int:
+    """转码临时文件是垃圾：进程被杀留下的 *.part.m4a 超过一天就删。"""
+    if not AUDIO_DIR.is_dir():
+        return 0
+    cutoff = time.time() - max(60.0, float(max_age_s))
+    n = 0
+    for p in AUDIO_DIR.glob("*.part.m4a"):
+        try:
+            if p.stat().st_mtime < cutoff:
+                p.unlink(missing_ok=True)
+                n += 1
+        except OSError:
+            pass
+    return n
+
+
 def start_sweeper(interval_s: float = 6 * 3600) -> threading.Thread:
     """定期清理原 WAV / 过期归档 / 片段缓存 / 分享包 / 报告。启动时也跑一次。"""
     def loop() -> None:
@@ -314,13 +434,14 @@ def start_sweeper(interval_s: float = 6 * 3600) -> threading.Thread:
                 removed = cleanup_originals()
                 expired = cleanup_expired()
                 clips = cleanup_clips()
+                parts = cleanup_partials()
                 # share/report 都依赖 audio（模块级），只能在这里延迟导入。
                 from . import report as _report, share as _share
                 packages = _share.cleanup()
                 reports = _report.cleanup()
-                if removed or expired or clips or packages or reports:
+                if removed or expired or clips or parts or packages or reports:
                     logs.log_event("audio.sweep", originals=removed,
-                                   expired=expired, clips=clips,
+                                   expired=expired, clips=clips, parts=parts,
                                    packages=packages, reports=reports)
             except Exception:
                 traceback.print_exc()

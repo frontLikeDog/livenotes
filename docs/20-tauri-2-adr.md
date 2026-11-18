@@ -233,6 +233,9 @@ Tauri updater 默认全量下载，没有 electron-updater 那种 blockmap 差�
 4. 若拆包成本太高，先接受「全量更新」，但把 models 放到用户数据目录，
    避免每次更新都重下 257MB。
 
+> 落地拆分、发布流水线、回滚与签名见 [docs/40](40-distribution-and-updates.md)。
+> 引擎版本走 `/api/health` 的 `version` 字段（壳本来就在轮询这个接口），不新增 `/api/version`。
+
 ---
 
 ## 5. 打包

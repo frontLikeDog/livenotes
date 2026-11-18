@@ -649,9 +649,10 @@ function setTheme(choice, opts) {
   try { localStorage.setItem(THEME_KEY, themeChoice); } catch (e) {}
   applyTheme();
   // 内嵌的引擎页只认 paper / studio 两套覆盖；主题变化时重载当前页面。
-  if (S.view === 'files' || S.view === 'people' || S.view === 'live' || S.view === 'frame') {
+  if (S.frameEmbedUrl && ['files', 'people', 'live', 'frame',
+      'follows', 'library', 'weekly', 'delivery', 'note'].includes(S.view)) {
     const f = $('#frame');
-    if (f && S.frameEmbedUrl) f.src = withTheme(S.frameEmbedUrl);
+    if (f) f.src = withTheme(S.frameEmbedUrl);
   }
   if (S.view === 'workbench' && S.wb.sid && S.wb.rows.length) renderWbAll();
   if (!opts || !opts.silent) markSaved();

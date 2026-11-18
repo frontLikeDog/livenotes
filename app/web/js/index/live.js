@@ -38,7 +38,7 @@ async function liveOpen(){
     // 这里提前说清楚并给跳转，别等用户点了按钮才看到一句看不懂的报错。
     const local='http://127.0.0.1:'+(location.port||'8765')+'/';
     $('#lpReady').innerHTML='当前地址不是浏览器认可的「安全上下文」，无法采集标签页音频。'+
-      '<br><a href="'+local+'" style="color:#2b5cff">→ 点这里用 '+local+' 打开</a>'+
+      '<br><a href="'+local+'" style="color:var(--accent)">→ 点这里用 '+local+' 打开</a>'+
       '（本机监听必须走 127.0.0.1，手机看回放才用局域网 IP）';
     $('#lpStart').disabled=true;
     return;

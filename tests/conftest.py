@@ -37,6 +37,7 @@ def isolated_paths(tmp_path, monkeypatch):
     monkeypatch.setattr(live, "DATA_DIR", data)
     monkeypatch.setattr(clips, "AUDIO_DIR", audio)
     monkeypatch.setattr(clips, "CLIPS_DIR", data / "clips")
+    monkeypatch.setattr(audio_mod, "AUDIO_DIR", audio)
     monkeypatch.setattr(audio_mod, "CLIPS_DIR", data / "clips")
     monkeypatch.setattr(live, "FINISH_LOG", data / "finalize.log")
     monkeypatch.setattr(logs, "LOG_DIR", data / "logs")

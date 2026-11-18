@@ -157,7 +157,7 @@ function renderProfiles(){
     var host=(p.base||'').replace(/^https?:\/\//,'');
     return '<div class="prow'+(on?' on':'')+'" data-id="'+esc(p.id)+'">'
       +'<div style="flex:1;min-width:0">'
-      +'<div class="pn">'+esc(p.name)+(p.configured?'':' <span style="color:#d48806;font-weight:400">（未填全）</span>')+'</div>'
+      +'<div class="pn">'+esc(p.name)+(p.configured?'':' <span style="color:var(--warn);font-weight:400">（未填全）</span>')+'</div>'
       +'<div class="pm">'+esc(p.model||'没填模型')+(host?' · '+esc(host):'')+'</div>'
       +'</div>'
       +'<div class="pact">'

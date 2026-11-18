@@ -1,5 +1,36 @@
 <!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><title>LiveNotes</title></head>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>LiveNotes</title>
+<script>
+(function(){
+  function paint(v){
+    var dark = v === 'dark' || (v === 'system' && window.matchMedia &&
+      window.matchMedia('(prefers-color-scheme: dark)').matches);
+    document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+  }
+  var choice = 'dark';
+  try { choice = localStorage.getItem('ln.theme') || 'dark'; } catch (e) {}
+  paint(choice);
+  window.addEventListener('storage', function(e){
+    if (e.key !== 'ln.theme') return;
+    choice = e.newValue || 'dark';
+    paint(choice);
+  });
+  try {
+    var mq = window.matchMedia('(prefers-color-scheme: dark)');
+    var onScheme = function(){ if (choice === 'system') paint(choice); };
+    if (mq.addEventListener) mq.addEventListener('change', onScheme);
+    else if (mq.addListener) mq.addListener(onScheme);
+  } catch (e) {}
+})();
+</script>
+<style>
+html[data-theme="dark"] body{background:#0A0C0F!important;color:#ECE9E2!important}
+html[data-theme="dark"] body>div{background:#0F1318!important;border-color:#1E242C!important}
+html[data-theme="dark"] h1{color:#ECE9E2!important}
+html[data-theme="dark"] p{color:#9AA4B0!important}
+</style>
+</head>
 <body style="font-family:'Microsoft YaHei',system-ui;background:#f4f6f9;color:#1d2330">
 <div style="max-width:640px;margin:12vh auto;padding:28px;background:#fff;border:1px solid #e6e9ef;border-radius:14px">
 <h1 style="font-size:20px;margin:0 0 8px">LiveNotes 启动中</h1>

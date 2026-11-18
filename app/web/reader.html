@@ -4,10 +4,14 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>全文稿 · 直播语记</title>
+<script src="/static/js/theme.js"></script>
 <style>
 :root{
   --ink:#1d2330; --muted:#6b7480; --faint:#9aa3b0; --line:#e6e9ef;
   --accent:#2b5cff; --paper:#ffffff; --bg:#f4f6f9;
+  --spk-0:#2b5cff; --spk-1:#00a870; --spk-2:#d48806; --spk-3:#e5484d;
+  --spk-4:#7c3aed; --spk-5:#08979c; --spk-6:#c41d7f; --spk-7:#597ef7;
+  --spk-8:#fa8c16; --spk-9:#8c8c8c;
 }
 *{box-sizing:border-box}
 html,body{margin:0;background:var(--bg);color:var(--ink);
@@ -108,6 +112,7 @@ article{padding-top:10px}
   .player{padding:8px 12px calc(8px + env(safe-area-inset-bottom))}
 }
 </style>
+<link rel="stylesheet" href="/static/css/theme-dark.css">
 </head>
 <body>
 <script src="/static/js/embed.js"></script>
@@ -151,7 +156,7 @@ article{padding-top:10px}
 <audio id="audio" preload="metadata"></audio>
 
 <script>
-var COLORS=['#2b5cff','#00a870','#d48806','#e5484d','#7c3aed','#08979c','#c41d7f','#597ef7','#fa8c16','#8c8c8c'];
+var COLORS=['var(--spk-0)','var(--spk-1)','var(--spk-2)','var(--spk-3)','var(--spk-4)','var(--spk-5)','var(--spk-6)','var(--spk-7)','var(--spk-8)','var(--spk-9)'];
 var S={sid:'',data:null,audio:null,paras:[],cur:-1,speakers:[],excludeLow:false,
          polished:null,showPolished:false,polishEngine:'',mode:'orig',stats:null,seekT:0,
          edit:false,utts:[]};

@@ -5,7 +5,9 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <link rel="icon" href="data:,">
 <title>直播语记 LiveNotes · 多人语音直播结构化记录</title>
+<script src="/static/js/theme.js"></script>
 <link rel="stylesheet" href="/static/css/index.css">
+<link rel="stylesheet" href="/static/css/theme-dark.css">
 </head>
 <body>
 <script src="/static/js/embed.js"></script>
@@ -298,7 +300,7 @@
       <div class="set-hint" style="margin:6px 0">飞书卡片里的「收听页 / 回听」要在手机上打开，需要电脑和手机连同一个 Wi-Fi，并在这里开启局域网访问。</div>
       <label class="chk"><input type="checkbox" id="prefLan"> 允许同一局域网内的设备访问</label>
       <div class="set-hint" id="prefLanHint">未开启：链接只在这台电脑上能打开。</div>
-      <div class="set-hint" id="prefLanWarn" style="display:none;color:#d48806">服务没有登录密码：开启后同网段设备都能打开，只建议在自家网络使用。</div>
+      <div class="set-hint" id="prefLanWarn" style="display:none;color:var(--warn)">服务没有登录密码：开启后同网段设备都能打开，只建议在自家网络使用。</div>
       <div class="rowset" id="prefLanRow" style="display:none">
         <span style="flex:1;min-width:0;word-break:break-all" id="prefLanUrl"></span>
         <button class="ghost" id="prefLanCopy" style="flex:none">复制</button>

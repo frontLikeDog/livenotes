@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import os
 import struct
 import time
 import wave
@@ -93,6 +94,125 @@ def test_cleanup_originals_keeps_when_archive_missing(db, isolated_paths):
     # audio_path 仍指向 WAV，说明还没转码，不能删
     assert audio.cleanup_originals(db, days=0) == 0
     assert wav.is_file()
+
+
+# ---------------------------------------------------------------- 归档完整性
+#
+# 桌面壳退出会连 ffmpeg 一起回收：转码写到一半被杀，留下没有 moov 的
+# 半截 m4a。归档逻辑不能把这种文件当成成品，更不能因此删掉原 WAV。
+
+
+def _mp4_blob(moov: bool) -> bytes:
+    """最小可解析的 MP4：ftyp + mdat（+ moov）。"""
+    ftyp = struct.pack(">I", 24) + b"ftypM4A " + b"\x00" * 12
+    mdat = struct.pack(">I", 40) + b"mdat" + b"\x00" * 32
+    data = ftyp + mdat
+    if moov:
+        data += struct.pack(">I", 8) + b"moov"
+    return data
+
+
+def test_mp4_has_moov_detects_truncation(tmp_path):
+    good = tmp_path / "good.m4a"
+    good.write_bytes(_mp4_blob(True))
+    bad = tmp_path / "bad.m4a"
+    bad.write_bytes(_mp4_blob(False))
+    assert audio.mp4_has_moov(good)
+    assert not audio.mp4_has_moov(bad)
+    assert not audio.mp4_has_moov(tmp_path / "missing.m4a")
+
+
+def test_to_m4a_keeps_old_archive_when_ffmpeg_dies(isolated_paths, monkeypatch):
+    """ffmpeg 中途被杀：不能把半截输出留在正式路径上。"""
+    wav = isolated_paths / "audio" / "S_TEST.wav"
+    _write_wav(wav, 0.5)
+    dst = isolated_paths / "audio" / "S_TEST.m4a"
+    dst.write_bytes(b"OLD-ARCHIVE")
+
+    def fake_run(args, timeout=1800.0):
+        Path(args[-1]).write_bytes(b"PARTIAL")     # 模拟写到一半被杀
+        return False, "ffmpeg killed"
+
+    monkeypatch.setattr(audio, "_run", fake_run)
+    ok, _err = audio.to_m4a(wav, dst)
+    assert not ok
+    assert dst.read_bytes() == b"OLD-ARCHIVE"
+    assert not list(dst.parent.glob("*.part.m4a"))
+
+
+@pytest.mark.skipif(not audio.ffmpeg_path(), reason="没有 ffmpeg")
+def test_transcode_replaces_truncated_archive(db, isolated_paths):
+    wav = isolated_paths / "audio" / "S_TEST.wav"
+    _write_wav(wav, 1.0)
+    add_session(db, "S_TEST", audio_path=str(wav))
+    bad = wav.with_name("S_TEST.m4a")
+    bad.write_bytes(_mp4_blob(False))
+    os.utime(bad, (time.time() + 5, time.time() + 5))   # 比 WAV 新
+    store.set_audio_meta(db, "S_TEST", audio_path=str(bad), audio_format="m4a",
+                         audio_bytes=bad.stat().st_size,
+                         audio_original_path=str(wav))
+    out = audio.transcode_session("S_TEST", conn=db)
+    assert out == bad and out.is_file()
+    assert audio.mp4_has_moov(out)
+    assert out.stat().st_size > len(_mp4_blob(False))
+    assert store.get_session(db, "S_TEST")["audio_path"] == str(out)
+
+
+@pytest.mark.skipif(not audio.ffmpeg_path(), reason="没有 ffmpeg")
+def test_backfill_repairs_truncated_archive(db, isolated_paths):
+    wav = isolated_paths / "audio" / "S_TEST.wav"
+    _write_wav(wav, 1.0)
+    add_session(db, "S_TEST", audio_path=str(wav))
+    bad = wav.with_name("S_TEST.m4a")
+    bad.write_bytes(_mp4_blob(False))
+    store.set_audio_meta(db, "S_TEST", audio_path=str(bad), audio_format="m4a",
+                         audio_bytes=bad.stat().st_size,
+                         audio_original_path=str(wav))
+    assert audio.backfill_wavs(db) == 1          # 从原 WAV 重转修复
+    assert audio.mp4_has_moov(bad)
+    assert audio.backfill_wavs(db) == 0          # 已完整，不再重复跑
+
+
+def test_failed_repair_falls_back_to_wav(db, isolated_paths, monkeypatch):
+    """归档补不出来时不能让库继续指向半截 m4a——退回原 WAV 至少能播。"""
+    wav = isolated_paths / "audio" / "S_TEST.wav"
+    _write_wav(wav, 0.5)
+    bad = wav.with_name("S_TEST.m4a")
+    bad.write_bytes(_mp4_blob(False))
+    add_session(db, "S_TEST", audio_path=str(bad))
+    store.set_audio_meta(db, "S_TEST", audio_format="m4a",
+                         audio_bytes=bad.stat().st_size,
+                         audio_original_path=str(wav))
+    monkeypatch.setattr(audio, "to_m4a", lambda *a, **kw: (False, "no ffmpeg"))
+    assert audio.transcode_session("S_TEST", conn=db) is None
+    s = store.get_session(db, "S_TEST")
+    assert s["audio_path"] == str(wav)
+    assert s["audio_format"] == "wav"
+    assert s["audio_original_path"] is None
+
+
+def test_cleanup_originals_keeps_when_archive_truncated(db, isolated_paths):
+    wav = isolated_paths / "audio" / "S_TEST.wav"
+    _write_wav(wav, 0.5)
+    bad = wav.with_name("S_TEST.m4a")
+    bad.write_bytes(_mp4_blob(False))
+    add_session(db, "S_TEST", audio_path=str(bad))
+    store.set_audio_meta(db, "S_TEST", audio_format="m4a",
+                         audio_original_path=str(wav))
+    # 归档不完整：原 WAV 是唯一能播的，保留期到了也不能删
+    assert audio.cleanup_originals(db, days=0) == 0
+    assert wav.is_file()
+
+
+def test_cleanup_partials_removes_stale_files(isolated_paths):
+    old = isolated_paths / "audio" / "S_TEST.abc.part.m4a"
+    old.write_bytes(b"x")
+    stamp = time.time() - 2 * 86400
+    os.utime(old, (stamp, stamp))
+    fresh = isolated_paths / "audio" / "S_TEST.def.part.m4a"
+    fresh.write_bytes(b"x")
+    assert audio.cleanup_partials() == 1
+    assert not old.exists() and fresh.exists()
 
 
 @pytest.mark.skipif(not audio.ffmpeg_path(), reason="没有 ffmpeg")

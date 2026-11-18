@@ -1,0 +1,531 @@
+/* ==================================================================
+   深色主题（studio）：旧版页面统一换肤
+
+   这些页面在 2026-11 之前把颜色写死成亮色；深色壳打开时会出现
+   「黑壳 + 白页面」。本文件只覆盖颜色，不动布局与尺寸，按
+   :is(html[data-theme=dark], html[data-theme=studio]) 生效：
+
+   - 桌面壳：embed.js 把 ?theme=studio 落到 data-theme；
+   - 网页版：theme.js 跟随系统偏好或上次选择。
+
+   亮色页面完全不受影响。调色板与 p1.css / shell.css 的 studio
+   保持一致（暖黑 + 琥珀 + 低饱和语义色）。
+   ================================================================== */
+:is(html[data-theme="dark"], html[data-theme="studio"]){
+  color-scheme:dark;
+  --bg:#0A0C0F; --bg-rail:#0B0E12; --panel:#0F1318; --panel-2:#141920; --panel-3:#1A2028;
+  --surface:#0F1318; --paper:#0F1318;
+  --ink:#ECE9E2; --ink-strong:#F7F5EF; --text:#ECE9E2;
+  --muted:#9AA4B0; --faint:#6E7885;
+  --line:#1E242C; --line-2:#2B333D; --border:#1E242C;
+  --accent:#E7B669; --accent-soft:rgba(231,182,105,.12); --accent-line:rgba(231,182,105,.32);
+  --hover:#1B222B;
+  --warn:#E7B669; --warn-bg:rgba(231,182,105,.12); --warn-bd:rgba(231,182,105,.32);
+  --danger:#E97C70; --bad:#E97C70; --ok:#7FD3AE;
+  --hot:#E97C70; --warm:#D9B08C; --cool:#93B8DE;
+  --cat-substantive:#E7B669; --cat-question_consult:#D9B08C; --cat-host_control:#93B8DE;
+  --cat-chitchat:#8B95A3; --cat-ad:#E97C70;
+  --spk-0:#E7B669; --spk-1:#7FD3AE; --spk-2:#D9B08C; --spk-3:#E97C70;
+  --spk-4:#93B8DE; --spk-5:#78C9C3; --spk-6:#D49AAE; --spk-7:#9BB7C9;
+  --spk-8:#C9A87C; --spk-9:#8B95A3;
+  --primary-bg:#E7B669; --primary-ink:#231704;
+}
+
+/* ---------------------------------------------------------- 通用骨架 */
+:is(html[data-theme="dark"], html[data-theme="studio"]) body{background:var(--bg);color:var(--ink)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .top{
+  background:rgba(11,14,18,.94);border-bottom-color:var(--line)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .top a,
+:is(html[data-theme="dark"], html[data-theme="studio"]) .top .back{color:var(--muted)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .top a:hover,
+:is(html[data-theme="dark"], html[data-theme="studio"]) .top .back:hover{
+  background:var(--panel-2);color:var(--ink)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .top button{
+  background:var(--panel-2);border-color:var(--line-2);color:var(--ink)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .top button:hover{
+  border-color:var(--accent);color:var(--accent)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) button.ghost{
+  background:transparent;color:var(--muted)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) button.ghost:hover{
+  color:var(--accent)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .tab{
+  background:transparent;border-color:transparent;color:var(--muted)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .sess-row{
+  background:transparent;border-color:transparent}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .m-tabbar button{
+  background:transparent;color:var(--muted)}
+
+:is(html[data-theme="dark"], html[data-theme="studio"]) .card,
+:is(html[data-theme="dark"], html[data-theme="studio"]) .panel,
+:is(html[data-theme="dark"], html[data-theme="studio"]) .note,
+:is(html[data-theme="dark"], html[data-theme="studio"]) .row,
+:is(html[data-theme="dark"], html[data-theme="studio"]) .detail,
+:is(html[data-theme="dark"], html[data-theme="studio"]) .editbar,
+:is(html[data-theme="dark"], html[data-theme="studio"]) .eu,
+:is(html[data-theme="dark"], html[data-theme="studio"]) .lead,
+:is(html[data-theme="dark"], html[data-theme="studio"]) .pitem,
+:is(html[data-theme="dark"], html[data-theme="studio"]) .modal{
+  background:var(--panel);border-color:var(--line);color:var(--ink)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .panel h3{
+  background:var(--panel-2);border-bottom-color:var(--line)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .note b,
+:is(html[data-theme="dark"], html[data-theme="studio"]) .lead b{color:var(--ink-strong)}
+
+:is(html[data-theme="dark"], html[data-theme="studio"]) table{
+  background:var(--panel);border-color:var(--line)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) tbody tr{
+  background:var(--panel);border-color:var(--line)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) th{
+  background:var(--panel-2);color:var(--muted)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) th,
+:is(html[data-theme="dark"], html[data-theme="studio"]) td{border-bottom-color:var(--line)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) tr:hover td{background:var(--panel-2)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) tr:last-child td{border-bottom-color:transparent}
+
+:is(html[data-theme="dark"], html[data-theme="studio"]) input[type=text],
+:is(html[data-theme="dark"], html[data-theme="studio"]) input[type=search],
+:is(html[data-theme="dark"], html[data-theme="studio"]) input[type=password],
+:is(html[data-theme="dark"], html[data-theme="studio"]) textarea,
+:is(html[data-theme="dark"], html[data-theme="studio"]) select{
+  background:var(--panel-2);border-color:var(--line-2);color:var(--ink)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) input:focus,
+:is(html[data-theme="dark"], html[data-theme="studio"]) textarea:focus,
+:is(html[data-theme="dark"], html[data-theme="studio"]) select:focus{
+  border-color:var(--accent);outline-color:var(--accent-soft)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) select:disabled{
+  background:var(--panel-3);color:var(--faint)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) ::placeholder{color:var(--faint)}
+
+:is(html[data-theme="dark"], html[data-theme="studio"]) button.act,
+:is(html[data-theme="dark"], html[data-theme="studio"]) .btn,
+:is(html[data-theme="dark"], html[data-theme="studio"]) .seg button,
+:is(html[data-theme="dark"], html[data-theme="studio"]) .editbar button,
+:is(html[data-theme="dark"], html[data-theme="studio"]) .acts button,
+:is(html[data-theme="dark"], html[data-theme="studio"]) .acts a,
+:is(html[data-theme="dark"], html[data-theme="studio"]) .player button,
+:is(html[data-theme="dark"], html[data-theme="studio"]) button{
+  background:var(--panel-2);border-color:var(--line-2);color:var(--ink)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) button.act:hover,
+:is(html[data-theme="dark"], html[data-theme="studio"]) .btn:hover,
+:is(html[data-theme="dark"], html[data-theme="studio"]) .seg button:hover,
+:is(html[data-theme="dark"], html[data-theme="studio"]) .acts button:hover,
+:is(html[data-theme="dark"], html[data-theme="studio"]) .acts a:hover{border-color:var(--accent);color:var(--accent)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) button.act.primary,
+:is(html[data-theme="dark"], html[data-theme="studio"]) .btn.primary,
+:is(html[data-theme="dark"], html[data-theme="studio"]) .empty button,
+:is(html[data-theme="dark"], html[data-theme="studio"]) button.primary{
+  background:var(--accent);border-color:var(--accent);color:var(--primary-ink);font-weight:600}
+:is(html[data-theme="dark"], html[data-theme="studio"]) button.primary:hover,
+:is(html[data-theme="dark"], html[data-theme="studio"]) button.act.primary:hover,
+:is(html[data-theme="dark"], html[data-theme="studio"]) .btn.primary:hover{
+  background:#F0C98B;border-color:#F0C98B;color:var(--primary-ink)}
+
+:is(html[data-theme="dark"], html[data-theme="studio"]) .tabs{
+  background:var(--panel-2);border-color:var(--line)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .tabs button{
+  background:var(--panel-2);border-right-color:var(--line);color:var(--muted)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .tabs button.on{
+  background:var(--accent-soft);color:var(--accent)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .chip{
+  background:var(--panel-2);border-color:var(--line-2);color:var(--muted)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .chip.on{
+  background:var(--accent-soft);border-color:var(--accent-line);color:var(--accent)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .pitem{border-bottom-color:var(--line)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .pitem:hover{background:var(--panel-2)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .pitem.on{
+  background:var(--accent-soft);box-shadow:inset 3px 0 0 var(--accent)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .bulk{
+  background:var(--accent-soft);border-color:var(--accent-line);color:var(--accent)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .bulk.undo{
+  background:rgba(231,182,105,.10);border-color:var(--accent-line);color:#E7C69B}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .toast{
+  background:var(--panel-3);border:1px solid var(--line-2);color:var(--ink)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .bar{background:var(--line-2)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .bar i{background:var(--accent)}
+
+/* ------------------------------------------------------------- 文件中心 */
+:is(html[data-theme="dark"], html[data-theme="studio"]) .reason{
+  background:rgba(233,124,112,.13);color:#F0A79D;border-color:rgba(233,124,112,.30)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .reason.demo{
+  background:rgba(147,184,222,.12);color:#A9C8E8;border-color:rgba(147,184,222,.28)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .reason.empty{
+  background:rgba(231,182,105,.12);color:var(--accent);border-color:var(--accent-line)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .reason.dup{
+  background:rgba(176,150,220,.13);color:#C6B0E8;border-color:rgba(176,150,220,.30)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .dot.has{background:var(--ok)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .livedot{background:var(--danger)}
+
+/* ------------------------------------------------------------- 人物档案 */
+:is(html[data-theme="dark"], html[data-theme="studio"]) .panel h3{
+  background:var(--panel-2);color:var(--muted)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .pitem .mt,
+:is(html[data-theme="dark"], html[data-theme="studio"]) .hint{color:var(--muted)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .tag.auto{
+  background:rgba(127,211,174,.13);color:var(--ok)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .tag.cand{
+  background:rgba(231,182,105,.13);color:var(--accent)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .tag.confirmed{
+  background:rgba(147,184,222,.13);color:#A9C8E8}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .tag.rejected{
+  background:rgba(233,124,112,.13);color:var(--danger)}
+
+/* --------------------------------------------------------------- 全文稿 */
+:is(html[data-theme="dark"], html[data-theme="studio"]) .chip{background:var(--panel-2)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .p:hover{background:var(--panel-2)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .p.on{background:var(--accent-soft)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .p.low p{color:var(--muted)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .pnote{color:var(--ok)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .seg button{
+  background:var(--panel-2);border-right-color:var(--line);color:var(--muted)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .seg button.on{
+  background:var(--accent-soft);color:var(--accent)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .dl .tag{
+  background:var(--panel-3);color:var(--muted)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .del{
+  color:#F0A79D;background:rgba(233,124,112,.14)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .ins{
+  color:#8ED9B6;background:rgba(127,211,174,.13)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .chg{color:var(--faint)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .chg .m{color:var(--danger)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .chg .p{color:var(--ok)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .editbar select,
+:is(html[data-theme="dark"], html[data-theme="studio"]) .eu select{
+  background:var(--panel-2);border-color:var(--line-2);color:var(--ink)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .eu textarea{
+  background:var(--panel-2);border-color:var(--line-2);color:var(--ink)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .eu.dirty textarea{
+  border-color:var(--accent-line);background:rgba(231,182,105,.07)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .eu .saved{color:var(--ok)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .eu.dirty .saved{color:var(--warn)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .err{color:var(--danger)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .player{
+  background:rgba(15,19,24,.96);color:var(--ink)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .player button{
+  background:var(--panel-3);border-color:var(--line-2);color:var(--ink)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .player .t{color:var(--muted)}
+
+/* --------------------------------------------------------------- 高光榜 */
+:is(html[data-theme="dark"], html[data-theme="studio"]) .card:hover{
+  border-color:var(--accent-line);box-shadow:0 2px 12px rgba(231,182,105,.07)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .card.on{
+  border-color:var(--accent);box-shadow:0 2px 14px rgba(231,182,105,.14)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .b-both{
+  color:var(--primary-ink);background:var(--hot)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .b-live{
+  color:#E7C69B;background:rgba(231,182,105,.13)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .b-info{
+  color:#A9C8E8;background:rgba(147,184,222,.13)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .b-manual,
+:is(html[data-theme="dark"], html[data-theme="studio"]) .b-tag{
+  color:var(--accent);background:rgba(231,182,105,.13)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .p0{
+  color:#F0A79D;background:rgba(233,124,112,.13);border-color:rgba(233,124,112,.30)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .hook,
+:is(html[data-theme="dark"], html[data-theme="studio"]) .txt{color:var(--ink-strong)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .card.info .why{color:#A9C8E8}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .t:hover{
+  border-color:var(--line-2);color:var(--accent)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .kw{
+  background:var(--accent-soft);border-color:var(--accent-line);color:var(--accent)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .kw i:hover{color:var(--danger)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .kws input{
+  border-color:var(--line-2);color:var(--ink)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .fbstat .ok{color:var(--ok)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .fbstat .ng{color:var(--warn)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .acts .fb button.on{
+  background:var(--accent-soft);border-color:var(--accent-line);color:var(--accent)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .acts .fb button.dn.on{
+  background:rgba(233,124,112,.13);border-color:rgba(233,124,112,.30);color:var(--danger)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .player{
+  background:rgba(15,19,24,.97);border-top-color:var(--line)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .player .bar{background:var(--panel-3)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .player button{
+  background:var(--panel-2);border-color:var(--line-2);color:var(--ink)}
+
+/* ------------------------------------------------------- 术语表 / 推送 */
+:is(html[data-theme="dark"], html[data-theme="studio"]) .row input{
+  background:var(--panel-2);border-color:var(--line-2);color:var(--ink)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .row .del{
+  background:transparent;color:var(--danger)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) #status{color:var(--ok)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .lead code,
+:is(html[data-theme="dark"], html[data-theme="studio"]) .push-lead code{
+  background:var(--panel-3);color:var(--ink)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .chip b{color:var(--ink)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .badge.sent{
+  background:rgba(127,211,174,.13);color:var(--ok)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .badge.skipped{
+  background:var(--panel-3);color:var(--muted)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .badge.failed{
+  background:rgba(233,124,112,.13);color:var(--danger)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .badge.pending{
+  background:rgba(231,182,105,.13);color:var(--accent)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .why{color:var(--ink)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .reason{color:var(--accent)}
+
+/* ------------------------------------------------------------- 实时监听 */
+:is(html[data-theme="dark"], html[data-theme="studio"]) .last,
+:is(html[data-theme="dark"], html[data-theme="studio"]) .card-line{color:var(--muted)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .empty{
+  background:var(--panel);border-color:var(--line)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .focusbar{
+  background:var(--accent-soft);border-color:var(--accent-line);color:#E7C69B}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .focusbar.bad{
+  background:rgba(233,124,112,.12);border-color:rgba(233,124,112,.30);color:#F0A79D}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .focusbar a{color:var(--accent)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) tr.focus td{background:var(--panel-2)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .card.focus{
+  border-color:var(--accent-line);box-shadow:0 0 0 1px var(--accent-line) inset}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .card-btns button.primary{
+  color:var(--accent)}
+
+/* ===================================================== 工作台（index） */
+:is(html[data-theme="dark"], html[data-theme="studio"]) .topbar{
+  background:var(--bg-rail);border-bottom-color:var(--line)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .topbar .badge{
+  background:var(--accent-soft);border-color:var(--accent-line);color:var(--accent)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .topbar .badge.mixed{
+  background:rgba(231,182,105,.12);color:var(--accent);border-color:var(--accent-line)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .notice{
+  background:var(--warn-bg);border-color:var(--warn-bd);color:#E7C69B}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .notice b{color:#F0C98B}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .panel h3{
+  background:var(--panel-2)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .sec{border-bottom-color:var(--line)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .timeline,
+:is(html[data-theme="dark"], html[data-theme="studio"]) .list-head,
+:is(html[data-theme="dark"], html[data-theme="studio"]) .sess-search,
+:is(html[data-theme="dark"], html[data-theme="studio"]) .lp-head,
+:is(html[data-theme="dark"], html[data-theme="studio"]) .cgrp-h,
+:is(html[data-theme="dark"], html[data-theme="studio"]) .ws-rhead{
+  background:var(--panel-2);border-color:var(--line)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .chip{background:var(--panel-2)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .chip.on{
+  border-color:var(--accent-line);color:var(--accent)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) #tlBars{border-bottom-color:var(--line-2)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) #tlHead{
+  box-shadow:0 0 0 1.5px rgba(10,12,15,.95),0 0 8px rgba(233,124,112,.75)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) #tlHead::before{
+  border-color:var(--panel);box-shadow:0 1px 4px rgba(0,0,0,.5)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) #tlFocus{
+  background:rgba(10,12,15,.5);box-shadow:inset 0 0 0 1px rgba(10,12,15,.8)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .bucket:hover{background:var(--panel-2)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .bucket.focus{
+  background:rgba(231,182,105,.16)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .bucket.sel{
+  background:rgba(231,182,105,.22)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .tl-focus-tag{color:var(--danger)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .urow{
+  border-bottom-color:var(--line)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .urow.hl{
+  background:rgba(231,182,105,.13);box-shadow:inset 3px 0 0 var(--accent)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .urow.focusrow{
+  background:rgba(231,182,105,.16);box-shadow:inset 3px 0 0 var(--danger);
+  animation:frowDark 2s ease-out}
+@keyframes frowDark{
+  0%{background:rgba(231,182,105,.32)}
+  60%{background:rgba(231,182,105,.16)}
+  100%{background:transparent}
+}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .tag.warn{
+  background:rgba(233,124,112,.13);border-color:rgba(233,124,112,.30);color:var(--danger)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .tag.lowv{
+  background:var(--panel-3)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .tag.cat{
+  color:var(--primary-ink)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .tag.hi{
+  background:rgba(231,182,105,.14);color:var(--accent);border-color:var(--accent-line)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .evidence-box{
+  background:rgba(231,182,105,.07);border-bottom-color:var(--accent-line)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .evidence-box .et{color:var(--accent)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .tab.on{
+  background:var(--accent-soft);border-color:var(--accent-line);color:var(--accent)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .ov{
+  background:rgba(231,182,105,.06);border-left-color:var(--accent)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .stat{
+  background:var(--panel-2);color:var(--muted)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .caveats{
+  background:var(--warn-bg);border-color:var(--warn-bd);color:#E7C69B}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .point{
+  background:var(--panel)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .point:hover{
+  border-color:var(--accent-line);box-shadow:0 1px 5px rgba(231,182,105,.08)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .pt-g{color:var(--ink)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .quote{
+  background:var(--panel-2);border-left-color:var(--line-2)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .sess-btn{
+  background:var(--panel-2);border-color:var(--line-2)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .sess-btn:hover{
+  border-color:var(--accent-line);background:var(--panel-2);color:var(--ink)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .sess.open .sess-btn{
+  border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .sess-menu{
+  background:var(--panel);border-color:var(--line-2);
+  box-shadow:0 14px 38px rgba(0,0,0,.5)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .sess-row.on{
+  background:var(--accent-soft);border-color:var(--accent-line)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .sr-sub .sep{color:var(--line-2)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .sr-audio{
+  background:rgba(127,211,174,.13);color:var(--ok)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .sr-audio.no{
+  background:var(--panel-3);color:var(--faint)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .modal p,
+:is(html[data-theme="dark"], html[data-theme="studio"]) .modal li{color:var(--ink)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .modal h4{color:var(--accent)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .p-btn{
+  background:var(--accent);border-color:var(--accent);color:var(--primary-ink)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .p-btn:hover{
+  background:#F0C98B;border-color:#F0C98B;color:var(--primary-ink)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .p-btn:disabled{
+  background:var(--panel-3);border-color:var(--panel-3);color:var(--faint)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) input.p-range{
+  background:linear-gradient(90deg,var(--accent) var(--p,0%),var(--line-2) var(--p,0%))}
+:is(html[data-theme="dark"], html[data-theme="studio"]) input.p-range::-webkit-slider-thumb{
+  background:var(--bg);border-color:var(--accent);box-shadow:0 1px 4px rgba(0,0,0,.5)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .grade{color:var(--primary-ink)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .grade.B{background:#C9A15C}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .dim{background:var(--panel)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .dim-bar{background:var(--panel-3)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .dim-h b{color:var(--accent)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .hit b{color:var(--accent)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .livebtn{
+  background:rgba(233,124,112,.12);border-color:rgba(233,124,112,.32);color:#F0A79D}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .livebtn:hover{
+  background:rgba(233,124,112,.18);border-color:rgba(233,124,112,.5);color:#F0A79D}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .badge.live{
+  background:rgba(233,124,112,.12);color:#F0A79D;border-color:rgba(233,124,112,.32)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .livepanel{
+  background:var(--panel);border-color:var(--line-2);
+  box-shadow:0 16px 48px rgba(0,0,0,.55)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .lp-body ol{color:var(--ink)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .lp-body code{
+  background:var(--panel-3)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .lp-meter{background:var(--panel-3)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .lp-list{
+  background:var(--panel-2);border-color:var(--line-2)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .lp-u{border-bottom-color:var(--line)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .lp-u.lp-partial .lp-x{color:var(--muted)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .cgrp .point{border-bottom-color:var(--line)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .crosst td{border-bottom-color:var(--line)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .ws-right{
+  background:var(--panel);color:var(--ink)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .ws-list{
+  background:var(--panel);color:var(--ink)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .ws-list .lp-u{border-bottom-color:var(--line)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .spkmenu{
+  background:var(--panel);border-color:var(--line-2);
+  box-shadow:0 12px 32px rgba(0,0,0,.5)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .spkmenu .mh{
+  border-bottom-color:var(--line)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .spkmenu .mi:hover{
+  background:var(--accent-soft)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .spkmenu .mi.new{
+  border-top-color:var(--line)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .lp-s:hover{background:var(--accent-soft)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .marks-bar{
+  background:rgba(231,182,105,.07);border-bottom-color:var(--accent-line);color:var(--accent)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .marks-bar .mk{
+  background:rgba(231,182,105,.12);border-color:var(--accent-line);color:var(--accent)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .marks-bar .mk:hover{
+  background:rgba(231,182,105,.2);border-color:var(--accent)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .dlg{
+  background:var(--panel);border-color:var(--line-2);color:var(--ink)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .dlg p{color:var(--muted)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .dlg input:focus{
+  border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .sloading .spin{
+  border-color:var(--line-2);border-top-color:var(--accent)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .sloading b{color:var(--ink)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .ebar.llm{
+  background:var(--accent-soft);border-color:var(--accent-line);color:var(--accent)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .ebar.local{
+  background:var(--panel-2);border-color:var(--line);color:var(--muted)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .runbar{
+  background:var(--accent-soft);border-color:var(--accent-line);color:var(--accent)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .runbar .rb-x,
+:is(html[data-theme="dark"], html[data-theme="studio"]) .runbar .rb-stage{color:var(--muted)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .runbar .rb-track{background:var(--panel-3)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .runbar .rb-fill{background:var(--accent)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .runbar .rb-stage .d{color:var(--ok)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .runbar .rb-stage .f{color:var(--danger)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .tbar{
+  background:var(--panel-2);border-color:var(--line-2);color:var(--accent)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .tbar .tb-k{color:var(--muted)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .tbar .tb-t{color:var(--ink-strong)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .tbar .tb-btn{
+  background:var(--accent);border-color:var(--accent);color:var(--primary-ink)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .tbar .tb-btn.ghost{
+  background:var(--panel);border-color:var(--accent-line);color:var(--accent)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .tbar .tb-alts button{
+  background:var(--panel);border-color:var(--accent-line);color:var(--accent)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .tbar .tb-note{color:var(--faint)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .tbar .tb-badge{
+  background:var(--panel-3);color:var(--accent)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .gsearch input{
+  background:var(--panel-2)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .gres{
+  background:var(--panel);border-color:var(--line-2);
+  box-shadow:0 12px 32px rgba(0,0,0,.5)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .gres .gi{
+  border-bottom-color:var(--line)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .gres .gi:hover{
+  background:var(--panel-2)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .gres .gi .ex{color:var(--ink)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .set-mask{
+  background:rgba(0,0,0,.55)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .set-drawer{
+  background:var(--panel);border-left-color:var(--line);
+  box-shadow:-12px 0 40px rgba(0,0,0,.55)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .prow{
+  background:var(--panel-2);border-color:var(--line)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .prow:hover{
+  border-color:var(--accent-line)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .prow.on{
+  background:var(--accent-soft);border-color:var(--accent)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .prow .pact button:hover{
+  background:var(--accent-soft);color:var(--accent)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .prow .pact button.del:hover{
+  background:rgba(233,124,112,.14);color:var(--danger)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .pempty{
+  border-color:var(--line)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .set-prof span{
+  background:var(--panel-2);border-color:var(--line);color:var(--muted)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .set-prof span.on{
+  background:var(--accent-soft);border-color:var(--accent-line);color:var(--accent)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .set-prov button{
+  background:var(--panel-2);border-color:var(--line);color:var(--muted)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .set-prov button.on{
+  background:var(--accent-soft);border-color:var(--accent-line);color:var(--accent)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .set-models span{
+  color:var(--muted)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .set-models span.ok{
+  border-color:rgba(127,211,174,.35);background:rgba(127,211,174,.10);color:var(--ok)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .set-models span.bad{
+  border-color:rgba(233,124,112,.35);background:rgba(233,124,112,.10);color:var(--danger)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .set-status{
+  background:var(--panel-2);color:var(--muted)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .set-status.ok{
+  background:rgba(127,211,174,.10);color:var(--ok)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .set-status.err{
+  background:rgba(233,124,112,.10);color:var(--danger)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .set-body input[type=text],
+:is(html[data-theme="dark"], html[data-theme="studio"]) .set-body input[type=password]{
+  background:var(--panel-2)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .dlg input{
+  background:var(--bg);border-color:var(--line-2);color:var(--ink)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .dlg-sug button{
+  background:var(--panel-2);border-color:var(--line-2);color:var(--muted)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .dlg-actions button{
+  background:var(--panel-2);border-color:var(--line-2);color:var(--ink)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .dlg-actions .ok{
+  background:var(--accent);border-color:var(--accent);color:var(--primary-ink)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .m-tabbar{
+  background:var(--panel);border-top-color:var(--line)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .m-tabbar button.on{
+  background:var(--accent-soft);color:var(--accent)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .m-sheet .card{
+  background:var(--panel)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .m-sheet .mb-grid button{
+  background:var(--panel-2);color:var(--ink)}
+:is(html[data-theme="dark"], html[data-theme="studio"]) .m-sheet .mb-grid button:active{
+  background:var(--accent-soft);color:var(--accent)}

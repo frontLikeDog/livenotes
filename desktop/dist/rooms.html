@@ -2,6 +2,32 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
+<script>
+(function(){
+  function paint(v){
+    var dark = v === 'dark' || (v === 'system' && window.matchMedia &&
+      window.matchMedia('(prefers-color-scheme: dark)').matches);
+    var r = document.documentElement;
+    r.dataset.theme = dark ? 'dark' : 'light';
+    try { r.style.colorScheme = dark ? 'dark' : 'light'; } catch (e) {}
+  }
+  var choice = 'dark';
+  try { choice = localStorage.getItem('ln.theme') || 'dark'; } catch (e) {}
+  paint(choice);
+  window.addEventListener('storage', function(e){
+    if (e.key !== 'ln.theme') return;
+    choice = e.newValue || 'dark';
+    paint(choice);
+  });
+  try {
+    var mq = window.matchMedia('(prefers-color-scheme: dark)');
+    var onScheme = function(){ if (choice === 'system') paint(choice); };
+    if (mq.addEventListener) mq.addEventListener('change', onScheme);
+    else if (mq.addListener) mq.addListener(onScheme);
+  } catch (e) {}
+})();
+</script>
+
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>LiveNotes · 多房间采集 Spike</title>
 <style>
@@ -29,6 +55,21 @@
   .status{font-size:11.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
   #stage{position:fixed;left:0;right:0;top:128px;bottom:0;pointer-events:none}
   .caption{position:absolute;left:12px;bottom:8px;font-size:11px;color:var(--muted);pointer-events:none}
+</style>
+<style>
+html[data-theme="dark"]{
+  color-scheme:dark;
+  --ink:#ECE9E2;--muted:#9AA4B0;--line:#1E242C;--line-2:#2B333D;--accent:#E7B669;
+  --bad:#E97C70;--ok:#7FD3AE;--bg:#0A0C0F;--surface:#0F1318;
+}
+html[data-theme="dark"] header{background:#0F1318;border-bottom-color:var(--line)}
+html[data-theme="dark"] input[type=text]{background:#141920;border-color:var(--line-2);color:var(--ink)}
+html[data-theme="dark"] button{background:#141920;border-color:var(--line-2);color:var(--ink)}
+html[data-theme="dark"] button:hover{border-color:var(--accent);color:var(--accent)}
+html[data-theme="dark"] button.primary{background:var(--accent);border-color:var(--accent);color:#231704}
+html[data-theme="dark"] .pill{background:#1A2028;color:var(--muted)}
+html[data-theme="dark"] .pill.ok{background:rgba(127,211,174,.12);color:var(--ok)}
+html[data-theme="dark"] .pill.bad{background:rgba(233,124,112,.12);color:var(--bad)}
 </style>
 </head>
 <body>

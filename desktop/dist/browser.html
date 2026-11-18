@@ -2,6 +2,32 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
+<script>
+(function(){
+  function paint(v){
+    var dark = v === 'dark' || (v === 'system' && window.matchMedia &&
+      window.matchMedia('(prefers-color-scheme: dark)').matches);
+    var r = document.documentElement;
+    r.dataset.theme = dark ? 'dark' : 'light';
+    try { r.style.colorScheme = dark ? 'dark' : 'light'; } catch (e) {}
+  }
+  var choice = 'dark';
+  try { choice = localStorage.getItem('ln.theme') || 'dark'; } catch (e) {}
+  paint(choice);
+  window.addEventListener('storage', function(e){
+    if (e.key !== 'ln.theme') return;
+    choice = e.newValue || 'dark';
+    paint(choice);
+  });
+  try {
+    var mq = window.matchMedia('(prefers-color-scheme: dark)');
+    var onScheme = function(){ if (choice === 'system') paint(choice); };
+    if (mq.addEventListener) mq.addEventListener('change', onScheme);
+    else if (mq.addListener) mq.addListener(onScheme);
+  } catch (e) {}
+})();
+</script>
+
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>LiveNotes · 应用内浏览器</title>
 <style>
@@ -70,6 +96,31 @@
   .empty p{max-width:560px;line-height:1.9;margin:0;font-size:12.5px}
   .empty .kbd{display:inline-block;padding:1px 7px;border:1px solid var(--line);border-radius:6px;
     background:#fff;color:#465062;font-size:11.5px}
+</style>
+<style>
+html[data-theme="dark"]{
+  --bg:#0A0C0F;--panel:#0F1318;--ink:#ECE9E2;--muted:#9AA4B0;--faint:#6E7885;
+  --line:#1E242C;--line-2:#2B333D;--accent:#E7B669;--accent-soft:rgba(231,182,105,.12);
+  --ok:#7FD3AE;--warn:#E7B669;--bad:#E97C70;
+}
+html[data-theme="dark"] .chrome{background:var(--panel);border-bottom-color:var(--line)}
+html[data-theme="dark"] .tab{background:#141920;color:var(--muted);border-color:var(--line)}
+html[data-theme="dark"] .tab:hover{background:#1B222B}
+html[data-theme="dark"] .tab.active{background:var(--panel);color:var(--ink);
+  border-color:var(--line-2);box-shadow:0 -1px 0 var(--accent) inset}
+html[data-theme="dark"] .tab .dot.off{background:#3A4450}
+html[data-theme="dark"] .tab .tclose:hover{background:#2B333D;color:var(--bad)}
+html[data-theme="dark"] .newtab:hover{background:#1B222B;color:var(--accent)}
+html[data-theme="dark"] .navbtn{color:var(--muted)}
+html[data-theme="dark"] .navbtn:hover{background:#1B222B;color:var(--accent)}
+html[data-theme="dark"] .addr{background:#141920;border-color:var(--line-2);color:var(--ink)}
+html[data-theme="dark"] .addr:focus{background:#0F1318;border-color:var(--accent);
+  box-shadow:0 0 0 3px var(--accent-soft)}
+html[data-theme="dark"] .btn{background:#141920;border-color:var(--line-2);color:var(--ink)}
+html[data-theme="dark"] .btn:hover{border-color:var(--accent);color:var(--accent)}
+html[data-theme="dark"] .btn.primary{background:var(--accent);border-color:var(--accent);color:#231704}
+html[data-theme="dark"] .status{background:#0B0E12;border-top-color:var(--line);color:var(--muted)}
+html[data-theme="dark"] .empty .kbd{background:#141920;border-color:var(--line-2);color:var(--ink)}
 </style>
 </head>
 <body>
