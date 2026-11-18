@@ -386,6 +386,10 @@ CREATE TABLE IF NOT EXISTS qa_answers (
     feedback       TEXT NOT NULL DEFAULT '',   -- up|down|''
     job_id         TEXT NOT NULL DEFAULT '',
     error          TEXT NOT NULL DEFAULT '',
+    -- 追问上下文：thread_id = 首问的 id（首问自身为空，第一次追问时回填）；
+    -- parent_id = 上一轮回答的 id。只带上一轮，不塞整个对话（docs/41 §4.3）。
+    thread_id      TEXT NOT NULL DEFAULT '',
+    parent_id      INTEGER NOT NULL DEFAULT 0,
     created_at     TEXT NOT NULL,
     updated_at     TEXT NOT NULL
 );
@@ -537,6 +541,12 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE push_log ADD COLUMN card_json TEXT DEFAULT ''")
     if pcols and "features_json" not in pcols:
         conn.execute("ALTER TABLE push_log ADD COLUMN features_json TEXT DEFAULT '{}'")
+    # 追问：老库的问答没有线程概念，补列后老数据仍是独立问答（thread_id 为空）。
+    qacols = {r["name"] for r in conn.execute("PRAGMA table_info(qa_answers)")}
+    if qacols and "thread_id" not in qacols:
+        conn.execute("ALTER TABLE qa_answers ADD COLUMN thread_id TEXT NOT NULL DEFAULT ''")
+    if qacols and "parent_id" not in qacols:
+        conn.execute("ALTER TABLE qa_answers ADD COLUMN parent_id INTEGER NOT NULL DEFAULT 0")
     if pcols and "feedback" not in pcols:
         conn.execute("ALTER TABLE push_log ADD COLUMN feedback INTEGER DEFAULT 0")
     if pcols and "feedback_at" not in pcols:
@@ -2730,13 +2740,14 @@ def _library_stats_conn(conn: sqlite3.Connection) -> dict:
 
 # ---------------------------------------------------------------- P1：问笔记
 
-def qa_create(conn: sqlite3.Connection, question: str, scope: dict) -> dict:
+def qa_create(conn: sqlite3.Connection, question: str, scope: dict,
+              thread_id: str = "", parent_id: int = 0) -> dict:
     ts = now()
     cur = conn.execute(
-        "INSERT INTO qa_answers(question,scope_json,state,created_at,updated_at) "
-        "VALUES (?,?,'running',?,?)",
+        "INSERT INTO qa_answers(question,scope_json,state,thread_id,parent_id,"
+        "created_at,updated_at) VALUES (?,?,'running',?,?,?,?)",
         (str(question or "")[:500], json.dumps(scope or {}, ensure_ascii=False),
-         ts, ts))
+         str(thread_id or ""), int(parent_id or 0), ts, ts))
     conn.commit()
     return qa_get(conn, int(cur.lastrowid)) or {}
 
@@ -2792,7 +2803,7 @@ def qa_recent(conn: sqlite3.Connection, limit: int = 10) -> list[dict]:
 
 
 def qa_find_running(conn: sqlite3.Connection, question: str,
-                    session_id: str = "") -> dict | None:
+                    session_id: str = "", parent_id: int = 0) -> dict | None:
     row = conn.execute(
         "SELECT * FROM qa_answers WHERE state='running' AND question=? "
         "ORDER BY id DESC LIMIT 1", (str(question or "")[:500],)).fetchone()
@@ -2801,7 +2812,22 @@ def qa_find_running(conn: sqlite3.Connection, question: str,
     d = _qa_row(dict(row))
     if session_id and str((d.get("scope") or {}).get("session_id") or "") != session_id:
         return None
+    # 同一个问题在不同追问线程里含义不同，不能复用另一条线程的在跑任务。
+    if int(d.get("parent_id") or 0) != int(parent_id or 0):
+        return None
     return d
+
+
+def qa_thread_root(conn: sqlite3.Connection, qid: int) -> dict | None:
+    """顺着 parent_id 回到首问；用于给首问补 thread_id。最多走 20 层防环。"""
+    row = qa_get(conn, qid)
+    seen: set[int] = set()
+    while row and int(row.get("parent_id") or 0) and int(row["id"]) not in seen:
+        seen.add(int(row["id"]))
+        if len(seen) > 20:
+            return None
+        row = qa_get(conn, int(row["parent_id"]))
+    return row
 
 
 def qa_prune(conn: sqlite3.Connection, keep: int = 200) -> int:

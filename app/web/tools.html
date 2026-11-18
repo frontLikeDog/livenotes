@@ -1,0 +1,389 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#0A0C0F">
+<title>内容助手 · LiveNotes</title>
+<script>
+try{var _t=new URLSearchParams(location.search).get('theme');if(_t)document.documentElement.dataset.theme=(_t==='paper'?'light':'dark')}catch(e){}
+</script>
+<script src="/static/js/theme.js"></script>
+<link rel="stylesheet" href="/static/css/p1.css">
+<style>
+.tool-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px;align-items:start}
+.tool-card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px}
+.tool-card h2{margin:0 0 4px;font-size:15px}
+.tool-card .lead{margin:0 0 14px;font-size:12px;line-height:1.7;color:var(--muted)}
+.tool-row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:14px}
+.tool-row select{flex:1;min-width:180px;height:34px;border:1px solid var(--line);
+  border-radius:8px;background:var(--panel-2);color:var(--ink);font:inherit;font-size:12px;padding:0 8px}
+.tool-stats{display:flex;flex-wrap:wrap;gap:8px;margin:4px 0 14px}
+.tool-stat{background:var(--panel-2);border:1px solid var(--line);border-radius:8px;
+  padding:7px 10px;font-size:11px;color:var(--muted)}
+.tool-stat b{display:block;font-size:16px;color:var(--ink);font-variant-numeric:tabular-nums}
+.tool-people{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:14px}
+.tool-topic{border-top:1px solid var(--line);padding:12px 0}
+.tool-topic:first-of-type{border-top:0}
+.tool-topic h3{margin:0 0 8px;font-size:13px;display:flex;align-items:center;gap:8px}
+.tool-badge{font-size:10px;padding:1px 6px;border-radius:5px;background:var(--amber-soft);
+  color:var(--amber);font-weight:600}
+.tool-entry{padding:7px 0 7px 10px;border-left:2px solid var(--line);margin-bottom:6px}
+.tool-entry .who{font-size:12px;font-weight:650}
+.tool-entry .who span{font-weight:400;color:var(--faint);font-size:10.5px;margin-left:6px}
+.tool-entry .st{font-size:12.5px;line-height:1.65;margin-top:2px}
+.tool-entry .qv{font-size:11px;line-height:1.6;color:var(--faint);margin-top:3px}
+.tool-entry .tm{font-size:10.5px;color:var(--faint);margin-top:3px}
+.tool-empty{padding:26px 8px;text-align:center;color:var(--faint);font-size:12px;line-height:1.8}
+.tool-q{font-size:12px;line-height:1.7;color:var(--muted);padding:5px 0}
+.tool-foot{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}
+.person-topics .claim{border-top:1px solid var(--line);padding:10px 0}
+.person-topics .claim:first-child{border-top:0}
+@media(max-width:900px){.tool-grid{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<script src="/static/js/embed.js"></script>
+
+<header class="topbar" data-ln-region="topbar">
+  <a class="brand" href="/">
+    <span class="brand-mark" aria-hidden="true">L</span>
+    <span class="brand-name">LiveNotes<span>实时语记</span></span>
+  </a>
+  <span class="topbar-divider" aria-hidden="true"></span>
+  <nav class="pagenav" aria-label="页面">
+    <a href="/library">笔记库</a>
+    <a href="/follows">关注</a>
+    <a href="/weekly">周报</a>
+    <a href="/tools" class="is-on" aria-current="page">内容助手</a>
+  </nav>
+  <span class="grow"></span>
+  <button class="top-search" type="button" data-p1-search aria-label="搜索笔记或提问">
+    <svg class="od-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+      stroke-linecap="round" aria-hidden="true" style="--od-icon-size:14px">
+      <circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/>
+    </svg>
+    <span>搜索笔记</span><kbd>Ctrl K</kbd>
+  </button>
+  <a class="icon-btn" href="/" title="返回首页" aria-label="返回首页">
+    <svg class="od-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+      stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="--od-icon-size:16px">
+      <path d="m4 10.5 8-6.5 8 6.5V20H4Z"/><path d="M9.5 20v-5.5h5V20"/>
+    </svg>
+  </a>
+</header>
+
+<main class="stage" data-ln-region="stage">
+  <div class="page page-wide">
+    <header class="page-head">
+      <div class="page-head-main">
+        <p class="eyebrow">CONTENT TOOLS</p>
+        <h1>内容助手</h1>
+        <p class="page-lead">把已经记下的场次变成能发出去的东西：一份圆桌摘要，或一张上麦者名片。都在本机完成。</p>
+      </div>
+    </header>
+
+    <div class="tool-grid">
+      <section class="tool-card" id="rtCard">
+        <h2>多人圆桌摘要</h2>
+        <p class="lead">选一场至少三个人上麦的记录，整理出「有几个人、每个人说了什么、分歧在哪、哪个问题没人答」。不新增模型调用，只读已有笔记。</p>
+        <div class="tool-row">
+          <select id="rtSession" aria-label="选择场次"></select>
+          <button class="btn btn-primary btn-sm" type="button" id="rtBuild">生成摘要</button>
+        </div>
+        <div id="rtBody"><div class="tool-empty">选一场记录，生成摘要。</div></div>
+        <div class="tool-foot">
+          <a class="btn btn-ghost btn-sm" id="rtExport" href="#" hidden>导出 Markdown</a>
+        </div>
+      </section>
+
+      <section class="tool-card" id="pcCard">
+        <h2>上麦者名片</h2>
+        <p class="lead">从你的人物底库里选一个人，把他讲过的主题和最近一次主张做成一张可分享的只读名片。</p>
+        <div class="tool-row">
+          <select id="pcPerson" aria-label="选择人物"></select>
+          <button class="btn btn-primary btn-sm" type="button" id="pcBuild">生成名片</button>
+        </div>
+        <div id="pcBody"><div class="tool-empty">底库里有人的话，这里会出现名片。</div></div>
+        <div class="tool-foot">
+          <a class="btn btn-ghost btn-sm" id="pcOpen" href="#" hidden>打开名片页</a>
+          <button class="btn btn-ghost btn-sm" type="button" id="pcCopy" hidden>复制文字</button>
+        </div>
+      </section>
+    </div>
+  </div>
+</main>
+
+<script src="/static/js/p1.js"></script>
+<script>
+(function () {
+  'use strict';
+  var S = { sessions: [], rt: null, persons: [], person: null, personId: '' };
+  var $ = P1.$, esc = P1.esc, api = P1.api;
+
+  function opt(value, text) {
+    var o = document.createElement('option');
+    o.value = value;
+    o.textContent = text;
+    return o;
+  }
+
+  function loadSessions() {
+    return api('/api/library/cards?limit=60&filter=ready').then(function (d) {
+      S.sessions = (d.items || []).filter(function (x) { return x.note_state === 'ready'; });
+      var sel = $('#rtSession');
+      sel.innerHTML = '';
+      if (!S.sessions.length) {
+        sel.appendChild(opt('', '还没有已生成的笔记'));
+        sel.disabled = true;
+        return;
+      }
+      S.sessions.forEach(function (s) {
+        sel.appendChild(opt(s.session_id,
+          (s.title || '未命名场次') + ' · ' + P1.fmtStamp(s.started_at) +
+          ' · ' + (s.speaker_count || 0) + ' 位说话人'));
+      });
+      // 优先选一场真正像圆桌的：>=3 位说话人。
+      var round = S.sessions.filter(function (x) { return (x.speaker_count || 0) >= 3; })[0];
+      if (round) sel.value = round.session_id;
+    });
+  }
+
+  function renderRt(d) {
+    var body = $('#rtBody');
+    body.innerHTML = '';
+    if (!d || !d.ok) {
+      body.innerHTML = '<div class="tool-empty">' + esc((d && d.error) || '这场还不能生成摘要。') + '</div>';
+      return;
+    }
+    S.rt = d;
+    var st = d.stats || {};
+    var stats = document.createElement('div');
+    stats.className = 'tool-stats';
+    [['上麦', st.people], ['观点', st.claims], ['主题', st.topics],
+     ['分歧', st.conflicts], ['没答案', st.open_questions]].forEach(function (pair) {
+      var box = document.createElement('div');
+      box.className = 'tool-stat';
+      var b = document.createElement('b');
+      b.textContent = String(pair[1] || 0);
+      box.appendChild(b);
+      box.appendChild(document.createTextNode(pair[0]));
+      stats.appendChild(box);
+    });
+    body.appendChild(stats);
+
+    var people = document.createElement('div');
+    people.className = 'tool-people';
+    (d.participants || []).forEach(function (p) {
+      var chip = document.createElement('span');
+      chip.className = 'chip';
+      chip.style.pointerEvents = 'none';
+      chip.textContent = (p.name || '未识别') +
+        (p.role_label ? ' · ' + p.role_label : '') +
+        ' · ' + (p.n_claims || 0) + ' 条';
+      people.appendChild(chip);
+    });
+    if (people.childNodes.length) body.appendChild(people);
+
+    (d.topics || []).forEach(function (g) {
+      var sec = document.createElement('div');
+      sec.className = 'tool-topic';
+      var h = document.createElement('h3');
+      h.appendChild(document.createTextNode(g.topic || '其他'));
+      if (g.conflict) {
+        var badge = document.createElement('span');
+        badge.className = 'tool-badge';
+        badge.textContent = '有分歧';
+        h.appendChild(badge);
+      }
+      sec.appendChild(h);
+      (g.entries || []).forEach(function (e) {
+        var row = document.createElement('div');
+        row.className = 'tool-entry';
+        var who = document.createElement('div');
+        who.className = 'who';
+        who.textContent = e.who || '有人';
+        if (e.role_label || e.vs) {
+          var hint = document.createElement('span');
+          hint.textContent = [e.role_label,
+            e.vs ? ('和 ' + e.vs + ' 说法不同') : ''].filter(Boolean).join(' · ');
+          who.appendChild(hint);
+        }
+        row.appendChild(who);
+        var stance = document.createElement('div');
+        stance.className = 'st';
+        stance.textContent = e.stance || '';
+        row.appendChild(stance);
+        if (e.quote) {
+          var qv = document.createElement('div');
+          qv.className = 'qv';
+          qv.textContent = '「' + e.quote + '」';
+          row.appendChild(qv);
+        }
+        if (e.t != null) {
+          var tm = document.createElement('div');
+          tm.className = 'tm';
+          tm.textContent = P1.fmtDur(e.t);
+          row.appendChild(tm);
+        }
+        sec.appendChild(row);
+      });
+      body.appendChild(sec);
+    });
+
+    var qs = d.open_questions || [];
+    if (qs.length) {
+      var qsec = document.createElement('div');
+      qsec.className = 'tool-topic';
+      var qh = document.createElement('h3');
+      qh.textContent = '还没答案的问题';
+      qsec.appendChild(qh);
+      qs.forEach(function (q) {
+        var line = document.createElement('div');
+        line.className = 'tool-q';
+        line.textContent = '· ' + (q.stance || '') + (q.who ? '（' + q.who + ' 提出）' : '');
+        qsec.appendChild(line);
+      });
+      body.appendChild(qsec);
+    }
+    if (!(d.topics || []).length && !qs.length) {
+      var empty = document.createElement('div');
+      empty.className = 'tool-empty';
+      empty.textContent = '这场还没有可归到人身上的观点。先把笔记整理出来，或者等下一场。';
+      body.appendChild(empty);
+    }
+    var exp = $('#rtExport');
+    exp.hidden = false;
+    exp.href = '/api/roundtable/export?session_id=' + encodeURIComponent(d.session.session_id);
+    P1.metric('roundtable_open', { session_id: d.session.session_id });
+  }
+
+  function buildRt() {
+    var sid = $('#rtSession').value;
+    if (!sid) return;
+    $('#rtBody').innerHTML = '<div class="tool-empty">正在整理这一场…</div>';
+    api('/api/roundtable?session_id=' + encodeURIComponent(sid)).then(renderRt)
+      .catch(function (e) {
+        $('#rtBody').innerHTML = '<div class="tool-empty">读取失败：' + esc(e.message) + '</div>';
+      });
+  }
+
+  function loadPersons() {
+    return api('/api/persons').then(function (d) {
+      S.persons = d.persons || [];
+      var sel = $('#pcPerson');
+      sel.innerHTML = '';
+      if (!S.persons.length) {
+        sel.appendChild(opt('', '底库里还没有人'));
+        sel.disabled = true;
+        return;
+      }
+      S.persons.forEach(function (p) {
+        sel.appendChild(opt(p.person_id, (p.name || '未命名') +
+          ' · ' + (p.n_sessions || 0) + ' 场'));
+      });
+    });
+  }
+
+  function copyText(text, done) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done).catch(function () {
+        P1.toast('复制失败，手动选中文字复制');
+      });
+    } else {
+      P1.toast('浏览器不支持自动复制，请手动选中文字');
+    }
+  }
+
+  function renderPerson(d) {
+    var body = $('#pcBody');
+    body.innerHTML = '';
+    if (!d || !d.ok) {
+      body.innerHTML = '<div class="tool-empty">' + esc((d && (d.reason || d.error)) || '读不到这个人。') + '</div>';
+      return;
+    }
+    S.person = d.person;
+    S.personId = d.person.person_id;
+    var p = d.person, c = p.claims || {};
+    var meta = document.createElement('p');
+    meta.className = 'lead';
+    meta.textContent = (p.name || '未命名') + ' · 出现在 ' + (p.sessions || 0) +
+      ' 场 · ' + (c.n_claims || 0) + ' 条观点 · ' + (c.n_topics || 0) + ' 个主题';
+    body.appendChild(meta);
+    var wrap = document.createElement('div');
+    wrap.className = 'person-topics';
+    (c.topics || []).slice(0, 3).forEach(function (g) {
+      var row = document.createElement('div');
+      row.className = 'claim';
+      var h = document.createElement('h3');
+      h.style.cssText = 'margin:0 0 6px;font-size:12.5px';
+      h.textContent = (g.topic || '其他') + ' · ' + g.n_sessions + ' 场 · ' + g.n + ' 条';
+      row.appendChild(h);
+      (g.items || []).slice(-2).forEach(function (it) {
+        var st = document.createElement('div');
+        st.className = 'st';
+        st.style.cssText = 'font-size:12.5px;line-height:1.65';
+        st.textContent = (it._changed ? '改口 · ' : '') + (it.stance || '');
+        row.appendChild(st);
+        if (it.quote) {
+          var qv = document.createElement('div');
+          qv.className = 'qv';
+          qv.style.cssText = 'font-size:11px;color:var(--faint);margin-top:2px';
+          qv.textContent = '「' + it.quote + '」';
+          row.appendChild(qv);
+        }
+      });
+      wrap.appendChild(row);
+    });
+    if (!(c.topics || []).length) {
+      wrap.innerHTML = '<div class="tool-empty">这个人还没有可归档的观点。</div>';
+    }
+    body.appendChild(wrap);
+    var open = $('#pcOpen');
+    open.hidden = false;
+    open.href = '/card?person_id=' + encodeURIComponent(p.person_id);
+    $('#pcCopy').hidden = false;
+    var lines = [(p.name || '') + ' · LiveNotes 上麦者名片',
+      '出现在 ' + (p.sessions || 0) + ' 场 · ' + (c.n_claims || 0) + ' 条观点'];
+    (c.topics || []).slice(0, 3).forEach(function (g) {
+      var latest = (g.items || [])[g.items.length - 1] || {};
+      lines.push('· ' + (g.topic || '其他') + '：' + (latest.stance || ''));
+    });
+    S.cardText = lines.join('\n');
+  }
+
+  function buildPerson() {
+    var pid = $('#pcPerson').value;
+    if (!pid) return;
+    $('#pcBody').innerHTML = '<div class="tool-empty">正在整理名片…</div>';
+    api('/api/person?person_id=' + encodeURIComponent(pid)).then(renderPerson)
+      .catch(function (e) {
+        $('#pcBody').innerHTML = '<div class="tool-empty">读取失败：' + esc(e.message) + '</div>';
+      });
+  }
+
+  $('#rtBuild').addEventListener('click', buildRt);
+  $('#rtSession').addEventListener('change', buildRt);
+  $('#rtExport').addEventListener('click', function () {
+    P1.metric('roundtable_export', { session_id: S.rt && S.rt.session.session_id || '' });
+  });
+  $('#pcBuild').addEventListener('click', buildPerson);
+  $('#pcPerson').addEventListener('change', buildPerson);
+  $('#pcCopy').addEventListener('click', function () {
+    if (!S.cardText) return;
+    copyText(S.cardText, function () {
+      P1.metric('person_card_copy', {});
+      P1.toast('名片文字已复制');
+    });
+  });
+
+  P1.metric('tool_open', {});
+  Promise.all([loadSessions(), loadPersons()]).then(function () {
+    if ($('#rtSession').value) buildRt();
+  }).catch(function (e) {
+    P1.toast('读取数据失败：' + e.message);
+  });
+})();
+</script>
+</body>
+</html>

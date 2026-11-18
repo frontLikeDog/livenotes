@@ -1,5 +1,8 @@
 /* ==================================================================
-   分享卡片：1080×1440 竖版图，三种模板（金句 / 要点 / 高光）。
+   分享卡片：1080×1440 竖版图，四种模板（金句 / 要点 / 高光 / 观点）。
+
+   观点卡（docs/41 G1'）由「观点提出者本人」转发：一个人名 + 一句主张 +
+   一句原话 + 本场信息；二维码打开的是这一条观点的只读页，不是整场笔记。
 
    不联网生成图片：Canvas 在本机画，二维码只在局域网分享开启时出现。
    深色底 + 琥珀强调与界面同一套视觉，导出的 PNG 不依赖主题。
@@ -10,6 +13,7 @@
   var W = 1080, H = 1440;
   var S = {
     data: null, tpl: 'quote', info: null, qr: null, qrText: '',
+    claimIdx: 0, claimInfo: null, claimInfoId: '',
     dialog: null, canvas: null, ctx: null, rendered: 0
   };
 
@@ -109,7 +113,7 @@
     ctx.fillText('实时语记 · 本机笔记', 176, y + 52);
   }
 
-  function footer(ctx, noteUrl) {
+  function footer(ctx, noteUrl, caption) {
     var y = H - 250;
     ctx.strokeStyle = 'rgba(43,51,61,.9)';
     ctx.lineWidth = 1;
@@ -121,7 +125,7 @@
     ctx.fillStyle = '#6E7885';
     ctx.fillText('音频与逐字稿只保存在原设备', 96, y + 42);
     ctx.fillText('由 LiveNotes 在本机整理', 96, y + 70);
-    if (S.qr && noteUrl) {
+    if (S.qr && noteUrl && S.qrText === noteUrl) {
       var size = 140, qx = W - 96 - size, qy = y + 14;
       ctx.fillStyle = '#FFFFFF';
       roundRect(ctx, qx - 12, qy - 12, size + 24, size + 24, 12);
@@ -130,7 +134,7 @@
       ctx.font = mono(15);
       ctx.fillStyle = '#9AA4B0';
       ctx.textAlign = 'right';
-      ctx.fillText('扫码在手机上看这篇笔记', qx + size, qy + size + 34);
+      ctx.fillText(caption || '扫码在手机上看这篇笔记', qx + size, qy + size + 34);
       ctx.textAlign = 'left';
     } else {
       ctx.font = mono(16);
@@ -264,6 +268,95 @@
     footer(ctx, S.info && S.info.note_url);
   }
 
+  function claimList() {
+    var rows = (S.data && S.data.claims) || [];
+    var out = rows.filter(function (c) {
+      return c && c.stance && (c.kind === 'claim' || !c.kind);
+    });
+    return out.length ? out : rows.filter(function (c) { return c && c.stance; });
+  }
+
+  function currentClaim() {
+    var list = claimList();
+    if (!list.length) return null;
+    return list[Math.min(S.claimIdx, list.length - 1)];
+  }
+
+  function drawChip(ctx, text, x, y) {
+    ctx.font = font(24, 600);
+    var w = ctx.measureText(text).width + 36;
+    roundRect(ctx, x, y, w, 44, 22);
+    ctx.fillStyle = 'rgba(231,182,105,.12)';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(231,182,105,.3)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.fillStyle = '#E7B669';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(text, x + 18, y + 23);
+    ctx.textBaseline = 'top';
+    return w;
+  }
+
+  function drawClaim(ctx) {
+    var d = S.data;
+    var list = claimList();
+    var c = currentClaim();
+    ctx.font = mono(19, 500);
+    ctx.fillStyle = '#E7B669';
+    ctx.fillText('VIEWPOINT · ' + (d.session.started_at || '').slice(0, 10), 96, 200);
+    if (!c) {
+      drawText(ctx, '这场还没有可分享的观点。', 96, 300, {
+        font: font(40, 600), color: '#ECE9E2', width: W - 192, lineHeight: 60
+      });
+      drawText(ctx, '等笔记整理出「谁 · 什么观点」之后再来。', 96, 410, {
+        font: font(26), color: '#9AA4B0', width: W - 192, lineHeight: 44
+      });
+      footer(ctx, '', '');
+      return;
+    }
+
+    var y = 250;
+    ctx.font = font(58, 750);
+    ctx.fillStyle = '#F7F5EF';
+    var who = c.who || '一位上麦者';
+    y = drawText(ctx, who, 96, y, {
+      font: font(58, 750), color: '#F7F5EF', width: W - 192,
+      lineHeight: 74, maxLines: 2
+    }) + 18;
+    if (c.topic) {
+      drawChip(ctx, c.topic, 96, y);
+      y += 76;
+    } else {
+      y += 10;
+    }
+
+    ctx.font = font(92, 700);
+    ctx.fillStyle = 'rgba(231,182,105,.9)';
+    ctx.fillText('“', 92, y - 8);
+    y += 78;
+    y = drawText(ctx, c.stance, 132, y, {
+      font: font(42, 550), color: '#ECE9E2', width: W - 264,
+      lineHeight: 64, maxLines: 6
+    });
+    var quote = String(c.quote || '').trim();
+    if (quote && quote !== c.stance) {
+      y += 26;
+      drawText(ctx, '「' + quote + '」', 132, y, {
+        font: font(24), color: '#9AA4B0', width: W - 264,
+        lineHeight: 40, maxLines: 3
+      });
+    }
+
+    var n = (d.speakers || []).length || 1;
+    var meta = '本场 ' + n + ' 人上麦 · 《' + (d.session.title || '未命名场次') + '》 · 由 LiveNotes 记录';
+    drawText(ctx, meta, 96, H - 330, {
+      font: font(23), color: '#6E7885', width: W - 192,
+      lineHeight: 38, maxLines: 2
+    });
+    footer(ctx, S.claimInfo && S.claimInfo.claim_url, '扫码查看这条观点');
+  }
+
   function fmt(seconds) {
     var t = Math.max(0, Math.round(Number(seconds) || 0));
     var m = Math.floor(t / 60), s = t % 60;
@@ -279,15 +372,52 @@
     if (!S.data) return;
     if (S.tpl === 'points') drawPoints(ctx);
     else if (S.tpl === 'highlight') drawHighlight(ctx);
+    else if (S.tpl === 'claim') drawClaim(ctx);
     else drawQuote(ctx);
     S.rendered += 1;
   }
 
-  function noteInfo() {
-    return fetch('/api/share/info?session_id=' +
-      encodeURIComponent(S.data.session.session_id), { cache: 'no-store' })
+  function noteInfo(claimId) {
+    var url = '/api/share/info?session_id=' +
+      encodeURIComponent(S.data.session.session_id);
+    if (claimId) url += '&claim_id=' + encodeURIComponent(claimId);
+    return fetch(url, { cache: 'no-store' })
       .then(function (r) { return r.json(); })
       .catch(function () { return null; });
+  }
+
+  /* 观点卡的二维码指向「这一条观点」；换一条就要重新取一次链接。 */
+  function ensureClaimInfo() {
+    var c = currentClaim();
+    var cid = c ? c.claim_id : '';
+    if (!cid || (S.claimInfoId === cid && S.claimInfo)) {
+      return Promise.resolve(S.claimInfo);
+    }
+    return noteInfo(cid).then(function (info) {
+      if (info) {
+        S.info = info;
+        S.claimInfo = info;
+        S.claimInfoId = cid;
+        updateLink();
+      }
+      return info;
+    });
+  }
+
+  /* 当前模板该带哪张二维码：观点卡用 claim_url，其他用 note_url。
+     换模板/换观点都要重取，不能让上一张码跟着新链接走。 */
+  function refreshQr() {
+    var url = S.tpl === 'claim' ? (S.claimInfo && S.claimInfo.claim_url)
+      : (S.info && S.info.note_url);
+    if (!url || !S.info || !S.info.lan_enabled) {
+      S.qr = null;
+      render();
+      return Promise.resolve();
+    }
+    return qrMatrix(url).then(function (qr) {
+      S.qr = qr;
+      render();
+    });
   }
 
   function qrMatrix(text) {
@@ -307,11 +437,31 @@
   function updateLink() {
     var input = S.dialog.querySelector('#shareLink');
     if (!S.info) { input.value = '正在读取…'; return; }
-    input.value = S.info.note_url || '局域网分享未开启';
+    var isClaim = S.tpl === 'claim';
+    var url = isClaim ? (S.claimInfo && S.claimInfo.claim_url) : S.info.note_url;
+    input.value = url || '局域网分享未开启';
     var hint = S.dialog.querySelector('#shareHint');
-    hint.textContent = S.info.lan_enabled
-      ? '二维码只在局域网内可访问；手机和电脑需要连同一个网络。'
-      : '在设置里开启「局域网分享」后，卡片上会出现二维码。';
+    if (S.info.lan_enabled) {
+      hint.textContent = isClaim
+        ? '二维码打开的是这一条观点的只读页；手机和电脑需要连同一个网络。'
+        : '二维码只在局域网内可访问；手机和电脑需要连同一个网络。';
+    } else {
+      hint.textContent = '在设置里开启「局域网分享」后，卡片上会出现二维码。';
+    }
+    updateClaimNav();
+  }
+
+  function updateClaimNav() {
+    if (!S.dialog) return;
+    var nav = S.dialog.querySelector('#shareClaimNav');
+    if (!nav) return;
+    var list = claimList();
+    var on = S.tpl === 'claim' && list.length > 1;
+    nav.hidden = !on;
+    if (!on) return;
+    var at = Math.min(S.claimIdx, list.length - 1);
+    nav.querySelector('#shareClaimCount').textContent =
+      (at + 1) + ' / ' + list.length + ' · ' + (list[at].who || '');
   }
 
   function build() {
@@ -322,7 +472,7 @@
     dialog.setAttribute('aria-labelledby', 'shareTitle');
     dialog.innerHTML =
       '<div class="dialog-head"><div><h2 id="shareTitle">分享这篇笔记</h2>' +
-      '<p>只包含标题、要点和高光，不包含音频与逐字稿。</p></div>' +
+      '<p>只包含标题、要点、观点和高光，不包含音频与逐字稿。</p></div>' +
       '<button class="icon-btn" type="button" data-share-close aria-label="关闭">' +
       '<svg class="od-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
       'stroke-width="1.8" stroke-linecap="round" aria-hidden="true" ' +
@@ -331,7 +481,13 @@
       '<div class="share-templates chip-row" role="group" aria-label="卡片模板">' +
       '<button class="chip is-on" type="button" data-share-tpl="quote">金句</button>' +
       '<button class="chip" type="button" data-share-tpl="points">要点</button>' +
-      '<button class="chip" type="button" data-share-tpl="highlight">高光</button></div>' +
+      '<button class="chip" type="button" data-share-tpl="highlight">高光</button>' +
+      '<button class="chip" type="button" data-share-tpl="claim">观点</button></div>' +
+      '<div class="share-claim-nav" id="shareClaimNav" hidden>' +
+      '<button class="icon-btn" type="button" id="shareClaimPrev" aria-label="上一条观点">‹</button>' +
+      '<span id="shareClaimCount">1 / 1</span>' +
+      '<button class="icon-btn" type="button" id="shareClaimNext" aria-label="下一条观点">›</button>' +
+      '</div>' +
       '<div class="share-canvas-wrap"><canvas class="share-canvas" id="shareCanvas" ' +
       'width="' + W + '" height="' + H + '"></canvas></div>' +
       '<label class="share-link"><span>本地链接</span>' +
@@ -360,7 +516,27 @@
         dialog.querySelectorAll('[data-share-tpl]'), function (chip) {
           chip.classList.toggle('is-on', chip === button);
         });
-      render();
+      updateLink();
+      if (S.tpl === 'claim') {
+        ensureClaimInfo().then(function () { return refreshQr(); });
+      } else {
+        render();
+        refreshQr();
+      }
+    });
+    dialog.querySelector('#shareClaimPrev').addEventListener('click', function () {
+      var list = claimList();
+      if (!list.length) return;
+      S.claimIdx = (S.claimIdx - 1 + list.length) % list.length;
+      S.claimInfo = null;
+      ensureClaimInfo().then(function () { return refreshQr(); });
+    });
+    dialog.querySelector('#shareClaimNext').addEventListener('click', function () {
+      var list = claimList();
+      if (!list.length) return;
+      S.claimIdx = (S.claimIdx + 1) % list.length;
+      S.claimInfo = null;
+      ensureClaimInfo().then(function () { return refreshQr(); });
     });
     dialog.querySelector('#shareDownload').addEventListener('click', function () {
       S.canvas.toBlob(function (blob) {
@@ -373,7 +549,9 @@
       }, 'image/png');
     });
     dialog.querySelector('#shareCopy').addEventListener('click', function () {
-      var text = (S.info && S.info.note_url) || '';
+      var text = S.tpl === 'claim'
+        ? ((S.claimInfo && S.claimInfo.claim_url) || '')
+        : ((S.info && S.info.note_url) || '');
       if (!text) { P1.toast('还没有可复制的局域网链接。'); return; }
       var done = function () { P1.toast('链接已复制'); };
       if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -391,7 +569,15 @@
 
   function open(data) {
     S.data = data;
-    S.tpl = (data.highlights || []).length ? 'quote' : 'points';
+    S.claimIdx = 0;
+    S.claimInfo = null;
+    S.claimInfoId = '';
+    S.qr = null;
+    S.qrText = '';
+    // 有观点就默认观点卡：这是 docs/41 G1' 的主传播单元；
+    // 没有观点时保持原来的金句/要点逻辑。
+    S.tpl = claimList().length ? 'claim'
+      : ((data.highlights || []).length ? 'quote' : 'points');
     var dialog = build();
     Array.prototype.forEach.call(dialog.querySelectorAll('[data-share-tpl]'), function (chip) {
       chip.classList.toggle('is-on', chip.getAttribute('data-share-tpl') === S.tpl);
@@ -400,14 +586,16 @@
     render();
     updateLink();
     if (!dialog.open) dialog.showModal();
-    noteInfo().then(function (info) {
+    var cid = S.tpl === 'claim' ? (currentClaim() || {}).claim_id : '';
+    noteInfo(cid).then(function (info) {
       S.info = info;
+      if (S.tpl === 'claim' && info) {
+        S.claimInfo = info;
+        S.claimInfoId = cid || '';
+      }
       updateLink();
-      if (!info || !info.lan_enabled || !info.note_url) { render(); return; }
-      qrMatrix(info.note_url).then(function (qr) {
-        S.qr = qr;
-        render();
-      });
+      render();
+      refreshQr();
     });
   }
 

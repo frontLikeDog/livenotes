@@ -19,12 +19,13 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
-from . import (analysis, analysis_job, audio, claims, classify, coach, config, copy,
-               delivery, diagnostics, export, feishu_drive, feedback, follows,
-               glossary, highlight, lan, live, livebrief, llm, logs, metrics,
-               notes, notify, polish, profile, qa, qr, reader, rooms, runtime,
-               scheduler, seed_demo, settings, share, store, tasks, timefmt,
-               titles, voiceprint, webroot, weekly)
+from . import (analysis, analysis_job, audio, cards, claims, classify, coach,
+               config, copy, delivery, diagnostics, export, feishu_drive,
+               feedback, follows, glossary, highlight, lan, live, livebrief,
+               llm, logs, metrics, notes, notify, polish, profile, qa, qr,
+               reader, rooms, roundtable, runtime, scheduler, seed_demo,
+               settings, share, store, tasks, timefmt, titles, voiceprint,
+               webroot, weekly)
 from .config import (AUDIO_DIR, HOST, LIVE_STALL_STOP_S, LIVE_STALL_WARN_S,
                      LIVE_ZERO_STOP_S, LIVE_ZERO_WARN_S, PORT, WEB_DIR)
 
@@ -844,13 +845,29 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    @staticmethod
+    def _disposition(filename: str) -> str:
+        """附件名：ASCII 兜底 + RFC 5987 的 UTF-8 文件名。
+
+        HTTP 头只能写 latin-1；直接塞中文会让整个响应 500。浏览器优先读
+        ``filename*``，老客户端退回 ASCII 名。
+        """
+        name = str(filename or "download").replace('"', "").replace("\\", "_")
+        name = name.replace(";", "_").replace("\r", " ").replace("\n", " ")
+        ascii_name = name.encode("ascii", "ignore").decode("ascii").strip()
+        if not any(ch.isalnum() for ch in ascii_name):
+            ext = name.rsplit(".", 1)[-1] if "." in name else ""
+            ext = ext if ext.isascii() and ext.isalnum() else ""
+            ascii_name = "download" + (("." + ext) if ext else "")
+        return 'attachment; filename="%s"; filename*=UTF-8\'\'%s' % (
+            ascii_name, quote(name, safe=""))
+
     def _attachment(self, text: str, ctype: str, filename: str) -> None:
         data = text.encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
-        self.send_header("Content-Disposition",
-                         'attachment; filename="%s"' % filename.replace('"', ""))
+        self.send_header("Content-Disposition", self._disposition(filename))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(data)
@@ -859,8 +876,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
-        self.send_header("Content-Disposition",
-                         'attachment; filename="%s"' % filename.replace('"', ""))
+        self.send_header("Content-Disposition", self._disposition(filename))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(data)
@@ -962,6 +978,42 @@ class Handler(BaseHTTPRequestHandler):
         self._bytes(self._page("已记下", body).encode("utf-8"),
                     "text/html; charset=utf-8")
 
+    def _claim_page(self, q: dict) -> None:
+        """一条观点的只读页（分享卡二维码的落点）。"""
+        cid = str(q.get("claim_id") or "").strip()
+        conn = store.connect()
+        try:
+            claim = claims.get(conn, cid) if cid else None
+        finally:
+            conn.close()
+        if not claim:
+            body = ('<p class="h">这条观点打不开</p>'
+                    '<p>可能已经被清理，或链接不完整。回到分享卡重新生成一次。</p>')
+            return self._bytes(self._page("观点不存在", body).encode("utf-8"),
+                               "text/html; charset=utf-8", 404)
+        metrics.METRICS.inc("p1.claim_page_open")
+        logs.log_event("share.claim_page", claim_id=cid,
+                       session_id=str(claim.get("session_id") or ""))
+        return self._bytes(cards.claim_page(claim).encode("utf-8"),
+                           "text/html; charset=utf-8")
+
+    def _person_card(self, q: dict) -> None:
+        """上麦者名片：一个人的观点摘要，可发给别人看。"""
+        pid = str(q.get("person_id") or q.get("person") or "").strip()
+        conn = store.connect()
+        try:
+            html_text = cards.person_page(conn, pid) if pid else None
+        finally:
+            conn.close()
+        if not html_text:
+            body = ('<p class="h">这张名片打不开</p>'
+                    '<p>底库里没有这个人，或链接不完整。</p>')
+            return self._bytes(self._page("人物不存在", body).encode("utf-8"),
+                               "text/html; charset=utf-8", 404)
+        metrics.METRICS.inc("p1.person_card_open")
+        return self._bytes(html_text.encode("utf-8"),
+                           "text/html; charset=utf-8")
+
     @staticmethod
     def _page(title: str, body: str) -> str:
         return """<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
@@ -1021,6 +1073,12 @@ p{font-size:14px;line-height:1.75;margin:8px 0}
                 return self._file(WEB_DIR / "glossary.html")
             if p in ("/metrics", "/metrics.html"):
                 return self._file(WEB_DIR / "metrics.html")
+            if p in ("/tools", "/tools.html"):
+                return self._file(WEB_DIR / "tools.html")
+            if p == "/claim":
+                return self._claim_page(q)
+            if p == "/card":
+                return self._person_card(q)
             if p == "/card/feedback":
                 return self._card_feedback(q)
             if p.startswith("/static/"):
@@ -1102,6 +1160,7 @@ p{font-size:14px;line-height:1.75;margin:8px 0}
             if not row:
                 return self._json({"error": "这个问题不存在"}, 404)
             row.pop("job_id", None)
+            row["followups"] = qa.followups_for(conn, qid)
             return self._json(row)
         if p == "/api/qa/history":
             return self._json({"items": qa.history(
@@ -1314,6 +1373,9 @@ p{font-size:14px;line-height:1.75;margin:8px 0}
             out = notes.build_note(conn, sid)
             if not out.get("ok"):
                 return self._json(out, 404)
+            # 分享卡要的是「谁 × 什么观点」，不是按人分组的要点；单独给一份
+            # 原子列表，前端不必从 points 里再猜一遍。
+            out["claims"] = cards.session_claims(conn, sid)
             # 打开笔记顺手写一行状态：历史场次从此有 notes 行，卡片状态更准。
             try:
                 store.upsert_note(conn, sid, state=out["note_state"],
@@ -1453,6 +1515,12 @@ p{font-size:14px;line-height:1.75;margin:8px 0}
                 fmt = ap.suffix.lower().lstrip(".")
             lan_info = lan.status()
             base = str(lan_info.get("url") or "").rstrip("/")
+            # 观点卡扫码打开的是「这一条观点」，不是整场笔记。
+            claim_id = str(q.get("claim_id") or "").strip()
+            claim = claims.get(conn, claim_id) if claim_id else None
+            claim_url = (base + "/claim?claim_id=" + quote(claim_id)
+                         if base and claim and str(claim.get("session_id") or "") == sid
+                         else "")
             return self._json({"ok": True, "session_id": sid,
                                "title": s.get("title") or "",
                                "minutes_url": s.get("minutes_url") or "",
@@ -1461,6 +1529,8 @@ p{font-size:14px;line-height:1.75;margin:8px 0}
                                "has_recording": bool(size),
                                # 二维码只在局域网可访问时生成；关闭时前端不显示。
                                "lan_enabled": bool(lan_info.get("enabled")),
+                               "claim_id": claim_id if claim_url else "",
+                               "claim_url": claim_url,
                                "note_url": (base + "/note?session=" + quote(sid)
                                             + "&share=1") if base else "",
                                "share_url": (base + "/note?session=" + quote(sid)
@@ -1480,6 +1550,21 @@ p{font-size:14px;line-height:1.75;margin:8px 0}
             return self._json(coach.analyze(conn, sid))
         if p == "/api/coach/cross":
             return self._json(coach.cross(conn, str(q.get("label") or "") or None))
+        if p == "/api/roundtable":
+            sid = str(q.get("session_id") or "")
+            out = roundtable.build(conn, sid)
+            return self._json(out, 200 if out.get("ok") else 404)
+        if p == "/api/roundtable/export":
+            sid = str(q.get("session_id") or "")
+            out = roundtable.build(conn, sid)
+            if not out.get("ok"):
+                return self._json(out, 404)
+            body = roundtable.markdown(out)
+            name = (str(out["session"].get("title") or "圆桌摘要")
+                    .replace("/", " ").replace("\\", " ")[:40])
+            metrics.METRICS.inc("p1.roundtable_export")
+            return self._attachment(body, "text/markdown; charset=utf-8",
+                                    "圆桌摘要-%s.md" % name)
         if p == "/api/persons":
             return self._json({
                 "persons": store.list_persons(conn),
@@ -1883,7 +1968,9 @@ p{font-size:14px;line-height:1.75;margin:8px 0}
                 return self._json({"error": "问笔记已经在设置里关掉了"}, 400)
             try:
                 out = qa.ask(str(b.get("question") or ""),
-                             str(b.get("session_id") or ""))
+                             str(b.get("session_id") or ""),
+                             thread_id=str(b.get("thread_id") or ""),
+                             parent_id=int(_num(b.get("parent_id"), 0) or 0))
             except ValueError as e:
                 return self._json({"error": str(e)}, 400)
             metrics.METRICS.inc("p1.qa_ask")
@@ -1982,8 +2069,11 @@ p{font-size:14px;line-height:1.75;margin:8px 0}
                        "search_click", "bookmark_add", "highlight_save",
                        "follow_add", "follow_notify_click", "auto_record_start",
                        "auto_record_fail", "weekly_open", "weekly_notify_click",
-                       "qa_ask", "qa_cite_click", "qa_feedback", "share_card_export",
-                       "export", "perf_mode_set"}
+                       "qa_ask", "qa_cite_click", "qa_feedback",
+                       "qa_followup_shown", "qa_followup_click",
+                       "share_card_export", "share_claim_export", "tool_open",
+                       "roundtable_open", "person_card_copy", "export",
+                       "perf_mode_set"}
             if name not in allowed:
                 return self._json({"error": "未知事件"}, 400)
             store.record_metric_event("info", name,

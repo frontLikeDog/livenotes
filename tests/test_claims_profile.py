@@ -238,3 +238,108 @@ def test_qa_claim_channel_finds_person_topic_claims(db):
     assert any(u["kind"] == "claim" for u in units)
     first = units[0]
     assert "阿哲" in first["text"] or first["speaker"] == "阿哲"
+
+
+# ---------------------------------------------------------------- 观点地图
+
+def _map_session(db):
+    """一场圆桌：一个主题下三个人，其中一人明确反对；另一个主题只有人问。"""
+    from tests.test_shape_and_claims import _seed  # noqa: F401  (只借造数据思路)
+    sid = "S_MAP"
+    store.insert_session(db, {"id": sid, "title": "圆桌一场", "started_at":
+                              "2026-11-16T20:00:00", "duration_s": 1800,
+                              "source_mode": "tab"})
+    spec = [("SPK_00", "老王", "host_control", "欢迎，下一位上麦"),
+            ("SPK_01", "阿哲", "substantive", "我认为明年 OPC 会被收紧"),
+            ("SPK_02", "小鹿", "substantive", "我不同意，变量是平台抽成"),
+            ("SPK_03", "大周", "substantive", "我补充一个案例"),
+            ("SPK_04", "路人", "question_consult", "抽成按什么口径算呢"),
+            ("SPK_05", "路人二", "question_consult", "那账期怎么算")]
+    rows, t = [], 0.0
+    for spk, label, cat, text in spec:
+        rows.append({"session_id": sid, "speaker_id": spk, "speaker_label": label,
+                     "t_start": t, "t_end": t + 20, "category": cat, "text": text})
+        t += 21
+    ids = store.insert_utterances(db, rows)
+    for spk, label, *_ in spec:
+        store.upsert_speaker(db, sid, spk, label)
+
+    def pt(who, stance, topic, uid, cat="substantive", t=0.0):
+        return {"title": "话题 %s" % topic, "gist": "", "t_from": t, "t_to": t + 20,
+                "speakers": [who], "claim_speaker": who, "stance": stance,
+                "evidence": [{"id": uid, "t_start": t, "speaker_label": who,
+                              "category": cat, "topic": topic, "quote": stance}]}
+
+    store.save_summary(db, sid, "content", {}, "extractive", {
+        "session_title": "圆桌一场", "overview": "", "topics": ["OPC 政策", "结算"],
+        "points": [
+            pt("阿哲", "明年 OPC 会被收紧", "OPC 政策", ids[1], t=21),
+            pt("小鹿", "我不同意，真正的变量是平台抽成", "OPC 政策", ids[2], t=42),
+            pt("大周", "去年有人吃过这个亏", "OPC 政策", ids[3], t=63),
+            pt("路人", "抽成按什么口径算", "结算", ids[4],
+               cat="question_consult", t=84),
+            pt("路人二", "账期按什么算", "结算", ids[5],
+               cat="question_consult", t=105),
+        ]})
+    return sid, ids
+
+
+def test_opinion_map_groups_by_topic_not_by_person(db):
+    sid, _ = _map_session(db)
+    m = notes.build_note(db, sid)["opinion_map"]
+    labels = [g["label"] for g in m["topics"]]
+    assert "OPC 政策" in labels
+    opc = next(g for g in m["topics"] if g["label"] == "OPC 政策")
+    assert [e["who"] for e in opc["entries"]] == ["阿哲", "小鹿", "大周"]
+    assert opc["n_people"] == 3
+
+
+def test_opinion_map_marks_disagreement_only_on_explicit_words(db):
+    sid, _ = _map_session(db)
+    m = notes.build_note(db, sid)["opinion_map"]
+    opc = next(g for g in m["topics"] if g["label"] == "OPC 政策")
+    rows = {e["who"]: e for e in opc["entries"]}
+    assert rows["小鹿"]["disagree"] and rows["小鹿"]["vs"] == "阿哲"
+    # 只是补充案例、没有反对词的人不能被标成分歧
+    assert not rows["大周"]["disagree"]
+    assert opc["conflict"] and m["stats"]["conflicts"] == 1
+
+
+def test_opinion_map_collects_unanswered_questions(db):
+    sid, _ = _map_session(db)
+    m = notes.build_note(db, sid)["opinion_map"]
+    assert [q["text"] for q in m["open_questions"]] == ["抽成按什么口径算", "账期按什么算"]
+    assert all(g["label"] != "结算" for g in m["topics"])   # 全是提问的主题不进地图
+    assert m["stats"]["open_questions"] == 2
+
+
+def test_opinion_map_puts_generic_topic_last(db):
+    sid, ids = _map_session(db)
+    summary = notes._summary(db, sid)
+    summary["points"].append({
+        "title": "闲聊", "gist": "", "t_from": 200, "t_to": 210,
+        "claim_speaker": "大周", "stance": "随便说两句",
+        "evidence": [{"id": ids[3], "t_start": 200, "speaker_label": "大周",
+                      "category": "substantive", "topic": "综合", "quote": "随便说两句"}]})
+    db.execute("UPDATE summaries SET payload_json=? WHERE session_id=?",
+               (__import__("json").dumps(summary, ensure_ascii=False), sid))
+    db.commit()
+    m = notes.build_note(db, sid)["opinion_map"]
+    assert m["topics"][-1]["label"] == claims.GENERIC_LABEL
+
+
+def test_opinion_map_empty_without_points(db):
+    _two_sessions(db)
+    db.execute("UPDATE summaries SET payload_json='{}'")
+    db.commit()
+    assert notes.build_note(db, "S1")["opinion_map"] == {
+        "topics": [], "open_questions": [], "stats": {}}
+
+
+def test_single_speaker_session_map_is_one_entry(db):
+    """单人场：地图只有一个人，页面据此仍走扁平要点（不画地图）。"""
+    _two_sessions(db)
+    m = notes.build_note(db, "S1")["opinion_map"]
+    assert len(m["topics"]) == 1
+    assert len(m["topics"][0]["entries"]) == 1
+    assert m["topics"][0]["entries"][0]["who"] == "阿哲"

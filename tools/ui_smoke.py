@@ -57,6 +57,7 @@ PAGES = [
     ("note", "/note?session=" + DEMO, ["#notePage", "#noteDoc", "#noteTitle"]),
     ("delivery", "/delivery", ["#dlvFilters", "#dlvList", "#dlvNew"]),
     ("people", "/people", ["#cards", "#plist", "#q"]),
+    ("tools", "/tools", ["#rtCard", "#rtSession", "#pcCard", "#pcPerson"]),
     ("highlights", "/highlights?session=" + DEMO, ["#list", "#fbStat", "#title"]),
     ("capture", "/capture", ["#state", "#dot", "#err"]),
     ("pushes", "/pushes", ["#rows", "#chips"]),

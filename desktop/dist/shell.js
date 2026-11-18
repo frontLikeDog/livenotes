@@ -734,6 +734,7 @@ const VIEW_META = {
   note: { title: '笔记', sub: '要点、高光与原话', side: false, insp: false },
   files: { title: '文件中心', sub: '录音与回放', side: false, insp: false },
   people: { title: '人物档案', sub: '声纹与确认', side: false, insp: false },
+  tools: { title: '内容助手', sub: '圆桌摘要与名片', side: false, insp: false },
   settings: { title: '设置', sub: '外观与连接', side: false, insp: false },
   live: { title: '实时字幕', sub: '正在监听', side: false, insp: false },
   frame: { title: '页面', sub: '', side: false, insp: false },
@@ -772,7 +773,7 @@ function switchView(view, opts) {
   $('#wbView').hidden = view !== 'workbench';
   $('#setView').hidden = view !== 'settings';
   $('#frameView').hidden = !['files', 'people', 'live', 'frame',
-    'follows', 'library', 'weekly', 'delivery', 'note'].includes(view);
+    'follows', 'library', 'weekly', 'delivery', 'note', 'tools'].includes(view);
 
   if (view === 'hud') {
     if (opts.room) S.hudRoomId = opts.room;
@@ -837,6 +838,9 @@ function switchView(view, opts) {
   } else if (view === 'people') {
     setFrame(API + '/people?embed=1', API + '/people', '人物档案', '声纹与确认', true);
     S.frameBackView = 'listen';
+  } else if (view === 'tools') {
+    setFrame(API + '/tools?embed=1', API + '/tools', '内容助手', '圆桌摘要与名片', false);
+    S.frameBackView = 'library';
   } else if (view === 'live') {
     const sid = opts.session || S.selectedSession || '';
     const q = 'embed=1' + (sid ? '&session=' + encodeURIComponent(sid) : '');
@@ -3839,6 +3843,7 @@ function paletteActions() {
     { id: 'library', label: '笔记库', hint: '每一场的要点与高光', icon: '▤', run: () => switchView('library') },
     { id: 'ask', label: '问笔记', hint: '用一句话问你的笔记，答案带出处', icon: '✦', run: () => switchView('library', { search: 'ask' }) },
     { id: 'weekly', label: '周报', hint: '这一周的回看', icon: '▦', run: () => switchView('weekly') },
+    { id: 'tools', label: '内容助手', hint: '多人圆桌摘要、上麦者名片', icon: '✧', run: () => switchView('tools') },
     { id: 'delivery', label: '精修交付', hint: '报告、质检与交付包', icon: '▥', run: () => switchView('delivery') },
     { id: 'cleanup', label: '体检清理', hint: '演示 / 空采集 / 重复场次', icon: '⌫', run: () => switchView('files', { tab: 'cleanup' }) },
     { id: 'trash', label: '回收站', hint: '还原或彻底删除', icon: '▤', run: () => switchView('files', { tab: 'trash' }) },
@@ -4053,6 +4058,7 @@ function navigateToUrl(href) {
     return switchView('files', { tab });
   }
   if (path === '/people') return switchView('people');
+  if (path === '/tools') return switchView('tools');
   if (path === '/' || path === '/index.html') {
     if (u.searchParams.get('settings') != null) return switchView('settings');
     if (sid) S.selectedSession = sid;
@@ -4084,7 +4090,7 @@ function notifActionLabel(item) {
   return {
     hud: '打开记录卡', note: '打开笔记', library: '打开笔记库',
     follow: '查看关注', follows: '查看关注', weekly: '打开周报',
-    delivery: '打开交付',
+    delivery: '打开交付', people: '打开人物档案',
     storage: '打开存储设置', diagnostics: '检查问题',
   }[v] || '查看';
 }
@@ -4132,6 +4138,9 @@ function renderNotifPrefs() {
     '<label class="np-row"><input type="checkbox" data-np="detail"' +
       (st.detail ? ' checked' : '') + (st.enabled ? '' : ' disabled') +
       '><span class="grow"><b>显示直播标题</b><br><span>关掉后只说「你关注的主播」「一场直播」</span></span></label>',
+    '<label class="np-row"><input type="checkbox" data-np="insights"' +
+      (st.insights ? ' checked' : '') + (st.enabled ? '' : ' disabled') +
+      '><span class="grow"><b>主动提醒</b><br><span>观点反转、老问题有答案、常客上麦；每场最多一条，默认关</span></span></label>',
   ];
   if (S.notif.sysDenied) {
     rows.push('<div class="np-row"><span style="color:var(--amber)">系统通知权限被关闭了，应用内通知中心仍然完整。</span></div>');
@@ -4146,9 +4155,11 @@ function renderNotifPrefs() {
   groups.forEach((list, group) => {
     rows.push('<div class="np-group">' + esc(group) + '</div>');
     list.forEach((k) => {
+      const off = !st.enabled ||
+        (String(k.kind).indexOf('insight_') === 0 && !st.insights);
       rows.push('<label class="np-row"><input type="checkbox" data-np="kind" data-kind="' +
         esc(k.kind) + '"' + (muted.has(k.kind) ? '' : ' checked') +
-        (st.enabled ? '' : ' disabled') + '><span class="grow"><b>' + esc(k.label) +
+        (off ? ' disabled' : '') + '><span class="grow"><b>' + esc(k.label) +
         '</b><br><span>' + esc(k.desc) + '</span></span></label>');
     });
   });
@@ -4304,6 +4315,10 @@ function routeNotification(item) {
   }
   if (view === 'library') {
     switchView('library');
+    return;
+  }
+  if (view === 'people') {
+    switchView('people');
     return;
   }
   if (view === 'storage') {
@@ -4894,6 +4909,7 @@ function bind() {
     if (el.dataset.np === 'enabled') return updateNotifSettings({ notify_enabled: !!el.checked });
     if (el.dataset.np === 'system') return updateNotifSettings({ notify_system: !!el.checked });
     if (el.dataset.np === 'detail') return updateNotifSettings({ notify_detail: !!el.checked });
+    if (el.dataset.np === 'insights') return updateNotifSettings({ notify_insights: !!el.checked });
     if (el.dataset.np === 'kind') {
       const muted = $$('#npBody input[data-np="kind"]')
         .filter((x) => !x.checked).map((x) => x.dataset.kind);

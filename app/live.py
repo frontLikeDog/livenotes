@@ -1194,6 +1194,16 @@ class LiveSession:
                 logs.log_event("live.identity_hint", session_id=self.id,
                                speaker_id=sid, name=h["name"], state=h["state"],
                                score=round(float(h["score"]), 2))
+            # 常客上麦：第一次从「疑似」升到「自动认定」时提醒一次。
+            # 默认关，且每场最多一条，由 insights 自己守边界。
+            if h.get("state") == "auto" and old.get("state") != "auto":
+                try:
+                    from . import insights
+                    insights.speaker_appeared(conn, self.id,
+                                              str(h.get("person_id") or ""),
+                                              str(h.get("name") or ""))
+                except Exception:
+                    traceback.print_exc()
         # 点「不是他」和定时刷新可能擦肩：赋回前再挡一次，别把刚否掉的又贴回来
         self.person_hint = {k: v for k, v in hints.items() if k not in self.rejected}
 

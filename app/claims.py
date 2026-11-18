@@ -42,6 +42,24 @@ _GENERIC_TOPICS = {"", "综合", "综合/未归类", "未归类", "其他", "其
 # 兜底主题在人物页显示的标签（数组里存的是原始标注，展示时才换）
 GENERIC_LABEL = "其他"
 
+# 明确的反对词。观点地图只在原话里真出现了这些词时才标「分歧」——
+# 「两个人说法不一样」不等于「一个人反对另一个人」，后者是推断，不做。
+_DISAGREE_RE = re.compile(
+    r"不同意|不认同|不赞成|我反对|不对|未必|恰恰相反|反过来说|"
+    r"不是这样|站不住|说不通|错(?:了|误)")
+
+
+def topic_label(topic: str) -> str:
+    """主题的展示/分组标签：未归类的一律折成「其他」，排到最后。"""
+    t = str(topic or "").strip()
+    return GENERIC_LABEL if t in _GENERIC_TOPICS else t
+
+
+def disagrees(text: str) -> bool:
+    """这句话有没有在明确反对前面某个人（而不是仅仅换了个说法）。"""
+    t = str(text or "").replace("对不对", "").replace("是不是", "")
+    return bool(t and _DISAGREE_RE.search(t))
+
 
 def _norm(text: str) -> str:
     return _PUNCT.sub("", str(text or ""))
@@ -54,6 +72,28 @@ def _ratio(a: str, b: str) -> float:
     if a == b:
         return 1.0
     return difflib.SequenceMatcher(None, a, b).ratio()
+
+
+def similarity(a: str, b: str) -> float:
+    """两句话的字面相似度（去掉标点/空白后）。追问、提醒、圆桌摘要共用。"""
+    return _ratio(a, b)
+
+
+def topic_specific(topic: str) -> bool:
+    """是不是一个能跨场比较的具体主题；「综合/闲聊」比了只会误报。"""
+    return str(topic or "").strip() not in _GENERIC_TOPICS
+
+
+def get(conn: sqlite3.Connection, claim_id: str) -> dict | None:
+    """按 claim_id 读一条观点，带上场次标题与日期（分享卡/只读页用）。"""
+    cid = str(claim_id or "").strip()
+    if not cid:
+        return None
+    row = conn.execute(
+        "SELECT c.*, s.title AS session_title, s.started_at "
+        "FROM claims c LEFT JOIN sessions s ON s.id=c.session_id "
+        "WHERE c.claim_id=?", (cid,)).fetchone()
+    return dict(row) if row else None
 
 
 def person_key(person_id: str, who: str) -> str:
@@ -90,7 +130,7 @@ def point_topic(point: dict) -> str:
     return ""
 
 
-def _point_kind(point: dict) -> str:
+def point_kind(point: dict) -> str:
     """观点还是问题：证据以提问为主的是「问题」，不是「主张」。"""
     ev = point.get("evidence") or []
     if not ev:
@@ -152,7 +192,7 @@ def extract(conn: sqlite3.Connection, sid: str) -> list[dict]:
             "gist": gist[:300],
             "quote": str(first.get("quote") or first.get("text") or "")[:300],
             "t": first.get("t_start"),
-            "kind": _point_kind(p),
+            "kind": point_kind(p),
             "evidence": [{"id": e.get("id"), "t": e.get("t_start"),
                           "speaker": str(e.get("speaker_label") or "")}
                          for e in ev[:6]],

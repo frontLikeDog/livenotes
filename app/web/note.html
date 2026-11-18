@@ -24,6 +24,7 @@ try{var _t=new URLSearchParams(location.search).get('theme');if(_t)document.docu
     <a href="/library" class="is-on">笔记库</a>
     <a href="/follows">关注</a>
     <a href="/weekly">周报</a>
+    <a href="/tools">内容助手</a>
   </nav>
   <span class="grow"></span>
   <button class="top-search" type="button" data-p1-search aria-label="搜索笔记或提问">
@@ -157,6 +158,82 @@ try{var _t=new URLSearchParams(location.search).get('theme');if(_t)document.docu
     return '这条总结来自旧版本，无法确认生成方式' + at;
   }
 
+  // 观点地图：一个主题一段，一个人一行，明确反对的标出来，没人答的沉底。
+  // 只画已经落库的要点，不在这里推断谁对谁错。
+  function renderMap(map) {
+    var wrap = el('div', 'omap');
+    (map.topics || []).forEach(function (g) {
+      var block = el('div', 'omap-topic');
+      if (g.conflict) block.className += ' has-conflict';
+      var head = el('div', 'omap-head');
+      head.appendChild(el('span', 'omap-name', g.label || '其他'));
+      head.appendChild(el('span', 'omap-meta',
+        g.n_people + ' 人 · ' + g.n + ' 条'));
+      if (g.conflict) head.appendChild(el('span', 'omap-flag', '有分歧'));
+      block.appendChild(head);
+      (g.entries || []).forEach(function (e, i) {
+        var row = el('div', 'omap-row');
+        row.setAttribute('data-t', e.t != null ? e.t : '');
+        if (i) row.appendChild(el('span', 'omap-branch', e.disagree ? '└' : '├'));
+        else row.appendChild(el('span', 'omap-branch', '▌'));
+        var body = el('div', 'omap-body');
+        var line = el('p', 'omap-line');
+        if (e.who) {
+          var who = el('b', 'omap-who', e.who);
+          if (e.speaker_id) {
+            who.setAttribute('role', 'button');
+            who.tabIndex = 0;
+            who.title = '看他的全部主张';
+            var go = function () {
+              location.href = '/people?person=' + encodeURIComponent(e.speaker_id);
+            };
+            who.addEventListener('click', go);
+            who.addEventListener('keydown', function (ev) {
+              if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); go(); }
+            });
+          }
+          line.appendChild(who);
+          line.appendChild(document.createTextNode('：'));
+        }
+        line.appendChild(document.createTextNode(e.stance || '（这条没有主张句）'));
+        if (e.disagree) {
+          var flag = el('span', 'omap-vs', e.vs ? '与 ' + e.vs + ' 有分歧' : '有分歧');
+          line.appendChild(flag);
+        }
+        if (Number(e.cross_sessions) > 1) {
+          line.appendChild(el('span', 'point-cross', '跨 ' + e.cross_sessions + ' 场'));
+        }
+        body.appendChild(line);
+        if (e.gist && e.gist !== e.stance) {
+          body.appendChild(el('p', 'omap-gist', e.gist));
+        }
+        if (e.quote && e.quote !== e.stance) {
+          var q = el('p', 'point-quote');
+          if (e.t != null) q.appendChild(timeLink(e.t));
+          q.appendChild(document.createTextNode(' ' + e.quote));
+          body.appendChild(q);
+        }
+        row.appendChild(body);
+        block.appendChild(row);
+      });
+      wrap.appendChild(block);
+    });
+    var open = map.open_questions || [];
+    if (open.length) {
+      var box = el('div', 'omap-open');
+      box.appendChild(el('h3', null, '还没答案的问题'));
+      open.forEach(function (q) {
+        var line = el('p');
+        if (q.t != null) line.appendChild(timeLink(q.t));
+        var who = q.who ? q.who + '：' : '';
+        line.appendChild(document.createTextNode(' ' + who + q.text));
+        box.appendChild(line);
+      });
+      wrap.appendChild(box);
+    }
+    return wrap;
+  }
+
   function renderDoc(data) {
     var doc = P1.$('#noteDoc');
     doc.innerHTML = '';
@@ -207,9 +284,47 @@ try{var _t=new URLSearchParams(location.search).get('theme');if(_t)document.docu
       // 圆桌/问答才按人分：单人场「谁说的」没有信息，分了反而多一层。
       var shape = data.shape || {};
       var byPerson = groups.length > 1 && shape.kind !== 'single';
-      var sec = section(byPerson ? '观点 · 按人' : '要点',
-        points.length + ' 条 · 可回溯原话');
+      var map = data.opinion_map || {};
+      var mapTopics = map.topics || [];
+      // 观点地图是圆桌的默认视图：先回答「有几种观点、谁和谁冲突」，
+      // 按人看是另一条路径，两者是同一批要点的两种切法，不重复渲染。
+      // 哪怕只有一个主题：分歧和「还没答案的问题」只有地图画得出来。
+      var useMap = byPerson && mapTopics.length > 0;
+      var sec = section(useMap ? '观点地图'
+        : (byPerson ? '观点 · 按人' : '要点'),
+        useMap ? (mapTopics.length + ' 个主题 · '
+          + ((map.stats || {}).people || 0) + ' 位发言人')
+          : (points.length + ' 条 · 可回溯原话'));
+
+      if (useMap) {
+        var tabs = el('div', 'map-tabs chip-row');
+        [['topic', '按主题'], ['person', '按人']].forEach(function (tab) {
+          var chip = el('button', 'chip' + (tab[0] === 'topic' ? ' is-on' : ''), tab[1]);
+          chip.type = 'button';
+          chip.setAttribute('data-map-tab', tab[0]);
+          tabs.appendChild(chip);
+        });
+        sec.appendChild(tabs);
+      }
+      var mapPane = useMap ? el('div', 'map-pane') : null;
+      var personPane = useMap ? el('div', 'map-pane') : null;
+      if (useMap) {
+        personPane.hidden = true;
+        mapPane.appendChild(renderMap(map));
+        sec.appendChild(mapPane);
+        sec.appendChild(personPane);
+        Array.prototype.forEach.call(tabs.querySelectorAll('[data-map-tab]'), function (chip) {
+          chip.addEventListener('click', function () {
+            var onTopic = chip.getAttribute('data-map-tab') === 'topic';
+            Array.prototype.forEach.call(tabs.querySelectorAll('[data-map-tab]'),
+              function (c) { c.classList.toggle('is-on', c === chip); });
+            mapPane.hidden = !onTopic;
+            personPane.hidden = onTopic;
+          });
+        });
+      }
       var list = el(byPerson ? 'div' : 'ol', byPerson ? 'who-list' : 'point-list');
+      (useMap ? personPane : sec).appendChild(list);
       var seq = 0;
       var groupsToDraw = byPerson ? groups : [{ who: '', points: points }];
       groupsToDraw.forEach(function (group) {
@@ -283,7 +398,7 @@ try{var _t=new URLSearchParams(location.search).get('theme');if(_t)document.docu
           wrap.appendChild(item);
         });
       });
-      sec.appendChild(list);
+      if (!useMap) sec.appendChild(list);
       doc.appendChild(sec);
     }
 

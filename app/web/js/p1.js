@@ -209,7 +209,7 @@
   var S = {
     tab: 'notes', q: '', seq: 0, items: [], idx: 0,
     timer: 0, askTimer: 0, askSeq: 0, askId: 0, asking: false,
-    answeredQ: ''
+    answeredQ: '', askCtx: null
   };
 
   var TABS = [
@@ -248,6 +248,8 @@
       S.items = [];
       S.idx = 0;
       S.answeredQ = '';
+      // 手动改字 = 新问题，不再挂在上一轮追问线程上。
+      S.askCtx = null;
       clearTimeout(S.timer);
       S.timer = setTimeout(renderPalette, 220);
     });
@@ -277,6 +279,7 @@
     S.idx = 0;
     S.items = [];
     S.answeredQ = '';
+    S.askCtx = null;
     clearTimeout(S.askTimer);
     var input = $('#p1SpInput', palette);
     input.value = S.q;
@@ -576,6 +579,7 @@
           sub: item.answer || (item.state === 'no_result' ? '没有找到直接相关的内容' : ''),
           meta: relTime(item.created_at),
           onClick: function () {
+            S.askCtx = null;
             S.q = item.question;
             $('#p1SpInput').value = item.question;
             renderPalette();
@@ -597,7 +601,13 @@
       ' 正在翻你的笔记…</div><p>先找相关内容，再组织答案。</p>';
     body.appendChild(box);
     S.items = [];
-    post('/api/qa/ask', { question: question }).then(function (d) {
+    // 请求体单独取名：上面的 body 是 DOM 节点，重名会被后面的赋值悄悄换掉。
+    var payload = { question: question };
+    if (S.askCtx) {
+      payload.thread_id = S.askCtx.thread_id || '';
+      payload.parent_id = S.askCtx.parent_id || 0;
+    }
+    post('/api/qa/ask', payload).then(function (d) {
       if (seq !== S.seq) return;
       if (!d.ok) {
         box.innerHTML = '<div class="sp-answer-kicker">没问成</div><p>' +
@@ -686,6 +696,43 @@
       });
       box.appendChild(wrap);
     }
+    renderFollowups(box, data);
+  }
+
+  /* 追问：点一下接着问，服务端会带上一轮答案（只带摘要 + 引用编号）。
+     追问不是新话题，所以 S.askCtx 只在点击时设置；手动改字会清掉。 */
+  function renderFollowups(box, data) {
+    var items = data.followups || [];
+    if (!items.length) return;
+    metric('qa_followup_shown', { count: items.length,
+      session_id: (data.scope || {}).session_id || '' });
+    var wrap = document.createElement('div');
+    wrap.className = 'sp-followups';
+    items.forEach(function (item) {
+      var q = typeof item === 'string' ? item : (item.q || '');
+      var why = typeof item === 'string' ? '' : (item.why || '');
+      if (!q) return;
+      var button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'sp-followup';
+      button.textContent = q;
+      if (why) button.title = why;
+      button.addEventListener('click', function () {
+        metric('qa_followup_click', {
+          session_id: (data.scope || {}).session_id || '',
+          kind: 'followup'
+        });
+        S.askCtx = {
+          thread_id: data.thread_id || String(data.id || ''),
+          parent_id: Number(data.id) || 0
+        };
+        S.q = q;
+        $('#p1SpInput').value = q;
+        renderPalette();
+      });
+      wrap.appendChild(button);
+    });
+    if (wrap.childNodes.length) box.appendChild(wrap);
   }
 
   function selectFirst() {

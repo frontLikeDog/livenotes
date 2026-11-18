@@ -143,7 +143,10 @@ def build_note(conn: sqlite3.Connection, sid: str) -> dict:
             "topic": claims.point_topic(p),
             "evidence": [{"id": e.get("id"), "t": e.get("t_start"),
                           "text": str(e.get("text") or "")[:200],
-                          "speaker": e.get("speaker_label") or ""}
+                          "speaker": e.get("speaker_label") or "",
+                          # 类别留着：判断「这条是提问还是主张」要用，
+                          # 观点地图靠它挑出「没人回答的问题」。
+                          "category": e.get("category") or ""}
                          for e in ev[:4]],
         })
     generated_at = (note or {}).get("generated_at") or summary.get("generated_at") \
@@ -153,7 +156,8 @@ def build_note(conn: sqlite3.Connection, sid: str) -> dict:
     for sp in speakers:
         names_by_label.setdefault(str(sp["label"]), sp["speaker_id"])
     by_speaker = _group_points(points, shape_info, names_by_label)
-    _attach_history(conn, sid, by_speaker)
+    _attach_history(conn, points)
+    opinion_map = _opinion_map(points, shape_info, names_by_label)
     # 主持的显示名：形态层判出来的主持优先，其次是模型认的主讲人。
     host_id = str(shape_info.get("host_id") or "")
     host_label = names.get(host_id, "") if host_id else ""
@@ -180,6 +184,7 @@ def build_note(conn: sqlite3.Connection, sid: str) -> dict:
                     "stats": summary.get("stats") or {}},
         "streamer": streamer, "host": host_label or streamer,
         "shape": shape_info, "points": points, "by_speaker": by_speaker,
+        "opinion_map": opinion_map,
         "highlights": highlights, "bookmarks": marks,
         "speakers": speakers, "generated_at": generated_at,
         "related": rel,
@@ -239,36 +244,119 @@ def _group_points(points: list[dict], shape_info: dict,
     return out
 
 
-def _attach_history(conn: sqlite3.Connection, sid: str,
-                    groups: list[dict]) -> None:
-    """给每个「人 × 主题」组标上「这个主题他还在别的几场讲过」。
+def _attach_history(conn: sqlite3.Connection, points: list[dict]) -> None:
+    """给每个「人 × 主题」标上「这个主题他还在别的几场讲过」。
 
-    只在跨场时才标：只出现在这一场的观点不需要多一个徽标。分组的人用
-    person_id（认出来了）或本场昵称（没认出来），和 claims 的存法一一对应。
+    只在跨场时才标：只出现在这一场的观点不需要多一个徽标。人用本场署名
+    （``claim_speaker``），和 ``claims.who`` 的存法一一对应；按人分组和
+    观点地图读的是同一批 point 对象，写一次两边都有。
     """
-    if not groups:
+    if not points:
         return
     keys: set[str] = set()
     topics: set[str] = set()
-    for g in groups:
-        # 分组用的是「昵称」，对应的是 claims 的 who；身份列（speaker_id）
-        # 只有组里正好有同名的声纹簇时才有值，没有也照样要能跨场对上。
-        key = claims.person_key("", g.get("who") or "")
-        if not key or key == "name:本场共同讨论":
-            continue
-        for p in g.get("points") or []:
-            t = str(p.get("topic") or "").strip()
-            if t:
-                keys.add(key)
-                topics.add(t)
+    for p in points:
+        key = claims.person_key("", p.get("claim_speaker") or "")
+        topic = str(p.get("topic") or "").strip()
+        if key and topic:
+            keys.add(key)
+            topics.add(topic)
     if not keys:
         return
     hist = claims.history_index(conn, keys, topics)
-    for g in groups:
-        key = claims.person_key("", g.get("who") or "")
-        for p in g.get("points") or []:
-            info = hist.get((key, str(p.get("topic") or "").strip()))
-            p["cross_sessions"] = int(info["n_sessions"]) if info else 1
+    for p in points:
+        key = claims.person_key("", p.get("claim_speaker") or "")
+        info = hist.get((key, str(p.get("topic") or "").strip()))
+        p["cross_sessions"] = int(info["n_sessions"]) if info else 1
+
+
+def _opinion_map(points: list[dict], shape_info: dict,
+                 names_by_label: dict[str, str]) -> dict:
+    """本场的观点地图：按主题排，一个人一行，标出明确的分歧与无人回答的问题。
+
+    和「按人分组」互补：按人回答「他讲了什么」，按主题回答「**这场有几种
+    观点、谁和谁冲突、哪个问题没人答**」（docs/41 §3.5）。仍然只在已有要点
+    上做聚合，不新增模型调用、不推断谁对谁错。
+    """
+    if not points:
+        return {"topics": [], "open_questions": [], "stats": {}}
+    roles = (shape_info or {}).get("roles") or {}
+    by_topic: dict[str, list[dict]] = {}
+    for p in points:
+        by_topic.setdefault(claims.topic_label(p.get("topic") or ""), []).append(p)
+
+    topics: list[dict] = []
+    open_questions: list[dict] = []
+    n_conflicts = 0
+    for label, items in by_topic.items():
+        items.sort(key=lambda p: (p.get("t_from") is None, p.get("t_from") or 0))
+        kinds = [claims.point_kind(p) for p in items]
+        # 一个主题下全是提问、没有一条主张：这场没答上来，单列到「还没答案」。
+        if items and all(k == "question" for k in kinds):
+            for p in items[:3]:
+                src = next((e for e in p.get("evidence") or []
+                            if str(e.get("category") or "") == "question_consult"),
+                           (p.get("evidence") or [{}])[0])
+                open_questions.append({
+                    "text": str(p.get("stance") or p.get("title") or "")[:80],
+                    "who": str(p.get("claim_speaker") or ""),
+                    "t": src.get("t"), "quote": str(src.get("text") or "")[:120]})
+            continue
+
+        # 同一个主题下一个人只说一次：取他最早的那条，后面同人的并进来。
+        entries: dict[str, dict] = {}
+        for p, kind in zip(items, kinds):
+            if kind == "question":
+                continue
+            who = str(p.get("claim_speaker") or "").strip()
+            if who in entries:
+                entries[who]["n"] += 1
+                continue
+            sid = names_by_label.get(who, "") if who else ""
+            role = (roles.get(sid) or {}) if sid else {}
+            text = str(p.get("stance") or p.get("quote") or "")
+            entries[who] = {
+                "who": who or "本场共同讨论",
+                "speaker_id": sid,
+                "role": str(role.get("role") or ""),
+                "role_label": str(role.get("label") or ""),
+                "stance": str(p.get("stance") or p.get("title") or ""),
+                "gist": str(p.get("gist") or ""),
+                "quote": str(p.get("quote") or ""),
+                "t": p.get("t_from"), "n": 1,
+                "cross_sessions": int(p.get("cross_sessions") or 1),
+                # 只在原话里真出现了反对词时才标：说法不同 ≠ 反对。
+                "disagree": claims.disagrees(text),
+                "vs": "",
+            }
+        rows = [e for e in entries.values() if e["who"]]
+        if not rows:
+            continue
+        # 「和谁冲突」：反对的那位指向他前面最近的一个不同的人。
+        prev = ""
+        for e in rows:
+            if e["disagree"] and prev and prev != e["who"]:
+                e["vs"] = prev
+                n_conflicts += 1
+            prev = e["who"]
+        conflict = bool(n_conflicts and any(e["vs"] for e in rows))
+        # 组内按时间排，观众顺着听下来就是顺着看下来。
+        rows.sort(key=lambda e: (e["t"] is None, e["t"] or 0))
+        topics.append({"topic": label, "label": label, "n": len(items),
+                       "n_people": len(rows), "conflict": conflict,
+                       "t_from": items[0].get("t_from"), "entries": rows})
+
+    # 主题按出现先后排；「其他」永远最后（它不是主题，是没归类的兜底）。
+    topics.sort(key=lambda g: (g["label"] == claims.GENERIC_LABEL,
+                               g["t_from"] is None, g["t_from"] or 0))
+    return {
+        "topics": topics,
+        "open_questions": open_questions[:3],
+        "stats": {"topics": len(topics),
+                  "people": len({e["who"] for g in topics for e in g["entries"]}),
+                  "conflicts": len([g for g in topics if g["conflict"]]),
+                  "open_questions": len(open_questions)},
+    }
 
 
 def _related(conn: sqlite3.Connection, sid: str, topics: list[str],

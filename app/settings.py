@@ -126,6 +126,10 @@ DEFAULT_PREFS = {
     "weekly_time": "mon-09",  # mon-09 | mon-12 | sun-20
     "qa_enabled": True,       # 是否显示「问笔记」
     "qa_suggest_enabled": True,  # 搜索面板是否给追问建议
+    # 主动提醒：观点反转 / 老问题有新答案 / 常客上麦。默认关，
+    # 每场最多一条（docs/41 §4.5、§9）；单类开关沿用 notify_muted。
+    "insight_enabled": False,
+    "qa_followups_enabled": True,  # 答案下面是否给「接着问」
     "auto_record_enabled": False,  # 自动记录总开关；默认关（docs/36 D9）
     "max_rooms": 5,           # 自动记录同时上限 3 / 5 / 8
     "low_power_pause": True,  # 低电量时暂停实时转写
@@ -206,6 +210,7 @@ def prefs() -> dict[str, Any]:
     p["close_action"] = _close_action(p.get("close_action")) or "tray"
     for k in ("notify_enabled", "notify_system", "notify_sound", "notify_detail",
               "weekly_enabled", "qa_enabled", "qa_suggest_enabled",
+              "insight_enabled", "qa_followups_enabled",
               "auto_record_enabled", "low_power_pause"):
         b = _as_bool(p.get(k))
         p[k] = DEFAULT_PREFS[k] if b is None else b
@@ -275,7 +280,8 @@ def set_prefs(patch: dict[str, Any]) -> dict[str, Any]:
                     continue
             elif k in ("notify_enabled", "notify_system", "notify_sound",
                        "notify_detail", "weekly_enabled", "qa_enabled",
-                       "qa_suggest_enabled", "auto_record_enabled",
+                       "qa_suggest_enabled", "insight_enabled",
+                       "qa_followups_enabled", "auto_record_enabled",
                        "low_power_pause"):
                 v = _as_bool(v)
                 if v is None:

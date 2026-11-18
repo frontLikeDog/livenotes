@@ -12,8 +12,8 @@ from __future__ import annotations
 
 import traceback
 
-from . import (analysis, classify, logs, notes, notify, polish, qa, reader,
-               recluster, scheduler, store, titles)
+from . import (analysis, classify, insights, logs, notes, notify, polish, qa,
+               reader, recluster, scheduler, store, titles)
 
 _FILTER_KEYS = ("t_from", "t_to", "categories", "speakers", "q",
                 "exclude_low_value", "exclude_overlap", "min_conf")
@@ -97,6 +97,12 @@ def _run_summary(sid: str, payload: dict) -> dict:
             logs.log_event("live.finalize_done", session_id=sid,
                            engine=str(out.get("engine") or ""),
                            llm_error=bool(out.get("llm_error")))
+            # 主动提醒：观点反转 / 老问题有新答案。默认关，每场最多一条
+            # （记录中「常客上麦」若已发过，这里会自己跳过）。
+            try:
+                insights.after_finalize(conn, sid)
+            except Exception:
+                traceback.print_exc()
             # 用户已经走了，完成时主动告诉一声。手动点「生成总结」不发，
             # 因为用户就在页面上，再弹通知是打扰；失败走下面的 except 分支。
             try:

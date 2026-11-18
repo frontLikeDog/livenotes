@@ -48,7 +48,8 @@ def test_empty_corrupt_and_non_dict_file_are_safe(isolated_paths):
                   "notify_detail": True, "perf_mode": "auto",
                   "follow_interval_s": 120, "weekly_enabled": True,
                   "weekly_time": "mon-09", "qa_enabled": True,
-                  "qa_suggest_enabled": True, "auto_record_enabled": False,
+                  "qa_suggest_enabled": True, "qa_followups_enabled": True,
+                  "insight_enabled": False, "auto_record_enabled": False,
                   "max_rooms": 5, "low_power_pause": True},
         "direct_fallback": {"mode": "ask", "stored": "", "source": "default"},
     }
@@ -115,7 +116,9 @@ def test_prefs_clamping_and_unknown_keys(isolated_paths):
                                 "notify_detail": True, "perf_mode": "auto",
                                 "follow_interval_s": 120, "weekly_enabled": True,
                                 "weekly_time": "mon-09", "qa_enabled": True,
-                                "qa_suggest_enabled": True, "auto_record_enabled": False,
+                                "qa_suggest_enabled": True, "qa_followups_enabled": True,
+                                "insight_enabled": False,
+                                "auto_record_enabled": False,
                                 "max_rooms": 5, "low_power_pause": True}
     assert settings.set_prefs({"topics": 999})["topics"] == 40
     assert settings.set_prefs({"topics": -5})["topics"] == 3
@@ -128,7 +131,8 @@ def test_prefs_clamping_and_unknown_keys(isolated_paths):
                    "notify_detail": True, "perf_mode": "auto",
                    "follow_interval_s": 120, "weekly_enabled": True,
                    "weekly_time": "mon-09", "qa_enabled": True,
-                   "qa_suggest_enabled": True, "auto_record_enabled": False,
+                   "qa_suggest_enabled": True, "qa_followups_enabled": True,
+                   "insight_enabled": False, "auto_record_enabled": False,
                    "max_rooms": 5, "low_power_pause": True}
     _write({"version": 2, "profiles": {}, "prefs": {"topics": 100}})
     assert settings.prefs()["topics"] == 40

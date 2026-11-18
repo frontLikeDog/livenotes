@@ -38,8 +38,13 @@ KINDS: tuple[dict[str, str], ...] = (
     {"kind": "auto_record", "label": "自动记录", "desc": "关注开播后自动开始记录"},
     {"kind": "auto_record_failed", "label": "自动记录失败", "desc": "自动记录没开始，需要手动处理"},
     {"kind": "weekly_ready", "label": "周报", "desc": "上周的周报生成好了"},
+    # 主动提醒（docs/41 §4.5）：默认关、每场最多一条，可在设置里逐类关闭。
+    {"kind": "insight_reversal", "label": "观点有变化", "desc": "这个人这次说的和以前相反"},
+    {"kind": "insight_answer", "label": "老问题有答案", "desc": "以前没人回答的问题，这场有人答了"},
+    {"kind": "insight_speaker", "label": "常客上麦", "desc": "你记过很多观点的人出现在这场"},
 )
 KIND_KEYS = tuple(k["kind"] for k in KINDS)
+INSIGHT_KINDS = ("insight_reversal", "insight_answer", "insight_speaker")
 
 #: 设置页分组。壳按分组渲染，不在前端硬编码。
 GROUP = {
@@ -48,6 +53,8 @@ GROUP = {
     "disk_low": "系统", "engine_error": "系统", "tray_hint": "系统",
     "follow_live": "关注", "auto_record": "关注", "auto_record_failed": "关注",
     "weekly_ready": "周报",
+    "insight_reversal": "提醒", "insight_answer": "提醒",
+    "insight_speaker": "提醒",
 }
 # 失败通知优先级更高，前端用不同颜色。
 LEVELS = ("info", "warn", "error")
@@ -82,6 +89,9 @@ def enabled(kind: str) -> bool:
     """总开关 + 单类开关。未知类型默认放行，方便以后加事件不丢通知。"""
     p = settings.prefs()
     if not p.get("notify_enabled", True):
+        return False
+    # 主动提醒还有一层总开关：默认关，用户明确打开后才可能产生。
+    if kind in INSIGHT_KINDS and not p.get("insight_enabled", False):
         return False
     return kind not in set(p.get("notify_muted") or [])
 
@@ -240,6 +250,7 @@ def settings_view() -> dict:
         "system": bool(p.get("notify_system", True)),
         "sound": bool(p.get("notify_sound", True)),
         "detail": bool(p.get("notify_detail", True)),
+        "insights": bool(p.get("insight_enabled", False)),
         "muted": list(p.get("notify_muted") or []),
         "kinds": [dict(k, group=GROUP.get(k["kind"], "其他")) for k in KINDS],
     }
@@ -249,8 +260,10 @@ def update_settings(patch: dict) -> dict:
     """壳/设置页保存通知偏好。白名单在 settings.DEFAULT_PREFS 里。"""
     allowed = {k: patch[k] for k in
                ("notify_enabled", "notify_system", "notify_sound",
-                "notify_muted", "notify_detail")
+                "notify_muted", "notify_detail", "notify_insights")
                if k in (patch or {})}
+    if "notify_insights" in allowed:
+        allowed["insight_enabled"] = bool(allowed.pop("notify_insights"))
     if allowed:
         settings.set_prefs(allowed)
     return settings_view()
