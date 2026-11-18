@@ -213,7 +213,10 @@ def apply_summary(conn: sqlite3.Connection, sid: str, *, title: Any, alts: Any,
         return out(False, "本地只能给出人数，先保留默认名")
 
     if src == "default":
-        new_src = "auto" if engine_kind == "llm" else "auto_local"
+        # 来源看的是「这个名字是谁起的」，不是「总结用没用模型」：
+        # 总结走了模型、但标题是本地结构化兜底时，必须标 auto_local，
+        # 否则列表里会出现一个冒充 AI 起名的标题。
+        new_src = "auto" if title_kind == "llm" else "auto_local"
         store.set_title(conn, sid, main, new_src, clean)
         src, cur = new_src, main
         return out(True, "已按内容命名")
@@ -225,7 +228,7 @@ def apply_summary(conn: sqlite3.Connection, sid: str, *, title: Any, alts: Any,
     if main == cur:
         _save_alts(conn, sid, clean)
         return out(False, "名字没变")
-    new_src = "auto" if engine_kind == "llm" else "auto_local"
+    new_src = "auto" if title_kind == "llm" else "auto_local"
     store.set_title(conn, sid, main, new_src, clean)
     src, cur = new_src, main
     return out(True, "已更新为新总结的名字")

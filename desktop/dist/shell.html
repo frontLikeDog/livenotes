@@ -653,7 +653,7 @@
                   <div class="ctrl unit-ctrl"><input type="number" id="prefTopics" min="3" max="40" step="1" value="10"><span class="unit">个</span></div>
                 </div>
               </div>
-              <p class="set-note">AI 总结会优先使用已配置的模型；没配置时用本地摘要，内容仍可回溯到原文。</p>
+              <p class="set-note">总结只由已配置的大模型生成；没配置或调用失败时不会生成本地摘要，会直接说明原因。</p>
             </section>
 
             <section class="set-pane" data-pane="about">
@@ -712,6 +712,8 @@
     <span id="statRooms">0 个直播间</span>
     <span class="sep"></span>
     <span id="statLive">0 路在听</span>
+    <span class="sep"></span>
+    <span id="statTraffic" hidden title="所有在听房间折合每小时的平台下行 / 音频上行"></span>
     <span class="hint" id="statHint">关窗后继续录音 · Ctrl K 命令</span>
   </footer>
 </div>

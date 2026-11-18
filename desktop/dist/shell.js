@@ -18,6 +18,9 @@ const S = {
   health: null,
   rooms: [],
   live: [],
+  /* 采集端心跳里的流量快照：{roomId: {platform_mbps, audio_kbps, source, ...}}。
+     /api/traffic 单独下发，不塞进 /api/rooms，房间元数据和实时遥测分开。 */
+  traffic: {},
   sessions: [],
   selectedId: null,
   selectedSid: '',
@@ -74,6 +77,8 @@ const S = {
     spk: 'all', high: false, summaryScope: 'content',
     summaries: {}, coach: null, busy: false, seq: 0,
     audioReady: false, autoplay: false, seekT: null, currentT: 0,
+    /* 标题候选与生成失败原因：面板里要能分清「AI 起的名」「本地旧稿」和「这次没生成」。 */
+    titleCand: null, titleBusy: false, summaryError: null,
   },
   /* 原生设置：prefs 走引擎，主题走 localStorage。 */
   set: {
@@ -115,6 +120,42 @@ const fmtClock = (iso) => {
 };
 const hostOf = (u) => { try { return new URL(u).host.replace(/^www\./, ''); } catch (e) { return ''; } };
 const shortSid = (sid) => String(sid || '').replace(/^LIVE_/, '').replace(/_/g, ' ');
+
+/* 流量：字节与「折合每小时」。面板里按速率显示，读者关心的是会烧多少。 */
+const fmtBytes = (n) => {
+  n = Math.max(0, Number(n) || 0);
+  if (n >= 1e9) return (n / 1e9).toFixed(2) + ' GB';
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + ' MB';
+  if (n >= 1e3) return (n / 1e3).toFixed(0) + ' KB';
+  return Math.round(n) + ' B';
+};
+const fmtMBPerHour = (mb) => fmtBytes((Number(mb) || 0) * 1e6) + '/h';
+const fmtMbps = (mbps) => {
+  mbps = Math.max(0, Number(mbps) || 0);
+  return mbps >= 1 ? mbps.toFixed(2) + ' Mbps' : Math.round(mbps * 1000) + ' kbps';
+};
+const trafficSourceLabel = (src) => ({
+  cdp: '实测 · 浏览器 Network',
+  proxy: '实测 · 计数代理',
+  estimate: '估算 · 码率/分辨率',
+  mixed: '部分实测',
+  unavailable: '不可用',
+}[String(src || '')] || '—');
+function trafficFor(room) {
+  const tr = room && S.traffic ? S.traffic[room.id] : null;
+  return tr && typeof tr === 'object' ? tr : null;
+}
+function liveTrafficTotals() {
+  let n = 0, down = 0, up = 0;
+  for (const r of liveRooms()) {
+    const tr = trafficFor(r);
+    if (!tr) continue;
+    n += 1;
+    down += Number(tr.platform_mb_per_hour) || 0;
+    up += Number(tr.audio_mb_per_hour) || 0;
+  }
+  return { n, down, up };
+}
 
 /* 位置标签不是人名：与 app/voiceprint.py 的 GENERIC_NAMES 对齐。
    改名前如果只是「嘉宾 / 运营」，就只算角色标注，不算认出这个人。 */
@@ -456,21 +497,27 @@ function ensureSelection() {
 async function refreshRooms() {
   if (!API) { S.online = false; renderAll(); return; }
   try {
-    const [roomsRes, liveRes, health] = await Promise.all([
+    const [roomsRes, liveRes, health, trafficRes] = await Promise.all([
       api('/api/rooms'),
       api('/api/live/list').catch(() => ({ sessions: [] })),
       api('/api/health').catch(() => null),
+      api('/api/traffic').catch(() => ({ rooms: [] })),
     ]);
     S.rooms = (roomsRes.rooms || []).slice().sort((a, b) => {
       const rank = (r) => ({ live: 0, pending: 1, failed: 2, stopped: 3 }[stateInfo(r).k] ?? 3);
       return rank(a) - rank(b) || (Number(a.seq) || 0) - (Number(b.seq) || 0);
     });
     S.live = liveRes.sessions || [];
+    S.traffic = {};
+    for (const row of (trafficRes.rooms || [])) {
+      if (row && row.id) S.traffic[row.id] = row;
+    }
     S.health = health;
     S.online = true;
   } catch (e) {
     S.online = false;
     S.health = null;
+    S.traffic = {};
   }
   ensureSelection();
   const room = selectedRoom();
@@ -1355,6 +1402,14 @@ function renderAnnotInspector(room) {
   } else {
     kv.push(['回放', room.session_id ? '最后一次会话' : '—']);
   }
+  const tr = trafficFor(room);
+  if (tr && (Number(tr.platform_bytes) > 0 || tr.source === 'estimate')) {
+    kv.push(['平台下行', '↓ ' + fmtMbps(tr.platform_mbps) + ' · ' + fmtMBPerHour(tr.platform_mb_per_hour)]);
+  }
+  if (tr && Number(tr.audio_bytes) > 0) {
+    kv.push(['音频上行', '↑ ' + Math.round(Number(tr.audio_kbps) || 0) + ' kbps · '
+      + fmtMBPerHour(tr.audio_mb_per_hour)]);
+  }
 
   const scroll = $('#inspScroll');
   const top = scroll.scrollTop;
@@ -1742,6 +1797,21 @@ function renderInspector() {
     rows.push(['最后一块', s.last_chunk_ago_s != null ? Number(s.last_chunk_ago_s).toFixed(1) + 's 前' : '—']);
     if (s.last_line) rows.push(['最后一句', esc(String(s.last_line).slice(0, 60))]);
   }
+  // 流量放在「这一路」里：它是实时遥测，跟着房间走，不是设置/日志里的历史账。
+  const tr = trafficFor(room);
+  const hasDown = tr && (Number(tr.platform_bytes) > 0 || tr.source === 'estimate');
+  if (hasDown) {
+    rows.push(['平台下行', '<span title="本次已收 ' + fmtBytes(tr.platform_bytes)
+      + '">↓ ' + fmtMbps(tr.platform_mbps) + ' · ' + fmtMBPerHour(tr.platform_mb_per_hour) + '</span>']);
+  }
+  if (tr && Number(tr.audio_bytes) > 0) {
+    rows.push(['音频上行', '<span title="采集端推给本机服务的音频；同机运行时走回环，不占宽带出口">↑ '
+      + Math.round(Number(tr.audio_kbps) || 0) + ' kbps · ' + fmtMBPerHour(tr.audio_mb_per_hour) + '</span>']);
+  }
+  if (hasDown) {
+    rows.push(['流量计量', '<span title="' + esc(tr.note || '')
+      + '">' + trafficSourceLabel(tr.source) + '</span>']);
+  }
   if (room.error) rows.push(['错误', '<span style="color:var(--red)">' + esc(String(room.error).slice(0, 80)) + '</span>']);
 
   const lines = S.lines.slice(-12).map((r) => {
@@ -1791,6 +1861,13 @@ function renderStatus() {
       : '没有拿到引擎地址（window.__LN_ENGINE__ 为空）。');
   $('#statRooms').textContent = S.rooms.length + ' 个直播间';
   $('#statLive').textContent = liveRooms().length + ' 路在听';
+  const tt = liveTrafficTotals();
+  const statTr = $('#statTraffic');
+  statTr.hidden = !tt.n;
+  statTr.textContent = tt.n
+    ? '↓ ' + fmtMBPerHour(tt.down) + ' · ↑ ' + fmtMBPerHour(tt.up) : '';
+  statTr.title = tt.n
+    ? '在听 ' + tt.n + ' 路折合每小时；音频上行同机运行时走回环，不占宽带出口' : '';
   $('#liveCount').textContent = String(liveRooms().length);
   const pill = $('#recPill');
   pill.classList.toggle('idle', liveRooms().length === 0);
@@ -1862,6 +1939,7 @@ function renderWbHeader() {
       (wb.total || wb.rows.length) + ' 条发言',
       wb.speakers.length + ' 位说话人',
     ].filter(Boolean);
+    if (s && s.title_source) meta.push('标题 ' + wbTitleSourceLabel(s.title_source));
     $('#wbMeta').textContent = meta.join(' · ');
   }
   $('#wbExport').disabled = !wb.sid;
@@ -1995,6 +2073,9 @@ async function openWorkbench(sid, opts) {
     wb.summaries = {};
     wb.coach = null;
     wb.summaryScope = 'content';
+    wb.titleCand = null;
+    wb.titleBusy = false;
+    wb.summaryError = null;
     wb.currentT = 0;
     wb.autoplay = !!opts.autoplay;
     wb.seekT = opts.t != null ? Number(opts.t) : null;
@@ -2093,6 +2174,131 @@ function wbTogglePlay() {
   else audio.pause();
 }
 
+/* ---------------------------------------------------------------- 总结来源与标题 */
+function wbEngineMeta(payload) {
+  const eng = String((payload && payload.engine) || '');
+  const kind = String((payload && payload.engine_kind)
+    || (eng.indexOf('llm') === 0 ? 'llm' : (eng ? 'extractive' : 'unknown')));
+  if (kind === 'llm') {
+    const m = eng.match(/^llm\((.*)\)$/);
+    const model = String((payload && payload.engine_model) || (m && m[1]) || '');
+    return {
+      cls: 'is-llm', label: 'AI 生成',
+      detail: model || '模型名未记录', note: '',
+    };
+  }
+  if (kind === 'extractive') {
+    return {
+      cls: 'is-local', label: '本地摘要（旧版）', detail: '不是 AI 生成',
+      note: '本地抽取式已停用；重新生成会调用大模型。',
+    };
+  }
+  return {
+    cls: 'is-unknown', label: '旧版摘要', detail: '生成方式未知',
+    note: '这条总结来自旧版本，无法确认是否由模型生成。',
+  };
+}
+function wbTitleSourceLabel(src) {
+  src = String(src || '');
+  // auto 只代表「系统起的」；旧数据没有 title_kind，不能一概叫 AI 命名。
+  return src === 'user' ? '你命名的'
+    : src === 'auto' ? '自动命名'
+      : src === 'auto_local' ? '本地命名'
+        : src === 'legacy' ? '旧版命名' : '默认名';
+}
+function wbTitleBarHtml() {
+  const wb = S.wb;
+  const p = wb.summaries.content || {};
+  const s = findSession(wb.sid) || {};
+  const cand = wb.titleCand;
+  const main = String((cand && cand.title) || p.title || '').trim();
+  if (!main) return '';
+  const cur = String(s.title || '').trim();
+  const alts = (((cand && cand.alts) || p.title_alts || []) || [])
+    .map((x) => String(x || '').trim())
+    .filter((x) => x && x !== main && x !== cur)
+    .filter((x, i, arr) => arr.indexOf(x) === i)
+    .slice(0, 2);
+  const applied = !cand && (!!p.title_applied || main === cur);
+  const reason = String((cand && cand.reason) || p.title_reason || '');
+  if (!cand && applied && !alts.length) return '';
+  if (!cand && /内容太少|内容不足|只能给出人数|局部筛选/.test(reason)) return '';
+  // 标题来源必须说真话：只有 title_kind=llm 才配叫「AI 标题」。
+  // 旧数据没有 title_kind，auto 只写「自动标题」，不冒充 AI。
+  const src = String(s.title_source || '');
+  const tk = String(p.title_kind || '');
+  const kicker = cand ? 'AI 标题（候选）'
+    : !applied ? (tk === 'llm' ? 'AI 建议标题' : '建议标题')
+      : src === 'user' ? '你命名的标题'
+        : src === 'auto' ? (tk === 'llm' ? 'AI 标题' : '自动标题')
+          : src === 'auto_local' ? '本地标题'
+            : src === 'legacy' ? '旧版标题' : '标题';
+  const srcLabel = cand ? 'AI 起的名字 · 未采用' : wbTitleSourceLabel(src);
+  return '<div class="sum-titlebar">' +
+    '<div class="tb-head"><span class="tb-kicker">' + kicker + '</span>' +
+    '<span class="tb-src">' + esc(srcLabel) + '</span>' +
+    '<span class="tb-acts">' +
+    (applied ? '<span class="tb-current">当前名</span>'
+      : '<button class="tb-btn" data-title-adopt="' + esc(main) + '">采用</button>') +
+    '<button class="tb-btn ghost" data-title-fresh="1" title="再调一次模型换个名字（会消耗 token）">换一个</button>' +
+    '</span></div>' +
+    '<b class="tb-main">' + esc(main) + '</b>' +
+    (alts.length ? '<div class="tb-alts">' + alts.map((a) =>
+      '<button class="tb-alt" data-title-adopt="' + esc(a) + '">' + esc(a) + '</button>').join('') + '</div>' : '') +
+    (cur && cur !== main && !applied
+      ? '<div class="tb-note">当前名：' + esc(cur) + '；采用会覆盖它</div>' : '') +
+    (reason ? '<div class="tb-note">' + esc(reason) + '</div>' : '') +
+    '</div>';
+}
+async function adoptWbTitle(t) {
+  const wb = S.wb;
+  if (!wb.sid || !t) return;
+  try {
+    await post('/api/sessions/title/adopt', { session_id: wb.sid, title: t });
+    wb.titleCand = null;
+    // 面板里缓存的是「总结那次的标题快照」：采用后要同步，否则标题条还挂着
+    // 旧名字和「采用」按钮，再点一次会把用户刚定的名字覆盖回去。
+    const p = wb.summaries.content;
+    if (p) {
+      p.title = t;
+      p.title_applied = true;
+      p.title_source = 'user';
+      p.title_alts = [];
+    }
+    await loadSessions();
+    renderWbHeader();
+    renderSidebar();
+    renderWbSummary();
+    toast('已命名为「' + t + '」');
+  } catch (e) {
+    toast('采用失败：' + e.message);
+  }
+}
+async function freshWbTitle() {
+  const wb = S.wb;
+  if (!wb.sid || wb.titleBusy) return;
+  wb.titleBusy = true;
+  try {
+    const sg = await api('/api/sessions/suggest_title?session_id=' +
+      encodeURIComponent(wb.sid) + '&fresh=1');
+    const ai = (sg.groups || []).find((g) => g.kind === 'ai');
+    const items = ((ai && ai.items) || []).filter((x) => String(x || '').trim());
+    if (!items.length) {
+      toast('模型没给出新名字（可能没配好或内容太少）');
+      return;
+    }
+    wb.titleCand = {
+      title: items[0], alts: items.slice(1, 3),
+      reason: '新起的名字，点「采用」才生效；换一次会消耗 token',
+    };
+    renderWbSummary();
+  } catch (e) {
+    toast('换一个失败：' + e.message);
+  } finally {
+    wb.titleBusy = false;
+  }
+}
+
 function wbPointHtml(p) {
   const t = p && p.t_from != null ? Number(p.t_from) : 0;
   const sp = Array.isArray(p && p.speakers) ? p.speakers.slice(0, 2).join(' / ') : '';
@@ -2101,12 +2307,30 @@ function wbPointHtml(p) {
     '<div class="sum-meta">' + ((p && p.utterance_count) || 0) + ' 条' + (sp ? ' · ' + esc(sp) : '') + '</div></div></li>';
 }
 function wbSummaryHtml(payload, scope) {
+  const err = S.wb.summaryError && S.wb.summaryError.scope === scope
+    ? S.wb.summaryError.message : '';
   if (!payload) {
     const name = scope === 'time' ? '时间轴总结' : (scope === 'category' ? '分类总结' : '内容总结');
-    return '<div class="sum-empty">这一场还没有' + name + '。<br>生成后会按要点列出，点时间码可以回到原文。' +
-      '<br><button class="btn sm" data-wb-gen="' + scope + '">生成总结</button></div>';
+    const short = /内容太少/.test(err);
+    return '<div class="sum-empty">这一场还没有' + name + '。' +
+      '<br>总结只由大模型生成；本地抽取式已停用。' +
+      (err ? '<div class="sum-error">' + esc(err) + '</div>' : '') +
+      '<br><button class="btn sm" data-wb-gen="' + scope + '">生成总结</button>' +
+      (short ? '<button class="btn sm" data-wb-gen="' + scope + '" data-engine="llm">仍用大模型生成</button>' : '') +
+      '</div>';
   }
   let html = '';
+  const em = wbEngineMeta(payload);
+  html += '<div class="sum-engine ' + em.cls + '">' +
+    '<span class="se-k">' + esc(em.label) + '</span>' +
+    (em.detail ? '<span> · ' + esc(em.detail) + '</span>' : '') +
+    (payload.generated_at ? '<span> · ' + esc(fmtClock(payload.generated_at)) + '</span>' : '') +
+    (payload.cached ? '<span> · 缓存命中 · 0 token</span>' : '') +
+    (!payload.cached && payload.usage && payload.usage.total_tokens
+      ? '<span> · ' + Number(payload.usage.total_tokens) + ' tokens</span>' : '') +
+    (em.note ? '<div class="se-note">' + esc(em.note) + '</div>' : '') +
+    '</div>';
+  if (err) html += '<div class="sum-error">' + esc(err) + '</div>';
   if (payload.overview) html += '<p class="sum-lead">' + esc(payload.overview) + '</p>';
   if (scope === 'category' && Array.isArray(payload.groups) && payload.groups.length) {
     html += payload.groups.map((g) => {
@@ -2129,11 +2353,12 @@ function wbSummaryHtml(payload, scope) {
   } else {
     html += '<div class="sum-empty">这一场内容太少，暂时整理不出要点。</div>';
   }
-  const meta = [payload.engine_kind === 'llm' ? 'AI 生成' : '本地摘要'];
-  if (payload.generated_at) meta.push(fmtClock(payload.generated_at));
-  if (payload.stats && payload.stats.included_utterances != null) meta.push(payload.stats.included_utterances + ' 条入选');
-  html += '<p class="sum-foot">' + esc(meta.join(' · ')) +
-    (Array.isArray(payload.caveats) && payload.caveats.length ? '<br>' + esc(payload.caveats[0]) : '') + '</p>';
+  const meta = [];
+  if (payload.stats && payload.stats.included_utterances != null) {
+    meta.push(payload.stats.included_utterances + ' 条入选');
+  }
+  if (Array.isArray(payload.caveats) && payload.caveats.length) meta.push(payload.caveats[0]);
+  if (meta.length) html += '<p class="sum-foot">' + esc(meta.join(' · ')) + '</p>';
   return html;
 }
 function wbCoachHtml() {
@@ -2173,10 +2398,19 @@ function wbCoachHtml() {
   if (Array.isArray(c.caveats) && c.caveats.length) html += '<p class="sum-foot">' + esc(c.caveats[0]) + '</p>';
   return html;
 }
+function wbSummaryKicker(scope) {
+  if (scope === 'coach') return '复盘';
+  const p = S.wb.summaries[scope];
+  if (!p) return '总结';
+  const em = wbEngineMeta(p);
+  if (em.cls === 'is-llm') return 'AI 总结';
+  if (em.cls === 'is-local') return '本地摘要（旧版）';
+  return '旧版摘要';
+}
 function renderWbSummary() {
   const wb = S.wb;
   const scope = wb.summaryScope;
-  $('#inspKicker').textContent = 'AI 总结';
+  $('#inspKicker').textContent = wbSummaryKicker(scope);
   const s = findSession(wb.sid);
   $('#inspTitle').textContent = wb.sid ? ((s && s.title) || '本场笔记') : '本场笔记';
   $('#inspSub').textContent = wb.sid ? '要点可回溯原文 · ' + shortSid(wb.sid) : '选择一场查看总结';
@@ -2185,7 +2419,10 @@ function renderWbSummary() {
     '<button class="sum-tab' + (scope === k ? ' on' : '') + '" data-sum-tab="' + k + '">' + l + '</button>').join('') + '</div>';
   if (!wb.sid) body += '<div class="sum-empty">从左边选一场，这里会显示 AI 总结。</div>';
   else if (scope === 'coach') body += wbCoachHtml();
-  else body += wbSummaryHtml(wb.summaries[scope], scope);
+  else {
+    if (scope === 'content') body += wbTitleBarHtml();
+    body += wbSummaryHtml(wb.summaries[scope], scope);
+  }
   const scroll = $('#inspScroll');
   const top = scroll.scrollTop;
   scroll.innerHTML = body;
@@ -2224,24 +2461,38 @@ function setWbSummaryScope(scope) {
   if (scope === 'coach') loadWbCoach();
   else if (!S.wb.summaries[scope]) loadWbSummary(scope);
 }
-async function generateWbSummary(scope) {
+async function generateWbSummary(scope, engine) {
   const wb = S.wb;
   const sid = wb.sid;
   if (!sid || wb.busy) return;
   wb.busy = true;
+  wb.summaryError = null;
+  wb.titleCand = null;      // 重新生成后，旧的「换一个」候选就过期了
   renderWbSummary();
   try {
     if (scope === 'coach') {
       const d = await api('/api/coach?session_id=' + encodeURIComponent(sid));
       if (S.wb.sid === sid) wb.coach = d;
     } else {
-      await post('/api/summarize', { session_id: sid, mode: scope, engine: 'auto' });
+      await post('/api/summarize', {
+        session_id: sid, mode: scope, engine: engine || 'auto',
+      });
       const d = await api('/api/summary?session_id=' + encodeURIComponent(sid) + '&scope=' + scope);
       if (S.wb.sid === sid && d && d.ok && d.payload) wb.summaries[scope] = d.payload;
+      if (S.wb.sid === sid && scope === 'content') {
+        try {
+          await loadSessions();
+          renderWbHeader();
+          renderSidebar();
+        } catch (e) {}
+      }
     }
     if (S.wb.sid === sid) toast(scope === 'coach' ? '复盘已更新' : '总结已生成');
   } catch (e) {
-    if (S.wb.sid === sid) toast('生成失败：' + e.message);
+    if (S.wb.sid === sid) {
+      wb.summaryError = { scope: scope, message: e.message };
+      toast('生成失败：' + e.message);
+    }
   }
   wb.busy = false;
   if (S.wb.sid === sid) renderWbSummary();
@@ -4378,9 +4629,14 @@ function bind() {
   });
   const wbSyncPlay = () => {
     const on = !$('#wbAudio').paused;
-    $('#wbPlay .p-play').hidden = on;
-    $('#wbPlay .p-pause').hidden = !on;
-    $('#wbPlay').title = on ? '暂停' : '播放';
+    // SVGElement 没有 hidden 这个 IDL 属性：写 `.hidden = true` 只是挂了个
+    // JS 自定义属性，不会动 HTML 里的 hidden 特性，图标自然永远不切换。
+    // 必须用 toggleAttribute 改特性。
+    const btn = $('#wbPlay');
+    btn.querySelector('.p-play').toggleAttribute('hidden', on);
+    btn.querySelector('.p-pause').toggleAttribute('hidden', !on);
+    btn.title = on ? '暂停' : '播放';
+    btn.setAttribute('aria-label', on ? '暂停' : '播放');
   };
   $('#wbAudio').addEventListener('timeupdate', () => {
     const audio = $('#wbAudio');
@@ -4396,14 +4652,18 @@ function bind() {
   $('#inspScroll').addEventListener('click', (e) => {
     const tab = e.target.closest('[data-sum-tab]');
     if (tab) return setWbSummaryScope(tab.dataset.sumTab);
+    const adopt = e.target.closest('[data-title-adopt]');
+    if (adopt) return adoptWbTitle(adopt.dataset.titleAdopt);
+    const fresh = e.target.closest('[data-title-fresh]');
+    if (fresh) return freshWbTitle();
     const gen = e.target.closest('[data-wb-gen]');
-    if (gen) return generateWbSummary(gen.dataset.wbGen);
+    if (gen) return generateWbSummary(gen.dataset.wbGen, gen.dataset.engine);
     const seek = e.target.closest('[data-seek]');
     if (seek) return wbSeek(Number(seek.dataset.seek) || 0, { play: true });
   });
   $('#inspActions').addEventListener('click', (e) => {
     const gen = e.target.closest('[data-wb-gen]');
-    if (gen) generateWbSummary(gen.dataset.wbGen);
+    if (gen) generateWbSummary(gen.dataset.wbGen, gen.dataset.engine);
   });
 
   /* 原生设置：分类、搜索、即时保存 */

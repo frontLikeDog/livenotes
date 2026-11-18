@@ -141,7 +141,7 @@ def suggest_title(conn: sqlite3.Connection, sid: str, fresh: bool = False) -> di
                 "groups": [], "cached": False}
 
     cached, kind = _cached_titles(conn, sid)
-    # 只有模型起的名字才进「AI 起的名」；本地抽取的名字混进去会误导用户
+    # 只有模型起的名字才进「AI 起的名」；本地命名的名字混进去会误导用户
     ai = [t for t in cached if kind == "llm" and t != cur]
     local = [t for t in cached if kind == "local" and t != cur]
     fresh_title = ""

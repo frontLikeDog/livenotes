@@ -344,14 +344,15 @@ SAMPLE_RATE = 16000          # 声纹/ASR 统一重采样到 16k 单声道
 SEGMENT_SECONDS = 60         # 落盘分片长度，防止长直播崩溃丢全场
 SUMMARY_BUCKET_SECONDS = 600 # 「按时间段」总结的默认分桶（10 分钟）
 
-# 可选 LLM（不配置则使用本地抽取式总结，功能不降级为不可用）
+# 可选 LLM：正式总结必须有模型；未配置时明确失败，不再生成本地抽取稿。
+# 直播简报 / 问笔记等独立能力仍有各自的本地降级，并在输出里标明来源。
 LLM_BASE = os.environ.get("LIVENOTES_LLM_BASE", "").rstrip("/")
 LLM_KEY = os.environ.get("LIVENOTES_LLM_KEY", "")
 LLM_MODEL = os.environ.get("LIVENOTES_LLM_MODEL", "")
 LLM_TIMEOUT = int(os.environ.get("LIVENOTES_LLM_TIMEOUT", "60"))
 # 单次 socket 读写的超时（上面的 LLM_TIMEOUT）不封顶「整次请求」：中转站只要一直
 # 慢慢吐字节，urlopen 就永远不会超时——实测有过一次收尾调用挂 7 分钟没回来。
-# 这个值是整次调用的硬上限，到点就放弃、回退本地抽取式，绝不把收尾线程吊死。
+# 这个值是整次调用的硬上限，到点就放弃本次生成并报错，绝不把收尾线程吊死。
 LLM_TOTAL_TIMEOUT = int(os.environ.get("LIVENOTES_LLM_TOTAL_TIMEOUT", "75"))
 
 
@@ -396,8 +397,8 @@ LLM_MAX_ATTEMPTS = max(1, min(8, _env_int("LIVENOTES_LLM_MAX_ATTEMPTS", 3)))
 # 指数退避：base * 2^(n-1)，加抖动，封顶 cap；设为 0 可关闭等待（测试用）。
 LLM_BACKOFF_BASE_S = max(0.0, _env_float("LIVENOTES_LLM_BACKOFF_BASE", 1.0))
 LLM_BACKOFF_MAX_S = max(0.0, _env_float("LIVENOTES_LLM_BACKOFF_MAX", 30.0))
-# token 预算：0 = 不限制，也是默认值。总结/标注跑一半被预算掐断、退回抽取式的
-# 体验太差（长直播尤其明显），所以默认不设上限；要限额时用环境变量显式打开。
+# token 预算：0 = 不限制，也是默认值。总结/标注跑一半被预算掐断就只能明确失败
+#（本地稿已移除），体验很差（长直播尤其明显），所以默认不设上限；要限额时显式打开。
 LLM_SESSION_TOKEN_BUDGET = max(0, _env_int("LIVENOTES_LLM_SESSION_TOKEN_BUDGET", 0))
 LLM_DAILY_TOKEN_BUDGET = max(0, _env_int("LIVENOTES_LLM_DAILY_TOKEN_BUDGET", 0))
 # 送进总结的逐句上限：超过就按时间分层抽样（覆盖全场，而不是只取开头）。

@@ -612,6 +612,51 @@ html[data-theme="light"] .theme-toggle .icon-moon{display:block}
 .sum-empty{padding:30px 8px;text-align:center;color:var(--faint);font-size:10.5px;line-height:1.9}
 .sum-empty .btn{margin-top:10px}
 
+/* 播放键：SVG 的 hidden 特性必须由 display:none 兜底（见 shell.js wbSyncPlay） */
+.p-btn svg[hidden]{display:none!important}
+
+/* 总结来源条：AI / 旧版本地稿必须一眼分清 */
+.sum-engine{
+  margin:10px 0 2px;padding:7px 9px;border:1px solid var(--line);border-radius:7px;
+  background:var(--panel-2);font-size:9px;line-height:1.6;color:var(--faint);
+}
+.sum-engine .se-k{font-family:var(--mono);font-size:9.5px;letter-spacing:.3px;font-weight:600}
+.sum-engine.is-llm{border-color:var(--amber-line);background:var(--amber-soft);color:var(--amber)}
+.sum-engine.is-local{border-color:rgba(233,124,112,.28);background:var(--red-soft);color:var(--red)}
+.sum-engine.is-unknown{border-color:var(--line-2);color:var(--muted)}
+.sum-engine .se-note{margin-top:4px;color:var(--faint);font-size:9px}
+.sum-error{
+  margin:9px 0;padding:8px 9px;border:1px solid rgba(233,124,112,.28);border-radius:7px;
+  background:var(--red-soft);color:var(--red);font-size:10px;line-height:1.65;text-align:left;
+}
+
+/* 总结面板顶部 · AI 标题候选（读缓存，0 token；「换一个」才调模型） */
+.sum-titlebar{
+  margin:10px 0 8px;padding:9px 10px;border:1px solid var(--amber-line);border-radius:8px;
+  background:var(--panel-2);
+}
+.sum-titlebar .tb-head{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+.sum-titlebar .tb-kicker{font-family:var(--mono);font-size:9px;letter-spacing:.5px;color:var(--amber)}
+.sum-titlebar .tb-src{font-size:9px;color:var(--faint);border:1px solid var(--line-2);border-radius:4px;padding:0 5px}
+.sum-titlebar .tb-acts{margin-left:auto;display:flex;gap:5px;align-items:center}
+.sum-titlebar .tb-btn{
+  height:22px;padding:0 9px;border-radius:5px;border:1px solid transparent;
+  background:var(--amber);color:var(--primary-ink);font-size:9.5px;font-weight:600;
+}
+.sum-titlebar .tb-btn.ghost{background:transparent;border-color:var(--line-2);color:var(--muted);font-weight:400}
+.sum-titlebar .tb-btn:hover{filter:brightness(1.05)}
+.sum-titlebar .tb-current{font-size:9px;color:var(--jade);border:1px solid rgba(127,211,174,.3);
+  background:var(--jade-soft);border-radius:4px;padding:1px 6px}
+.sum-titlebar .tb-main{display:block;margin-top:6px;font-size:11.5px;line-height:1.55;color:var(--ink-strong);
+  font-weight:600;overflow-wrap:anywhere}
+.sum-titlebar .tb-alts{display:flex;gap:5px;flex-wrap:wrap;margin-top:6px}
+.sum-titlebar .tb-alt{
+  font-size:9.5px;padding:2px 8px;border-radius:999px;border:1px solid var(--line-2);
+  color:var(--muted);background:var(--panel);
+}
+.sum-titlebar .tb-alt:hover{border-color:var(--amber-line);color:var(--amber)}
+.sum-titlebar .tb-note{margin-top:5px;font-size:9px;line-height:1.55;color:var(--faint)}
+
 /* ------------------------------------------------------------ settings */
 .set-view{position:absolute;inset:0;display:flex;flex-direction:column;background:var(--bg);min-height:0}
 .settings-head{

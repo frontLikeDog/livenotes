@@ -246,7 +246,7 @@ function applyState(s){
   }
   setStatus(s.configured
     ? ('当前使用：'+cur.name+' · '+(cur.model||'')+' @ '+(cur.base||''))
-    : '当前档案还没填全：总结会走本地抽取式，自动标题只能给摘录。',
+    : '当前档案还没填全：还不能生成 AI 总结，自动标题只能给摘录。',
     s.configured?'ok':'');
 }
 async function openSettings(){

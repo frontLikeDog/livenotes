@@ -3,7 +3,7 @@
 
 三个层级各测一遍：
 1. ``app.shape``：只看行数据，0 token，形态与角色判定；
-2. ``analysis``：抽取式与理解段都给要点补上 ``claim_speaker`` / ``stance``；
+2. ``analysis``：理解段给要点补上 ``claim_speaker`` / ``stance``；本地抽取式已被拒绝；
 3. ``notes.build_note``：圆桌按人分组、单人保持扁平、导出跟着换标题。
 """
 from __future__ import annotations
@@ -140,33 +140,28 @@ def test_stance_skips_fillers_and_takes_the_real_claim():
     assert analysis._stance("") == ""
 
 
-def test_stance_never_returns_a_bare_filler(db):
-    _seed(db, "S_FILL", [
-        ("SPK_00", "阿哲", "substantive", "我觉得吧，先算清楚现金流能撑几个月，再决定要不要走。", 30),
-        ("SPK_01", "小鹿", "substantive", "就是说，账号限流先查违规通知，再看完播曲线。", 24),
-    ])
-    scope = analysis.build_scope(db, "S_FILL", dict(analysis.WHOLE_FILTERS), "content")
-    for p in analysis._extractive_points(scope):
-        assert p["stance"] not in ("我觉得", "就是说", "我认为", "")
-        assert len(p["stance"]) >= 4
+def test_stance_never_returns_a_bare_filler():
+    for text in ("我觉得吧，先算清楚现金流能撑几个月，再决定要不要走。",
+                 "就是说，账号限流先查违规通知，再看完播曲线。"):
+        st = analysis._stance(text)
+        assert st not in ("我觉得", "就是说", "我认为", "")
+        assert len(st) >= 4
 
 
-def test_extractive_points_carry_claim_speaker(db):
-    _seed(db, "S_EX", [("SPK_00", "老王", "host_control", "欢迎来到直播间", 6),
-                       ("SPK_01", "阿哲", "substantive", "复购率比单场 GMV 更重要，这是长期生意。", 30),
-                       ("SPK_02", "小鹿", "substantive", "我补充一个案例，去年就吃过这个亏。", 24)])
-    scope = analysis.build_scope(db, "S_EX", dict(analysis.WHOLE_FILTERS), "content")
-    points = analysis._extractive_points(scope)
-    assert points
-    for p in points:
-        assert p["claim_speaker"] in ("阿哲", "小鹿", "老王", "")
-        assert "stance" in p
-    # 立场句取自第一条证据；gist 从第二句接，不重复同一句话。
-    mine = [p for p in points if "复购" in (p.get("stance") or "")
-            or "复购" in (p.get("gist") or "")]
-    assert mine and mine[0]["claim_speaker"] == "阿哲"
-    assert mine[0]["stance"].startswith("复购率")
-    assert "复购" not in (mine[0].get("gist") or "")
+def test_attach_claims_uses_evidence_time_and_first_quote():
+    """没有模型归属时：署名按证据时长累加，立场取第一条证据的主张句。"""
+    pts = [{"evidence": [
+        {"speaker_label": "阿哲", "t_start": 0, "t_end": 30,
+         "quote": "我觉得吧，复购率比单场 GMV 更重要。"},
+        {"speaker_label": "小鹿", "t_start": 31, "t_end": 55,
+         "quote": "我补充一个案例，去年就吃过这个亏。"},
+        {"speaker_label": "老王", "t_start": 56, "t_end": 62,
+         "quote": "欢迎来到直播间"},
+    ]}]
+    analysis._attach_claims(pts)
+    p = pts[0]
+    assert p["claim_speaker"] == "阿哲"
+    assert p["stance"] == "复购率比单场 GMV 更重要"
 
 
 def test_attach_claims_keeps_model_given_values():
@@ -310,17 +305,50 @@ def test_export_markdown_keeps_old_shape_for_single(db):
 
 # ---------------------------------------------------------------- 理解段落库
 
-def test_make_summary_persists_shape_and_claims(db):
-    _note_roundtable(db)
-    # 抽取式路径：不配模型也不该丢形态与归属
-    out = analysis.make_summary(db, "S_RT", dict(analysis.WHOLE_FILTERS),
-                                "content", "extractive")
+def test_make_summary_persists_shape_and_claims(db, monkeypatch):
+    sid, (a_zhe, xiao_lu, _) = _note_roundtable(db)
+    monkeypatch.setattr(analysis.settings, "resolve",
+                        lambda: {"model": "test-model", "configured": True})
+
+    def fake_llm_points(scope, usage=None, errors=None):
+        if usage is not None:
+            usage["model"] = "test-model"
+        pts = [{"title": "OPC 政策", "gist": "两种判断", "t_from": 13, "t_to": 60,
+                "speakers": ["阿哲", "小鹿"],
+                "evidence": [
+                    {"id": a_zhe, "t_start": 13, "text": "我认为明年 OPC 会被收紧",
+                     "speaker_label": "阿哲"},
+                    {"id": xiao_lu, "t_start": 54, "text": "真正的变量是平台抽成",
+                     "speaker_label": "小鹿"},
+                ]}]
+        analysis._attach_claims(pts)
+        return ("模型概述", pts, "一场圆桌", [], ["OPC 政策"], "阿哲")
+
+    monkeypatch.setattr(analysis, "_llm_points", fake_llm_points)
+    out = analysis.make_summary(db, sid, dict(analysis.WHOLE_FILTERS),
+                                "content", "llm")
+    assert out["engine_kind"] == "llm"
+    assert out["engine_model"] == "test-model"
+    assert out["title_kind"] == "llm"
     assert out["shape"]["kind"] == shape.SHAPE_ROUNDTABLE
-    assert all("claim_speaker" in p for p in out["points"])
+    assert out["points"][0]["claim_speaker"] == "阿哲"
     payload = json.loads(db.execute(
         "SELECT payload_json FROM summaries WHERE session_id='S_RT' "
         "ORDER BY id DESC LIMIT 1").fetchone()["payload_json"])
+    assert payload["engine_kind"] == "llm"
     assert payload["shape"]["kind"] == shape.SHAPE_ROUNDTABLE
+    assert payload["points"][0]["claim_speaker"] == "阿哲"
+
+
+def test_make_summary_rejects_local_extractive(db):
+    _note_roundtable(db)
+    try:
+        analysis.make_summary(db, "S_RT", dict(analysis.WHOLE_FILTERS),
+                              "content", "extractive")
+    except RuntimeError as e:
+        assert "本地总结已移除" in str(e)
+    else:
+        assert False, "本地抽取式必须被拒绝"
 
 
 def test_finalize_refreshes_claim_after_relabel(db):

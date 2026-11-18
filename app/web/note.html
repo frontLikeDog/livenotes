@@ -138,6 +138,25 @@ try{var _t=new URLSearchParams(location.search).get('theme');if(_t)document.docu
     return sec;
   }
 
+  function summaryProvenance(summary) {
+    summary = summary || {};
+    var kind = summary.engine_kind || '';
+    if (!kind && summary.engine) {
+      kind = String(summary.engine).indexOf('llm') === 0 ? 'llm' : 'extractive';
+    }
+    var at = summary.generated_at ? ' · ' + P1.fmtStamp(summary.generated_at) : '';
+    if (kind === 'llm') {
+      var m = String(summary.engine || '').match(/^llm\((.*)\)$/);
+      var model = summary.engine_model || (m && m[1]) || '';
+      return (model ? '本笔记由 ' + model + ' 生成'
+        : '本笔记由大模型生成（型号未记录）') + at;
+    }
+    if (kind === 'extractive') {
+      return '本笔记是旧版本地摘要，不是 AI 生成' + at;
+    }
+    return '这条总结来自旧版本，无法确认生成方式' + at;
+  }
+
   function renderDoc(data) {
     var doc = P1.$('#noteDoc');
     doc.innerHTML = '';
@@ -164,6 +183,10 @@ try{var _t=new URLSearchParams(location.search).get('theme');if(_t)document.docu
       doc.appendChild(el('p', 'doc-lead', lead));
     } else if (state === 'ready' || state === 'partial') {
       doc.appendChild(el('p', 'doc-lead', '这场没有生成概述，要点和原话都在下面。'));
+    }
+    var prov = summaryProvenance(data.summary);
+    if (prov && (state === 'ready' || state === 'partial')) {
+      doc.appendChild(el('p', 'doc-provenance', prov));
     }
 
     var topics = (data.summary || {}).topics || [];
@@ -217,7 +240,31 @@ try{var _t=new URLSearchParams(location.search).get('theme');if(_t)document.docu
           var title = String(point.title || '').trim();
           var gist = String(point.gist || '').trim();
           var stance = String(point.stance || '').trim();
-          if (title) body.appendChild(el('p', 'point-text', title));
+          var head = el('p', 'point-text');
+          if (title) head.appendChild(document.createTextNode(title));
+          // 跨场标记：这个主题他还在别的场讲过几场。只在 >1 时才画，
+          // 只出现在这一场的观点不需要多一个徽标。
+          if (Number(point.cross_sessions) > 1 && group.who) {
+            var cross = el('span', 'point-cross',
+              '跨 ' + Number(point.cross_sessions) + ' 场');
+            cross.title = '这个主题还在另外 ' + (Number(point.cross_sessions) - 1)
+              + ' 场讲过，可在人物档案里看全部主张';
+            cross.setAttribute('role', 'button');
+            cross.setAttribute('tabindex', '0');
+            if (group.speaker_id) {
+              cross.onclick = function () {
+                location.href = '/people?person=' + encodeURIComponent(group.speaker_id);
+              };
+              cross.onkeydown = function (ev) {
+                if (ev.key === 'Enter' || ev.key === ' ') {
+                  ev.preventDefault();
+                  cross.onclick();
+                }
+              };
+            }
+            head.appendChild(cross);
+          }
+          if (title || head.childNodes.length) body.appendChild(head);
           // 主张句比「要点概述」更像一句话结论，能独立成立时优先给它；
           // 且和标题一字不差时不重复画。
           if (stance && stance !== title) body.appendChild(el('p', 'point-stance', stance));
@@ -373,6 +420,16 @@ try{var _t=new URLSearchParams(location.search).get('theme');if(_t)document.docu
       ['状态', P1.noteState(data.note_state, data.progress).label],
       ['音频', session.audio_state === 'none' ? '没有保留录音' : '本地 · 已保留']
     ];
+    var sum = data.summary || {};
+    var sumKind = sum.engine_kind || '';
+    if (!sumKind && sum.engine) {
+      sumKind = String(sum.engine).indexOf('llm') === 0 ? 'llm' : 'extractive';
+    }
+    if (sumKind) {
+      rows.splice(rows.length - 1, 0, ['总结', sumKind === 'llm'
+        ? ('AI · ' + (sum.engine_model || '大模型'))
+        : '本地摘要（旧版）']);
+    }
     rows.forEach(function (row) {
       var div = document.createElement('div');
       var dt = el('dt', null, row[0]);

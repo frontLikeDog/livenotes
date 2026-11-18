@@ -17,7 +17,7 @@ import sqlite3
 from datetime import datetime, timedelta
 from typing import Any
 
-from . import shape, store
+from . import claims, shape, store
 
 
 # 分组展示顺序：主持先说、主讲其次，提问和上麦跟在后面，认不出的一起放最后。
@@ -28,7 +28,7 @@ def _summary(conn: sqlite3.Connection, sid: str) -> dict:
     row = store.latest_summary(conn, sid, "content")
     if not row:
         row = conn.execute(
-            "SELECT payload_json FROM summaries WHERE session_id=? "
+            "SELECT payload_json,engine FROM summaries WHERE session_id=? "
             "ORDER BY created_at DESC, id DESC LIMIT 1", (sid,)).fetchone()
         if not row:
             return {}
@@ -36,6 +36,8 @@ def _summary(conn: sqlite3.Connection, sid: str) -> dict:
             payload = json.loads(row["payload_json"] or "{}")
         except (TypeError, ValueError):
             return {}
+        # 老 payload 没有 engine_kind，也没有排序：统一在读取边界补上。
+        payload = store.normalize_summary_payload(payload, str(row["engine"] or ""))
         return payload if isinstance(payload, dict) else {}
     payload = row.get("payload") or {}
     return payload if isinstance(payload, dict) else {}
@@ -121,7 +123,11 @@ def build_note(conn: sqlite3.Connection, sid: str) -> dict:
                          "n": int(r["n"] or 0),
                          "seconds": round(float(r["secs"] or 0), 1)})
     points = []
-    for i, p in enumerate(summary.get("points") or []):
+    # 笔记页的序号也按时间排：同一场先讲什么、后讲什么，读者要能顺着看下来。
+    summary_points = sorted(
+        summary.get("points") or [],
+        key=lambda p: (p.get("t_from") is None, p.get("t_from") or 0))
+    for i, p in enumerate(summary_points):
         ev = p.get("evidence") or []
         quote = ""
         if ev:
@@ -133,6 +139,8 @@ def build_note(conn: sqlite3.Connection, sid: str) -> dict:
             "quote": quote, "speakers": p.get("speakers") or [],
             "claim_speaker": str(p.get("claim_speaker") or ""),
             "stance": str(p.get("stance") or ""),
+            # 跨场视图（「这个主题他讲过几场」）靠主题对齐，而不是靠标题文案。
+            "topic": claims.point_topic(p),
             "evidence": [{"id": e.get("id"), "t": e.get("t_start"),
                           "text": str(e.get("text") or "")[:200],
                           "speaker": e.get("speaker_label") or ""}
@@ -145,6 +153,7 @@ def build_note(conn: sqlite3.Connection, sid: str) -> dict:
     for sp in speakers:
         names_by_label.setdefault(str(sp["label"]), sp["speaker_id"])
     by_speaker = _group_points(points, shape_info, names_by_label)
+    _attach_history(conn, sid, by_speaker)
     # 主持的显示名：形态层判出来的主持优先，其次是模型认的主讲人。
     host_id = str(shape_info.get("host_id") or "")
     host_label = names.get(host_id, "") if host_id else ""
@@ -162,7 +171,11 @@ def build_note(conn: sqlite3.Connection, sid: str) -> dict:
         "note": note or {},
         "summary": {"overview": summary.get("overview") or "",
                     "topics": summary.get("topics") or [],
+                    "engine": summary.get("engine") or "",
                     "engine_kind": summary.get("engine_kind") or "",
+                    "engine_model": summary.get("engine_model") or "",
+                    "engine_reason": summary.get("engine_reason") or "",
+                    "generated_at": summary.get("generated_at") or "",
                     "caveats": summary.get("caveats") or [],
                     "stats": summary.get("stats") or {}},
         "streamer": streamer, "host": host_label or streamer,
@@ -226,6 +239,38 @@ def _group_points(points: list[dict], shape_info: dict,
     return out
 
 
+def _attach_history(conn: sqlite3.Connection, sid: str,
+                    groups: list[dict]) -> None:
+    """给每个「人 × 主题」组标上「这个主题他还在别的几场讲过」。
+
+    只在跨场时才标：只出现在这一场的观点不需要多一个徽标。分组的人用
+    person_id（认出来了）或本场昵称（没认出来），和 claims 的存法一一对应。
+    """
+    if not groups:
+        return
+    keys: set[str] = set()
+    topics: set[str] = set()
+    for g in groups:
+        # 分组用的是「昵称」，对应的是 claims 的 who；身份列（speaker_id）
+        # 只有组里正好有同名的声纹簇时才有值，没有也照样要能跨场对上。
+        key = claims.person_key("", g.get("who") or "")
+        if not key or key == "name:本场共同讨论":
+            continue
+        for p in g.get("points") or []:
+            t = str(p.get("topic") or "").strip()
+            if t:
+                keys.add(key)
+                topics.add(t)
+    if not keys:
+        return
+    hist = claims.history_index(conn, keys, topics)
+    for g in groups:
+        key = claims.person_key("", g.get("who") or "")
+        for p in g.get("points") or []:
+            info = hist.get((key, str(p.get("topic") or "").strip()))
+            p["cross_sessions"] = int(info["n_sessions"]) if info else 1
+
+
 def _related(conn: sqlite3.Connection, sid: str, topics: list[str],
              streamer: str, limit: int = 4) -> list[dict]:
     """同主播 / 同主题的最近场次。规则匹配，够用且不花模型钱。"""
@@ -285,7 +330,10 @@ def index_session(conn: sqlite3.Connection, sid: str) -> int:
             continue
         units.append({"kind": "point", "ref_id": str(i),
                       "t": p.get("t_from"), "title": title, "text": text,
-                      "speaker": "、".join((p.get("speakers") or [])[:2]),
+                      # 署名优先给归属的人，而不是「这场出现过谁」：问「阿哲怎么看 X」
+                      # 要能召回他提的那条，而不是同一段里他也出过声的那条。
+                      "speaker": (str(p.get("claim_speaker") or "")
+                                  or "、".join((p.get("speakers") or [])[:2])),
                       "weight": 1.0})
     for h in store.list_highlights(conn, sid, 50):
         quote = str(h.get("quote") or h.get("hook") or h.get("text") or "").strip()
@@ -303,6 +351,14 @@ def index_session(conn: sqlite3.Connection, sid: str) -> int:
                       "t": b.get("t"), "title": title,
                       "text": note[:500], "weight": 0.8})
     n = store.replace_note_units(conn, sid, units)
+    # 观点档案跟着索引一起重建：两者都只依赖这一场的总结与身份。
+    try:
+        claims.rebuild_session(conn, sid)
+        # 身份（person_id）变化后，观点档案的分组键也要跟着更新：同一个人
+        # 换了 person_id，跨场「这个主题他讲过几场」必须重算，否则人物页会漏。
+    except Exception:
+        import traceback
+        traceback.print_exc()
     if summary:
         state = "ready" if (summary.get("overview") or summary.get("points")) else "partial"
         store.upsert_note(conn, sid, state=state, progress=100,

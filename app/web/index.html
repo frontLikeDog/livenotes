@@ -130,8 +130,7 @@
       <button class="tab" data-m="coach" title="从逐字稿统计的话术/节奏/互动画像">主播画像</button>
     </div>
     <div class="sum-actions">
-      <select id="engine"><option value="auto">智能：内容够才用大模型</option>
-        <option value="extractive">只用本地抽取（0 token）</option>
+      <select id="engine"><option value="auto">智能：内容够就用大模型</option>
         <option value="llm">强制用大模型</option></select>
       <button class="primary" id="btnAIAnalyze" style="flex:none"
         title="一次跑完全部 AI 活：标题 + 概览 + 要点 + 逐句分类。服务端任务，可以关页面等它跑完">AI 分析</button>
@@ -353,7 +352,7 @@
       </div>
       <div class="set-hint">点「AI 分类」时，先把整场归纳成这么多个主题，再把每句话归进去；10~20 比较好用。</div>
     </div>
-    <div class="set-status" id="setStatus">未配置：总结会用本地抽取式，自动标题只能给摘录。</div>
+    <div class="set-status" id="setStatus">未配置：还不能生成 AI 总结，请先填模型连接。</div>
   </div>
   <div class="set-foot">
     <button id="setTest">测试连接</button>

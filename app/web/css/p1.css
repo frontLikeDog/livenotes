@@ -270,6 +270,8 @@ select:focus-visible,textarea:focus-visible{outline:none}
 .note-doc{min-width:0}
 .doc-lead{font-size:19px;line-height:1.75;letter-spacing:-.005em;color:var(--ink-strong);
   margin:0;font-weight:520}
+.doc-provenance{margin:9px 0 0;font:400 10px/1.6 var(--mono);color:var(--faint)}
+.doc-provenance::before{content:"◇";margin-right:5px;color:var(--amber)}
 .doc-status{display:inline-flex;align-items:center;gap:6px;margin-bottom:10px;
   font:500 10px/1.4 var(--mono);color:var(--amber)}
 .doc-status i{width:5px;height:5px;border-radius:50%;background:currentColor;
@@ -298,6 +300,11 @@ select:focus-visible,textarea:focus-visible{outline:none}
 .who-count{flex:none;font:400 9.5px/1.5 var(--mono);color:var(--faint)}
 .point-text{margin:0;font-size:13.5px;line-height:1.65;color:var(--ink);font-weight:600}
 .point-stance{margin:3px 0 0;font-size:12.5px;line-height:1.68;color:var(--ink)}
+/* 「这个主题他还在别的场讲过」：只在跨场时才出现，数字就是场数 */
+.point-cross{display:inline-block;flex:none;margin-left:6px;font:500 9.5px/1.5 var(--mono);
+  color:var(--amber-strong);background:var(--amber-soft);border-radius:4px;padding:0 5px;
+  vertical-align:1px;cursor:pointer;border:1px solid var(--amber-line)}
+.point-cross:hover{background:var(--amber-soft);border-color:var(--amber)}
 .point-gist{margin:4px 0 0;font-size:12.5px;line-height:1.7;color:var(--muted)}
 .point-quote{margin:7px 0 0;padding-left:9px;border-left:2px solid var(--line-2);
   font-size:11.5px;line-height:1.65;color:var(--muted)}

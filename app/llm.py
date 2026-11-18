@@ -36,7 +36,8 @@ class LLMError(RuntimeError):
         self.retry_after = retry_after
 
 
-# 预算不足不是"模型坏了"：调用方应回退本地抽取式，而不是重试。
+# 预算不足不是"模型坏了"：调用方应停止本次生成并说明原因，而不是重试。
+# 正式总结会直接失败；直播简报等独立能力可以自行降级并在界面标明「本地」。
 BudgetExceeded = _scheduler.BudgetExceeded
 
 _CJK_RE = re.compile(r"[㐀-䶿一-鿿豈-﫿]")
@@ -220,6 +221,9 @@ def chat(messages: list[dict], temperature: float | None = None,
                     raise LLMError("模型返回格式不对：%s" % str(detail or body)[:160],
                                    retryable=False) from e
                 got = _usage_from(body, text or "", prompt_est)
+                # 把真正发出去的模型名带回调用方：总结面板要标注「由哪个模型生成」，
+                # 不能在事后重新读设置（中途切档会标错）。
+                got["model"] = cfg["model"]
                 if usage is not None:
                     usage.update(got)
                 _scheduler.SCHEDULER.settle(res, got)

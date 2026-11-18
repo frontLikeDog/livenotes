@@ -62,6 +62,25 @@ td.t:hover{color:var(--accent)}
 .bar{display:inline-block;height:5px;border-radius:3px;background:#dfe6f5;width:52px;
   vertical-align:middle;margin-right:6px;overflow:hidden}
 .bar i{display:block;height:100%;background:var(--accent)}
+/* 观点档案：按主题分组的主张、改口标记、可点回原场 */
+.claims{margin:2px 0 16px}
+.claims h3{margin:0 0 8px;font-size:12.5px;color:var(--muted);font-weight:600}
+.ctopic{border:1px solid var(--line);border-radius:9px;padding:10px 12px;margin-bottom:8px;
+  background:#fcfcfd}
+.chead{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px}
+.cname{font-size:12.5px;font-weight:650}
+.cmeta{font-size:11px;color:var(--faint);font-variant-numeric:tabular-nums}
+.crev{font-size:10.5px;color:var(--warn);background:#fdf3e2;border-radius:4px;padding:1px 6px;
+  font-weight:600}
+.citem{display:grid;gap:2px;padding:6px 0 6px 10px;border-left:2px solid var(--line)}
+.citem+.citem{border-top:1px dashed #eef1f5}
+.citem.changed{border-left-color:var(--warn)}
+.citem .st{font-size:12.5px;line-height:1.6;color:var(--ink)}
+.citem .st b{color:var(--faint);font-weight:500;font-size:10.5px;margin-right:5px}
+.citem .wh{font-size:11px;color:var(--muted)}
+.citem .wh a{color:var(--accent);text-decoration:none}
+.citem .wh a:hover{text-decoration:underline}
+.citem .qv{font-size:11px;color:var(--faint);line-height:1.55;margin-top:1px}
 .detail{padding:14px}
 .dhead{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:6px}
 .dhead h2{margin:0;font-size:17px}
@@ -195,6 +214,38 @@ function renderList(){
   });
 }
 
+function day(at){return at?esc(String(at).slice(0,10)):'日期不明'}
+function claimsBlock(c){
+  if(!c||!c.topics||!c.topics.length){
+    return '<div class="claims"><h3>他的主张</h3>'
+      +'<div class="hint">还没有可归档的观点：这一场要么还没生成笔记，'
+      +'要么要点里没有明确的「谁提的」。</div></div>';
+  }
+  var html='<div class="claims"><h3>他的主张 · '+c.n_claims+' 条 · '+c.n_topics+' 个主题</h3>';
+  html+=c.topics.map(function(g){
+    var items=(g.items||[]).map(function(it){
+      var sid=esc(it.session_id||''), t=Math.max(0,Math.floor(it.t||0));
+      var changed=it._changed?' changed':'';
+      var tag=it._changed?'<span class="crev">改口</span>':'';
+      return '<div class="citem'+changed+'">'
+        +'<div class="st"><b>'+day(it.started_at)+'</b>'+esc(it.stance||'')+tag+'</div>'
+        +(it.quote?'<div class="qv">「'+esc(String(it.quote).slice(0,90))+'」</div>':'')
+        +'<div class="wh"><a href="/reader?session='+sid+'&t='+t+'">'+esc(it.session_title||'打开原场')+'</a>'
+        +(it.t!=null?' · '+fmt(it.t):'')+'</div>'
+        +'</div>';
+    }).join('');
+    var rev=(g.revisions&&g.revisions.length)
+      ? '<span class="crev">改过 '+g.revisions.length+' 次说法</span>' : '';
+    return '<div class="ctopic"><div class="chead">'
+      +'<span class="cname">'+esc(g.topic||'其他')+'</span>'
+      +'<span class="cmeta">'+g.n_sessions+' 场 · '+g.n+' 条</span>'+rev
+      +'<span class="grow"></span>'
+      +'<span class="cmeta">'+(g.first_at?day(g.first_at):'')+(g.first_at&&g.last_at&&g.first_at!==g.last_at?' → '+day(g.last_at):'')+'</span>'
+      +'</div>'+items+'</div>';
+  }).join('');
+  return html+'</div>';
+}
+
 function renderDetail(){
   var d=S.detail;if(!d){return}
   var p=d.person,rows=p.appearances||[];
@@ -233,6 +284,8 @@ function renderDetail(){
     +'<div class="dmeta">'+(p.n_protos||0)+' 条声纹原型 · 出现在 <b>'+rows.length+'</b> 场 · 累计发言 '
     +fmtDur(p.seconds||0)+'<br><span class="hint">置信 = 整体余弦减去本场背景；'
     +'≥'+S.thr.auto+' 且整体余弦 ≥0.55 才自动认定，'+S.thr.candidate+'~'+S.thr.auto+' 需要你点一下确认。</span></div>'
+    +claimsBlock(p.claims)
+    +'<h3 style="margin:0 0 8px;font-size:12.5px;color:var(--muted)">出没记录</h3>'
     +body;
   $('#dempty').style.display='none';
   $('#detail').style.display='';
@@ -257,6 +310,12 @@ async function openPerson(id){
 async function load(){
   var d=await api('/api/persons');
   S.persons=d.persons||[];if(d.thresholds)S.thr=d.thresholds;
+  // 从笔记页的「跨 N 场」徽标跳过来时带着 ?person=：直接打开那个人，
+  // 否则用户还得在列表里再找一遍。不认识的 id 静默忽略。
+  if(!S.cur){
+    var want=new URLSearchParams(location.search).get('person');
+    if(want)S.cur=want;
+  }
   renderCards();renderList();
   if(S.cur){var still=S.persons.filter(function(p){return p.person_id===S.cur})[0];
     if(still)openPerson(S.cur);else{S.cur='';S.detail=null;$('#detail').style.display='none';

@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
-from . import (analysis, analysis_job, audio, classify, coach, config, copy,
+from . import (analysis, analysis_job, audio, claims, classify, coach, config, copy,
                delivery, diagnostics, export, feishu_drive, feedback, follows,
                glossary, highlight, lan, live, livebrief, llm, logs, metrics,
                notes, notify, polish, profile, qa, qr, reader, rooms, runtime,
@@ -1218,8 +1218,12 @@ p{font-size:14px;line-height:1.75;margin:8px 0}
             row = store.latest_summary(conn, sid, scope)
             if not row:
                 return self._json({"ok": False, "reason": "还没有生成过"})
+            # 读的时候也统一排序 / 补 engine_kind：老 payload 不用重新生成，
+            # 时间顺序和「谁生成的」也能立刻对齐。
+            payload = store.normalize_summary_payload(
+                row.get("payload") or {}, str(row.get("engine") or ""))
             return self._json({"ok": True, "created_at": row.get("created_at"),
-                               "payload": row.get("payload") or {}})
+                               "payload": payload})
         if p == "/api/audio":
             return self._audio_slice(conn, q)
         if p == "/api/live/audio/meta":
@@ -1502,6 +1506,8 @@ p{font-size:14px;line-height:1.75;margin:8px 0}
             person["appearances"] = rows
             person["sessions"] = len({r["session_id"] for r in rows})
             person["seconds"] = round(sum(float(r["seconds"] or 0) for r in rows), 1)
+            # 观点档案：这个人「讲过什么」，而不是「在哪几场出现过」。
+            person["claims"] = claims.profile(conn, person_id=pid)
             return self._json({"ok": True, "person": person,
                                "thresholds": {"auto": voiceprint.AUTO_THRESHOLD,
                                               "candidate": voiceprint.CAND_THRESHOLD}})
@@ -2363,8 +2369,9 @@ p{font-size:14px;line-height:1.75;margin:8px 0}
             f = parse_filters(b.get("filters") or {})
             f["session_id"] = sid
             try:
-                return self._json(analysis.estimate(conn, sid, f,
-                                                    str(b.get("mode") or "content")))
+                return self._json(analysis.estimate(
+                    conn, sid, f, str(b.get("mode") or "content"),
+                    str(b.get("engine") or "auto")))
             except Exception as e:
                 return self._json({"error": str(e)}, 400)
         if p == "/api/summarize":
@@ -2725,6 +2732,8 @@ p{font-size:14px;line-height:1.75;margin:8px 0}
             if not person:
                 return self._json({"error": "人物不存在"}, 404)
             store.set_speaker_person(conn, sid, spk, pid, None, None, "confirmed")
+            # 身份变了，观点档案的分组键要跟着变，人物页才不会漏掉这一场。
+            claims.rebuild_session(conn, sid)
             # 先占座：哪怕这一簇声纹太少、enroll 失败，也不能让同场另一个人继续挂着同一个 pid
             cleared = store.clear_person_claims(conn, sid, pid, spk)
             store.rename_speaker(conn, sid, spk, person["name"])   # 名字跟着落，界面才对得上
@@ -2755,6 +2764,7 @@ p{font-size:14px;line-height:1.75;margin:8px 0}
             if not store.get_person(conn, pid) or not name:
                 return self._json({"error": "人物不存在或名字为空"}, 400)
             store.upsert_person(conn, pid, name)
+            claims.refresh_person_names(conn, pid, name)
             return self._json({"ok": True, "person": store.get_person(conn, pid)})
         if p == "/api/persons/forget":
             store.delete_person(conn, str(b.get("person_id") or ""))

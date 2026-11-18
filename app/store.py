@@ -352,6 +352,28 @@ CREATE TABLE IF NOT EXISTS note_units (
 CREATE INDEX IF NOT EXISTS idx_nu_session ON note_units(session_id);
 CREATE INDEX IF NOT EXISTS idx_nu_kind ON note_units(kind);
 
+-- 观点原子：从每一场的总结要点里抽出来的「谁 × 主题 × 主张」。
+-- 为什么单独建表而不是继续放 summaries.payload_json：跨场要按 (人, 主题)
+-- 读、要按时间排开看改口，JSON 里做不到索引。每场重建、幂等。
+-- person_id 为空 = 这一场没认出这个人，用 who（本场昵称）兜底。
+CREATE TABLE IF NOT EXISTS claims (
+    claim_id      TEXT PRIMARY KEY,            -- clm_ + hash(session_id, 要点序号)
+    session_id    TEXT NOT NULL,
+    person_id     TEXT NOT NULL DEFAULT '',
+    who           TEXT NOT NULL DEFAULT '',    -- 本场署名（昵称/位置标签）
+    topic         TEXT NOT NULL DEFAULT '',    -- 来自本场标注词表，不新造
+    stance        TEXT NOT NULL DEFAULT '',    -- 一句话主张
+    gist          TEXT NOT NULL DEFAULT '',
+    quote         TEXT NOT NULL DEFAULT '',    -- 原话（可点回放）
+    t             REAL,                        -- 场次内时间码
+    kind          TEXT NOT NULL DEFAULT 'claim',  -- claim|question
+    evidence_json TEXT NOT NULL DEFAULT '[]',
+    created_at    TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_claim_session ON claims(session_id);
+CREATE INDEX IF NOT EXISTS idx_claim_person_topic ON claims(person_id, topic);
+CREATE INDEX IF NOT EXISTS idx_claim_who_topic ON claims(who, topic);
+
 -- 问笔记历史：只留最近 200 条，正文不出本机。
 CREATE TABLE IF NOT EXISTS qa_answers (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1518,6 +1540,8 @@ def delete_person(conn: sqlite3.Connection, person_id: str) -> None:
     """彻底移除一个人：原型和场次归属一起清掉（场次里的文字不动）。"""
     conn.execute("UPDATE speakers SET person_id=NULL, person_score=NULL, person_bg=NULL,"
                  " person_state='' WHERE person_id=?", (person_id,))
+    # 观点档案跟着身份走：人删了，这些观点退回「本场署名」，仍然属于那场笔记。
+    conn.execute("UPDATE claims SET person_id='' WHERE person_id=?", (person_id,))
     conn.execute("DELETE FROM person_emb WHERE person_id=?", (person_id,))
     conn.execute("DELETE FROM persons WHERE person_id=?", (person_id,))
     conn.commit()
@@ -1529,6 +1553,7 @@ def merge_persons(conn: sqlite3.Connection, src_id: str, dst_id: str) -> int:
         return 0
     conn.execute("UPDATE person_emb SET person_id=? WHERE person_id=?", (dst_id, src_id))
     conn.execute("UPDATE speakers SET person_id=? WHERE person_id=?", (dst_id, src_id))
+    conn.execute("UPDATE claims SET person_id=? WHERE person_id=?", (dst_id, src_id))
     conn.execute("DELETE FROM persons WHERE person_id=?", (src_id,))
     conn.commit()
     return conn.total_changes
@@ -1562,8 +1587,58 @@ def delete_polished(conn: sqlite3.Connection, sid: str) -> None:
     conn.commit()
 
 
+def sort_summary_points(points: list[dict] | None) -> list[dict]:
+    """总结要点按时间排：面板、笔记、导出、搜索都读这一个顺序。
+
+    以前的抽取式按「发言量 / 重要度」排，「按时间」视图才会出现
+    02:00 → 04:20 → 01:40 这种跳来跳去的顺序；模型输出的 points 也不保证
+    按时间。统一在读写边界排一次，老 payload 不用重生成也能立即变整齐。
+    """
+    def _t(p: dict, key: str) -> float:
+        try:
+            v = (p or {}).get(key)
+            return float("inf") if v is None else float(v)
+        except (TypeError, ValueError, AttributeError):
+            return float("inf")
+
+    if not isinstance(points, list):
+        return []
+    return sorted((p for p in points if isinstance(p, dict)),
+                  key=lambda p: (_t(p, "t_from"), _t(p, "t_to"),
+                                 str(p.get("title") or "")))
+
+
+def normalize_summary_payload(payload: dict | None, engine_hint: str = "") -> dict:
+    """统一总结 payload 的读取口径：补 engine / engine_kind，要点按时间排序。
+
+    老的本地摘要没有 engine_kind，靠 summaries.engine 列补；两者都没有就标
+    ``unknown``，界面会显示「旧版摘要，生成方式未知」，不冒充 AI。
+    """
+    p = dict(payload) if isinstance(payload, dict) else {}
+    eng = str(p.get("engine") or engine_hint or "").strip()
+    if eng:
+        p["engine"] = eng
+    kind = str(p.get("engine_kind") or "").strip()
+    if not kind:
+        kind = "llm" if eng.startswith("llm") else ("extractive" if eng else "unknown")
+    p["engine_kind"] = kind
+    p["points"] = sort_summary_points(p.get("points"))
+    groups = p.get("groups")
+    if isinstance(groups, list):
+        fixed: list[dict] = []
+        for g in groups:
+            if not isinstance(g, dict):
+                continue
+            g = dict(g)
+            g["points"] = sort_summary_points(g.get("points"))
+            fixed.append(g)
+        p["groups"] = fixed
+    return p
+
+
 def save_summary(conn: sqlite3.Connection, sid: str, scope: str, f: dict,
                  engine: str, payload: dict, fingerprint: str = "") -> int:
+    payload = normalize_summary_payload(payload, engine)
     cur = conn.execute(
         "INSERT INTO summaries(session_id,scope,filter_json,engine,fingerprint,"
         "payload_json,created_at) VALUES (?,?,?,?,?,?,?)",
@@ -1582,7 +1657,7 @@ def summary_by_fingerprint(conn: sqlite3.Connection, sid: str, scope: str,
     if not fingerprint:
         return None
     row = conn.execute(
-        "SELECT payload_json,created_at FROM summaries "
+        "SELECT payload_json,created_at,engine FROM summaries "
         "WHERE session_id=? AND scope=? AND fingerprint=? ORDER BY id DESC LIMIT 1",
         (sid, scope, fingerprint)).fetchone()
     if not row:
@@ -1593,6 +1668,7 @@ def summary_by_fingerprint(conn: sqlite3.Connection, sid: str, scope: str,
         return None
     if not isinstance(payload, dict):
         return None
+    payload = normalize_summary_payload(payload, str(row["engine"] or ""))
     payload["cached_at"] = row["created_at"]
     return payload
 
@@ -1609,6 +1685,7 @@ def latest_summary(conn: sqlite3.Connection, sid: str, scope: str) -> dict | Non
         d["payload"] = json.loads(d.pop("payload_json") or "{}")
     except ValueError:
         d["payload"] = {}
+    d["payload"] = normalize_summary_payload(d["payload"], str(d.get("engine") or ""))
     return d
 
 
@@ -2416,11 +2493,22 @@ def note_units_for_session(conn: sqlite3.Connection, sid: str,
         (sid, max(1, int(limit))))]
 
 
+def claim_topics(conn: sqlite3.Connection, limit: int = 200) -> list[str]:
+    """观点档案里出现过的主题词（按条数倒序）。问答用它判断问题里有没有主题。"""
+    return [str(r["topic"]) for r in conn.execute(
+        "SELECT topic, COUNT(*) n FROM claims WHERE topic<>'' "
+        "GROUP BY topic ORDER BY n DESC LIMIT ?", (max(1, int(limit)),))]
+
+
 def search_note_units(conn: sqlite3.Connection, queries: list[str],
                       limit: int = 20, session_id: str = "",
                       since: str = "", until: str = "",
-                      kind: str = "") -> list[dict]:
+                      kind: str = "", speaker: str = "") -> list[dict]:
     """note_units 检索。≥3 字走 FTS5 trigram（BM25），否则 LIKE。
+
+    ``speaker`` 是把检索限定在「谁提的」：问「阿哲怎么看 OPC」时，先按署名
+    召回他的要点，而不是召回碰巧提到他名字的句子。匹配 ``note_units.speaker``
+    里的任一段（它是「、」拼起来的署名串）。
 
     返回按「BM25 + 类型权重 + 新鲜度」粗排后的行；精细排序在 app/qa.py。
     """
@@ -2434,6 +2522,10 @@ def search_note_units(conn: sqlite3.Connection, queries: list[str],
     if kind:
         where.append("nu.kind=?")
         args.append(kind)
+    if speaker:
+        # 用 '、' 分隔边界避免「阿」匹配到「阿哲」以外的人：source 串是 "A、B"。
+        where.append("('、'||nu.speaker||'、') LIKE ?")
+        args.append("%、" + str(speaker).strip() + "、%")
     if since:
         where.append("COALESCE(s.started_at,'')>=?")
         args.append(since)

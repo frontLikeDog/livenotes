@@ -91,27 +91,35 @@ class SummaryFlowTest(unittest.TestCase):
         self.assertTrue(any(j["id"] == first.id and j["status"] == "succeeded"
                             for j in jobs))
 
-    def test_llm_failure_fallback_is_not_cached(self):
+    def test_llm_failure_is_reported_and_not_cached(self):
         def boom(cfg, payload, timeout, total_timeout=None):
             self.calls += 1
             raise llm.LLMError("HTTP 401 bad key", status=401, retryable=False)
 
         with mock.patch.object(llm, "_post_chat", side_effect=boom):
             first = tasks.submit_finalize(SID)
-            out1 = first.wait(timeout=10)
-        # 总结在模型失败时降级为本地抽取式，任务本身仍算成功
-        self.assertEqual(first.status, "succeeded")
-        self.assertEqual(out1["engine_kind"], "extractive")
-        self.assertTrue(out1["llm_error"])
+            with self.assertRaises(scheduler.JobFailed) as ctx:
+                first.wait(timeout=10)
+        # 模型失败不再降级成本地稿：任务明确失败，库里也不能多出一份「总结」
+        self.assertIn("本次没有生成总结", str(ctx.exception))
+        self.assertEqual(first.status, "failed")
         self.assertEqual(self.calls, 1)
+        conn = store.connect()
+        try:
+            self.assertIsNone(store.latest_summary(conn, SID, "content"))
+            note = store.get_note(conn, SID) or {}
+            self.assertEqual(note.get("state"), "failed")
+        finally:
+            conn.close()
 
         with mock.patch.object(llm, "_post_chat", side_effect=boom):
             second = tasks.submit_summary(SID, {
                 "t_from": None, "t_to": None, "categories": [], "speakers": [], "q": "",
                 "exclude_low_value": True, "exclude_overlap": True, "min_conf": None,
             }, "content", "auto")
-            second.wait(timeout=10)
-        self.assertNotEqual(second.id, first.id, "降级结果不该被当成成功缓存")
+            with self.assertRaises(scheduler.JobFailed):
+                second.wait(timeout=10)
+        self.assertNotEqual(second.id, first.id, "失败结果不该被当成成功缓存")
         self.assertFalse(second.cached)
         self.assertEqual(self.calls, 2, "用户再点一次应该真正重新调用模型")
 

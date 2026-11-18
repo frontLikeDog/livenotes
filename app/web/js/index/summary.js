@@ -69,15 +69,14 @@ async function summarize(mode,silent,engineOverride){
   try{
     if(eng==='auto'){
       try{
-        const est=await post('/api/summarize/estimate',{session_id:S.session,filters:f,mode:mode});
+        const est=await post('/api/summarize/estimate',{session_id:S.session,filters:f,mode:mode,engine:eng});
         tip=est.cached
           ? ('输入没变，复用上次结果（0 token）')
           : est.would_use_llm
           ? ('正在调用 '+est.model+' 生成…（'+est.rows+' 条发言）')
-          : ('本地抽取中 · '+est.rows+' 条发言，不调用模型，0 token');
+          : (est.why||'本次不生成总结');
       }catch(e){}
-    }else if(eng==='llm'){ tip='正在调用大模型生成…' }
-    else { tip='本地抽取中…' }
+    }else{ tip='正在调用大模型生成…' }
     sumLoading(tip);
     const d=await post('/api/summarize',{session_id:S.session,mode,filters:f,engine:eng});
     S.sumCache[mode]=d;
@@ -201,9 +200,15 @@ function paintTitleBar(d){
   // 没有可做的事就别占地方：名字已经是当前名、又没有备选，标题条直接收起来
   if(applied&&!alts.length){tbarHide();return}
   const why=why0;
+  // 标题来源要说真话：只有 title_kind=llm 才叫 AI；旧数据 auto 只写「自动标题」。
+  const src=d.title_source||'';
+  const tk=d.title_kind||'';
+  const kicker=src==='auto'?(tk==='llm'?'🏷 AI 标题':'🏷 自动标题')
+    :src==='auto_local'?'🏷 本地标题'
+    :src==='user'?'🏷 你命名的':'🏷 标题';
   el.hidden=false;
   // 窄面板：按钮跟标题各占一行，标题最多两行，别让按钮把名字挤成省略号
-  el.innerHTML='<div class="tb-h"><span class="tb-k">🏷 AI 标题</span>'
+  el.innerHTML='<div class="tb-h"><span class="tb-k">'+kicker+'</span>'
     +'<span class="tb-r">'
       +(applied?'<span class="tb-badge">当前名</span>':'<button class="tb-btn" id="tbAdopt">采用</button>')
       +'<button class="tb-btn ghost" id="tbMore" title="再调一次模型换个名字（会消耗 token）">换一个</button>'
@@ -222,7 +227,7 @@ async function adoptTitle(t){
     await post('/api/sessions/title/adopt',{session_id:S.session,title:t});
     const r=await api('/api/sessions');S.sessions=r.sessions||[];
     renderSessionMenu();paintSessionBtn();
-    paintTitleBar({title:t,title_alts:[],title_applied:true,
+    paintTitleBar({title:t,title_alts:[],title_applied:true,title_source:'user',
       title_reason:'你采用了这个名字，之后自动总结不会再覆盖'});
     toast('已命名为「'+t+'」');
   }catch(e){toast('采用失败：'+e.message)}
@@ -235,7 +240,7 @@ async function titleFresh(){
     const ai=(sg.groups||[]).filter(g=>g.kind==='ai')[0];
     if(!ai||!ai.items||!ai.items.length){toast('模型没给出新名字（没配置或内容太少）');return}
     paintTitleBar({title:ai.items[0],title_alts:ai.items.slice(1,3),title_applied:false,
-      title_reason:'新起的名字，点「采用」才生效'});
+      title_source:'auto', title_kind:'llm', title_reason:'新起的名字，点「采用」才生效'});
   }catch(e){toast('换一个失败：'+e.message)}
   finally{if(el)el.style.opacity=1}
 }
@@ -278,11 +283,11 @@ function renderSummary(d){
   const u=d.usage||{};
   const eMeta=d.cached
     ? ' · 缓存命中 · 0 token'
-    : (isLLM?(' · '+esc(d.engine_model||'')+' · '+((u.ms||0)/1000).toFixed(1)+'s'
+    : (isLLM?(' · '+esc(d.engine_model||'模型名未记录')+' · '+((u.ms||0)/1000).toFixed(1)+'s'
             +(u.total_tokens?(' · '+u.total_tokens+' tokens'):' · token 用量未知'))
-           :' · 0 token');
+           :' · 旧版本地稿');
   const ebar='<div class="ebar '+(isLLM?'llm':'local')+'">'
-    +'<span class="edot"></span><b>'+(isLLM?'大模型总结':'本地抽取式')+'</b>'
+    +'<span class="edot"></span><b>'+(isLLM?'AI 生成':'本地摘要（旧版，不再是 AI）')+'</b>'
     +eMeta
     +(d.engine_reason?'<span class="ereason">· '+esc(d.engine_reason)+'</span>':'')
     +((!isLLM&&d.engine_reason&&d.engine_reason.indexOf('内容太少')>=0)

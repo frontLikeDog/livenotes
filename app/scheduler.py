@@ -62,7 +62,7 @@ PRIORITY_FINALIZE = 5          # 下播后的自动收尾，可以慢慢排队
 
 
 class BudgetExceeded(RuntimeError):
-    """单场或全局 token 预算不足。调用方应回退本地抽取式，而不是重试。"""
+    """单场或全局 token 预算不足。调用方应停止本次生成并说明原因，而不是重试。"""
 
     def __init__(self, scope: str, used: int, limit: int, detail: str = ""):
         self.scope = scope
@@ -127,8 +127,8 @@ class Reservation:
 class TaskResult:
     """处理器返回它，表示「结果可以给调用方，但别缓存」。
 
-    典型场景：总结时模型调用失败，业务层降级成本地抽取式。这不是任务失败，
-    但也不该把降级结果当成成功缓存 10 分钟，否则用户修好 key 再点还是旧结果。
+    用于结果本身有降级成分、不该在去重窗口里冒充成功结果的场景；
+    正式总结已不走降级（模型失败即任务失败），这里保留通用封装。
     """
     value: Any
     cacheable: bool = True

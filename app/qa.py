@@ -16,7 +16,7 @@ import sqlite3
 from datetime import datetime, timedelta
 from typing import Any
 
-from . import glossary, llm, logs, notes, scheduler, settings, store
+from . import claims, glossary, llm, logs, notes, scheduler, settings, store
 
 PROMPT_VERSION = "qa-v1"
 TOP_K = 10
@@ -58,11 +58,48 @@ def _recency(started_at: str) -> float:
         return 0.0
 
 
+def _claim_units(conn: sqlite3.Connection, question: str, scope: dict,
+                 top_k: int) -> list[dict]:
+    """按「人 × 主题」召回观点原子，转成和 note_units 同形的单元。
+
+    为什么单独一条通道：观点原子只是从要点里抽出来的字段，正文里不一定
+    还留着问句里的词。问「阿哲怎么看待 OPC」时，句子里没有「看待」，
+    FTS 未必命中；但 ``claims`` 里有 (阿哲, OPC 政策) 这一条，直接读即可。
+    只在问题里真的出现了某个主题词时才走这里，避免把无关问题带偏。
+    """
+    topics = [t for t in store.claim_topics(conn) if t and t in question]
+    if not topics:
+        return []
+    rows = []
+    for t in topics[:3]:
+        rows.extend(claims.rows_for(conn, topic=t, limit=top_k * 6))
+    if not rows:
+        return []
+    since, until = str(scope.get("since") or ""), str(scope.get("until") or "")
+    out: list[dict] = []
+    for r in rows:
+        at = str(r.get("started_at") or "")
+        if since and at < since:
+            continue
+        if until and at >= until:
+            continue
+        out.append({
+            "id": 0, "session_id": str(r.get("session_id") or ""),
+            "kind": "claim", "ref_id": str(r.get("claim_id") or ""),
+            "t": r.get("t"), "title": str(r.get("session_title") or ""),
+            "speaker": str(r.get("who") or ""),
+            "text": ("%s：%s" % (r.get("who") or "", r.get("stance") or "")).strip("："),
+            "weight": 1.3, "started_at": at,
+        })
+    return out
+
+
 def retrieve(conn: sqlite3.Connection, question: str, scope: dict,
              top_k: int | None = None) -> list[dict]:
     """召回 + 排序。返回带 ``n``（引用序号）的单元列表。"""
     top_k = top_k or _top_k()
     sid = str(scope.get("session_id") or "")
+    claim_units = _claim_units(conn, question, scope, top_k) if not sid else []
     if sid:
         # 「问这场」优先取本场全部要点/高光，不让其他场挤掉。
         units = store.note_units_for_session(conn, sid, 80)
@@ -75,6 +112,9 @@ def retrieve(conn: sqlite3.Connection, question: str, scope: dict,
             conn, expanded, limit=top_k * 4,
             since=str(scope.get("since") or ""),
             until=str(scope.get("until") or ""))
+        # 观点原子排前面：它是「谁的主张」，比「哪场笔记里提到过」更接近问题。
+        if claim_units:
+            units = claim_units + units
     if not units:
         return []
     scored: list[tuple[float, dict]] = []

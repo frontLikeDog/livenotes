@@ -317,6 +317,40 @@ def test_clear_session_persons_keeps_manual_verdicts(seeded):
     assert states["SPK_02"] == "confirmed"
 
 
+def test_summary_points_are_sorted_by_time_on_write_and_read(seeded):
+    """时间跳变回归：模型/老稿的顺序都不可信，读写边界必须统一按 t_from 排。"""
+    store.save_summary(seeded, SID, "content", {}, "llm(test-model)", {
+        "points": [
+            {"title": "第四小时", "t_from": 15600, "t_to": 15700},
+            {"title": "开场", "t_from": 600, "t_to": 700},
+            {"title": "没有时间"},
+            {"title": "第二小时", "t_from": 6000, "t_to": 6100},
+        ],
+        "groups": [
+            {"label": "实质讨论", "points": [
+                {"title": "晚", "t_from": 9000},
+                {"title": "早", "t_from": 300},
+            ]},
+        ],
+    })
+    out = store.latest_summary(seeded, SID, "content")
+    assert [p["title"] for p in out["payload"]["points"]] == [
+        "开场", "第二小时", "第四小时", "没有时间"]
+    assert [p["title"] for p in out["payload"]["groups"][0]["points"]] == ["早", "晚"]
+    assert out["payload"]["engine_kind"] == "llm"
+
+
+def test_legacy_summary_engine_is_never_mislabeled_as_ai(seeded):
+    store.save_summary(seeded, SID, "content", {}, "extractive",
+                       {"points": [{"title": "旧稿", "t_from": 0}]})
+    out = store.latest_summary(seeded, SID, "content")
+    assert out["payload"]["engine_kind"] == "extractive"
+
+    store.save_summary(seeded, SID, "time", {}, "", {"points": []})
+    out = store.latest_summary(seeded, SID, "time")
+    assert out["payload"]["engine_kind"] == "unknown"
+
+
 def test_delete_session_removes_children(seeded):
     store.insert_mark(seeded, SID, 12.5, "重点")
     store.save_summary(seeded, SID, "content", {}, "extractive", {"x": 1})

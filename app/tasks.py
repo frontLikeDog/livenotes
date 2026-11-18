@@ -68,7 +68,7 @@ def fingerprint_payload(payload: dict) -> dict:
 
 # ---------------------------------------------------------------- 总结
 
-def _run_summary(sid: str, payload: dict) -> dict | scheduler.TaskResult:
+def _run_summary(sid: str, payload: dict) -> dict:
     conn = store.connect()
     try:
         if payload.get("recluster"):
@@ -97,23 +97,17 @@ def _run_summary(sid: str, payload: dict) -> dict | scheduler.TaskResult:
             logs.log_event("live.finalize_done", session_id=sid,
                            engine=str(out.get("engine") or ""),
                            llm_error=bool(out.get("llm_error")))
-            # 用户已经走了，完成/失败都得主动告诉一声。手动点「生成总结」不发，
-            # 因为用户就在页面上，再弹通知是打扰。
-            # 注意：llm_error 只代表模型失败、已经降级成本地抽取式要点，任务本身
-            # 仍是 succeeded；这时说「笔记没生成成功」会和收尾卡/工作台互相矛盾。
+            # 用户已经走了，完成时主动告诉一声。手动点「生成总结」不发，
+            # 因为用户就在页面上，再弹通知是打扰；失败走下面的 except 分支。
             try:
                 notify.note_ready(sid, out)
             except Exception:
                 traceback.print_exc()
-        if out.get("llm_error"):
-            # 模型调用失败后降级成了本地抽取式：结果可以返回，但别当成成功缓存，
-            # 否则用户修好 key / 额度后再点，10 分钟内拿到的还是这份降级稿。
-            return scheduler.TaskResult(out, cacheable=False)
         return out
     except Exception as e:
-        # 自动收尾失败时别让场次一直叫「直播监听 11-05 03:41」：先落一份本地抽取式
-        # 总结（0 token），再用本地信息命名。仍然把失败抛出去，任务状态是 failed，
-        # 用户可以重试，而不是被缓存成"已完成"。
+        # 本地总结已移除：模型失败就是失败，不再落一份抽取式稿冒充总结。
+        # 仍然把场次名用结构化信息兜住（auto_local，界面会标「本地命名」），
+        # 但不生成任何「要点」——录音和逐字稿都在，用户可以看到原因后重试。
         try:
             store.upsert_note(conn, sid, state="failed",
                               error=str(e).splitlines()[0][:200]
@@ -121,14 +115,6 @@ def _run_summary(sid: str, payload: dict) -> dict | scheduler.TaskResult:
         except Exception:
             traceback.print_exc()
         if payload.get("auto"):
-            try:
-                f = dict(payload.get("filters") or {})
-                f["session_id"] = sid
-                analysis.make_summary(conn, sid, f, "content", "extractive")
-                notes.index_session(conn, sid)
-                logs.log_event("live.fallback_summary", level="warn", session_id=sid)
-            except Exception:
-                traceback.print_exc()
             try:
                 r = titles.local_apply(conn, sid)
                 logs.log_event("live.local_title", session_id=sid,

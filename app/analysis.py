@@ -19,7 +19,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from . import llm, scheduler, settings, shape, store, titles
-from .config import LLM_SUMMARY_MAX_ROWS, SUMMARY_BUCKET_SECONDS
+from .config import LLM_SUMMARY_MAX_ROWS
 from .models import CATEGORY_META, category_label, fmt_ts
 
 # ---------------------------------------------------------------- 分类 / 降权
@@ -283,28 +283,6 @@ def build_scope(conn: sqlite3.Connection, sid: str, filters: dict, mode: str) ->
 
 # ---------------------------------------------------------------- 总结
 
-def _groups(rows: list[dict], mode: str) -> dict[str, list[dict]]:
-    g: dict[str, list[dict]] = {}
-    for r in rows:
-        if mode == "time":
-            k = f"T{int(r['t_start'] // SUMMARY_BUCKET_SECONDS):04d}"
-        elif mode == "category":
-            k = r["category"]
-        else:  # content | filtered
-            k = r.get("topic") or "综合/未归类"
-        g.setdefault(k, []).append(r)
-    return g
-
-
-def _group_title(key: str, rows: list[dict], mode: str, scope: Scope) -> str:
-    if mode == "time":
-        b = int(key[1:]) * SUMMARY_BUCKET_SECONDS
-        return f"{fmt_ts(b)} – {fmt_ts(b + SUMMARY_BUCKET_SECONDS)} 时段要点"
-    if mode == "category":
-        return f"【{category_label(key)}】相关发言"
-    return f"话题：{key}"
-
-
 def _evidence(row: dict, scope: Scope) -> dict:
     return {
         "id": row["id"],
@@ -408,105 +386,12 @@ def _llm_groups(scope: Scope, usage: dict | None = None,
             })
         if pts:
             groups.append({"category": cat, "label": category_label(cat),
-                           "count": len(by_cat[cat]), "points": pts})
+                           "count": len(by_cat[cat]),
+                           "points": store.sort_summary_points(pts)})
     if not groups:
         return None
     return (str(data.get("overview", ""))[:400], groups,
             data.get("title"), data.get("title_alts") or [])
-
-
-def _extractive_groups(scope: Scope) -> list[dict]:
-    """不调模型的分组：每个类别取信息量最高的原句，最多 2 条要点。"""
-    out: list[dict] = []
-    for cat, rs in sorted(_groups(scope.rows, "category").items(), key=lambda kv: -len(kv[1])):
-        ranked = sorted(rs, key=lambda r: (r["importance"], len(r["text"])), reverse=True)
-        pts: list[dict] = []
-        for i in range(0, min(len(ranked), 6), 3):
-            chunk = ranked[i:i + 3]
-            if not chunk:
-                continue
-            ev = [_evidence(r, scope) for r in chunk]
-            gist = "；".join(r["text"].strip()[:80] for r in ranked[i:i + 2] if r["text"].strip())
-            pts.append({
-                "title": _group_title(cat, chunk, "category", scope) + ("" if i == 0 else "（续）"),
-                "gist": gist or "（该类别没有明显高价值原句）",
-                "t_from": min(r["t_start"] for r in chunk), "t_to": max(r["t_end"] for r in chunk),
-                "importance": round(sum(r["importance"] for r in chunk) / len(chunk), 3),
-                "utterance_count": len(chunk),
-                "speakers": sorted({r["speaker_label"] for r in chunk}), "evidence": ev,
-            })
-        if pts:
-            out.append({"category": cat, "label": category_label(cat), "count": len(rs),
-                        "points": pts[:2]})
-    return out
-
-
-def _label_groups(conn: sqlite3.Connection, sid: str, scope: Scope) -> list[dict]:
-    """「按分类」视图的本地版（0 次模型调用）：分组直接来自标签，标题带主导主题。
-
-    为什么不再调模型：类别是标签给的，证据是原句，这两样都已经在库里；
-    再让模型把同样的东西复述一遍，唯一多出来的是文案，代价是一次完整调用。
-    要文案时用户可以显式选「强制用大模型」，那时才走 `_llm_groups`。
-    """
-    out: list[dict] = []
-    by_cat = _groups(scope.rows, "category")
-    for cat, rs in sorted(by_cat.items(), key=lambda kv: -len(kv[1])):
-        if cat not in CATEGORY_META:
-            continue
-        tally: dict[str, int] = {}
-        for r in rs:
-            t = (r.get("topic") or "").strip()
-            if t:
-                tally[t] = tally.get(t, 0) + 1
-        tops = [t for t, _ in sorted(tally.items(), key=lambda kv: -kv[1])[:3]]
-        head = category_label(cat) + (" · " + tops[0] if tops else "")
-        ranked = sorted(rs, key=lambda r: (r["importance"], len(r["text"])), reverse=True)
-        pts: list[dict] = []
-        for i in range(0, min(len(ranked), 6), 3):
-            chunk = ranked[i:i + 3]
-            if not chunk:
-                continue
-            ev = [_evidence(r, scope) for r in chunk]
-            gist = "；".join(r["text"].strip()[:80] for r in chunk[:2] if r["text"].strip())
-            pts.append({
-                "title": head + ("" if i == 0 else "（续）"),
-                "gist": gist or "（该类别没有明显高价值原句）",
-                "t_from": min(r["t_start"] for r in chunk), "t_to": max(r["t_end"] for r in chunk),
-                "importance": round(sum(r["importance"] for r in chunk) / len(chunk), 3),
-                "utterance_count": len(chunk),
-                "speakers": sorted({r["speaker_label"] for r in chunk}), "evidence": ev,
-            })
-        if pts:
-            out.append({"category": cat, "label": category_label(cat), "count": len(rs),
-                        "topics": tops, "points": pts[:2]})
-    return out
-def _extractive_points(scope: Scope) -> list[dict]:
-    points: list[dict] = []
-    for key, rs in _groups(scope.rows, scope.mode).items():
-        if not rs:
-            continue
-        ranked = sorted(rs, key=lambda r: (r["importance"], len(r["text"])), reverse=True)
-        ev = [_evidence(r, scope) for r in ranked[:3]]
-        stance = _stance(str(ev[0].get("quote") or "")) if ev else ""
-        # 立场句取自 ranked[0]，gist 再把它抄一遍就是同一句话读两遍：从第二句接。
-        others = [r["text"].strip() for r in ranked[1:] if r["text"].strip()]
-        gist = "；".join(p[:80] for p in others[:2])
-        claim = _claim_speaker(ev)
-        points.append({
-            "title": _group_title(key, rs, scope.mode, scope),
-            "gist": gist or ("" if stance else "（该组无明显高价值原句）"),
-            "t_from": min(r["t_start"] for r in rs),
-            "t_to": max(r["t_end"] for r in rs),
-            "importance": round(sum(r["importance"] for r in rs) / len(rs), 3),
-            "utterance_count": len(rs),
-            "speakers": sorted({r["speaker_label"] for r in rs}),
-            "claim_speaker": claim, "stance": stance,
-            "evidence": ev,
-        })
-    out = sorted(points, key=lambda p: (p["utterance_count"], p["importance"]),
-                 reverse=True)[:14]
-    _attach_claims(out)
-    return out
 
 
 _LLM_PROMPT = """你在整理一份多人语音直播的可检索纪要。只允许使用下面给出的原始发言，禁止补充外部知识、禁止推测。
@@ -540,7 +425,7 @@ topics 规则：
 6. stance 写成陈述句（他主张什么），不要写「他讲了××」；找不到就留空字符串。""" + _TITLE_RULES
 
 
-# 低于这个规模就不值得烧 token：短录音直接用本地抽取式
+# 低于这个规模，自动档不调模型（本地稿已移除）；用户可显式选「强制用大模型」。
 LLM_MIN_ROWS = 15
 LLM_MIN_CHARS = 400
 
@@ -638,20 +523,24 @@ def _worth_llm(rows: list[dict]) -> tuple[bool, str]:
     n = len(rows)
     chars = sum(len(r.get("text") or "") for r in rows)
     if n < LLM_MIN_ROWS or chars < LLM_MIN_CHARS:
-        return False, "内容太少（%d 条 / %d 字），本次用本地抽取式，不消耗 token" % (n, chars)
+        return False, ("内容太少（%d 条 / %d 字）；本地总结已停用，本次不生成。"
+                       "需要的话可以选「强制用大模型」。" % (n, chars))
     return True, ""
 
 
-def _fallback_reason(errors: list, fallback: str = "本地抽取式") -> str:
-    """把「为什么没用上模型」说清楚：预算、限流、格式错误要能区分。"""
+def _failure_reason(errors: list) -> str:
+    """把「为什么没有生成」说清楚：预算、限流、格式错误要能区分。
+
+    措辞必须落在「本次没生成」上，不能再写「已回退本地抽取式」——那条路已经删了。
+    """
     if not errors:
-        return "大模型调用失败，已回退%s" % fallback
+        return "模型没有返回可用的要点，本次没有生成总结"
     e = errors[-1]
     if isinstance(e, scheduler.BudgetExceeded):
-        return "%s，已回退%s" % (e, fallback)
+        return "%s，本次没有生成总结" % e
     text = str(e).strip()
-    return "大模型调用失败（%s），已回退%s" % (
-        text[:120] if text else type(e).__name__, fallback)
+    return "模型调用失败（%s），本次没有生成总结" % (
+        text[:160] if text else type(e).__name__)
 
 
 def _clean_topics(raw: Any, limit: int = 10) -> list[str]:
@@ -732,6 +621,9 @@ def _llm_points(scope: Scope, usage: dict | None = None,
         if not points:
             return None
         _attach_claims(points)          # 模型没给或给错的那几条，本地补齐
+        # 模型不保证按时间输出；面板的「要点 / 时间」都按 t_from 排，
+        # 否则用户会看到 00:12 → 04:12 → 01:48 这种跳跃。
+        points = store.sort_summary_points(points)
         topics = _clean_topics(data.get("topics"))
         host = ""
         want = _label_at(data.get("host_speaker"))
@@ -740,7 +632,7 @@ def _llm_points(scope: Scope, usage: dict | None = None,
                          if r.get("speaker_label") == want), "")
         return (str(data.get("overview", ""))[:300], points,
                 data.get("title"), data.get("title_alts") or [], topics, host)
-    except Exception as e:                  # 网络/格式/限流都当"没有 LLM"，回退抽取式
+    except Exception as e:                  # 网络/格式/限流都当"没有可用总结"
         if errors is not None:
             errors.append(e)
         return None
@@ -782,34 +674,40 @@ def _fingerprint(rows: list[dict], mode: str, filters: dict, model: str) -> str:
 
 
 def estimate(conn: sqlite3.Connection, sid: str, filters: dict | None = None,
-             mode: str = "content") -> dict:
-    """生成前先问一句：这次会不会烧 token、大概多少。UI 用它决定提示文案。"""
+             mode: str = "content", engine: str = "auto") -> dict:
+    """生成前先问一句：这次会不会烧 token、能不能生成。UI 用它决定提示文案。
+
+    本地抽取式已移除：不能生成时必须明说原因（没配模型 / 内容太少 / 预算用完），
+    不能再用「本地抽取中」这种听起来像还能出结果的话糊过去。
+    """
     f = dict(filters or {})
     f.setdefault("session_id", sid)
     scope = build_scope(conn, sid, f, mode)
     rows = scope.rows
-    ok, why = _worth_llm(rows)
     cfg = settings.resolve()
-    if not cfg["configured"]:
+    configured = bool(cfg["configured"])
+    ok, why = _worth_llm(rows)
+    if not configured:
         ok, why = False, "还没配置大模型（⚙ 设置）"
+    elif engine == "llm":
+        ok, why = True, ""          # 强制模式：内容少也调，交给用户决定
     budget = scheduler.budget_status(sid)
     if ok and budget["session"]["limit"] and budget["session"]["remaining"] <= 0:
-        ok, why = False, ("本场 token 预算已用完（已用 %d / 上限 %d），本次用本地抽取式"
+        ok, why = False, ("本场 token 预算已用完（已用 %d / 上限 %d），本次不生成"
                           % (budget["session"]["used"], budget["session"]["limit"]))
     elif ok and budget["daily"]["limit"] and budget["daily"]["remaining"] <= 0:
-        ok, why = False, ("今日全局 token 预算已用完（已用 %d / 上限 %d），本次用本地抽取式"
+        ok, why = False, ("今日全局 token 预算已用完（已用 %d / 上限 %d），本次不生成"
                           % (budget["daily"]["used"], budget["daily"]["limit"]))
-    fp = _fingerprint(rows, mode, f, cfg["model"] or "") if ok else ""
-    hit = store.summary_by_fingerprint(conn, sid, mode, fp) if fp else None
+    fp = _fingerprint(rows, mode, f, cfg["model"] or "") if configured else ""
+    hit = (store.summary_by_fingerprint(conn, sid, mode, fp)
+           if (fp and engine != "llm") else None)
     if hit:
         ok, why = False, "输入没变，可以直接复用上次结果（0 token）"
-    if mode == "category":
-        # 按分类视图由标签在本地汇总，不调模型；要模型写文案得显式选「强制用大模型」
-        ok, why = False, "分类视图由标签本地生成（0 token）；要模型写文案请选「强制用大模型」"
     return {
         "rows": len(rows),
         "chars": sum(len(r.get("text") or "") for r in rows),
-        "would_use_llm": ok, "why": why, "model": cfg["model"], "configured": cfg["configured"],
+        "would_use_llm": ok, "why": why, "model": cfg["model"],
+        "configured": configured, "engine": "llm" if ok else "none",
         "cached": bool(hit), "fingerprint": fp,
         "thresholds": {"rows": LLM_MIN_ROWS, "chars": LLM_MIN_CHARS},
         "budget": budget,
@@ -818,8 +716,22 @@ def estimate(conn: sqlite3.Connection, sid: str, filters: dict | None = None,
 
 def make_summary(conn: sqlite3.Connection, sid: str, filters: dict,
                  mode: str = "content", engine_pref: str = "auto") -> dict:
+    """生成场次总结：**只允许大模型**。
+
+    2026-11-19 起移除本地抽取式：它给出的只是高权重原句拼贴，用户无法分辨
+    「这段结论是模型读出来的，还是机器按关键词拼的」。从这条链路里删掉之后，
+    模型不可用就明确失败，不再落一份看起来像总结的本地稿。
+    """
     mode = mode if mode in ("content", "time", "category", "filtered") else "content"
+    if engine_pref not in ("auto", "llm"):
+        raise RuntimeError("本地总结已移除：总结只能由大模型生成")
+    cfg = settings.resolve()
+    if not cfg["configured"]:
+        raise RuntimeError("大模型还没配置：到「设置」里填好接口地址、模型和 API Key，再生成总结")
+
     scope = build_scope(conn, sid, filters, mode)
+    if not scope.rows:
+        raise RuntimeError("当前条件下没有可用发言，无法生成总结")
 
     speakers = sorted({r["speaker_label"] for r in scope.rows})
     cats: dict[str, int] = {}
@@ -833,31 +745,29 @@ def make_summary(conn: sqlite3.Connection, sid: str, filters: dict,
         "t_to": max((r["t_end"] for r in scope.rows), default=0.0),
     }
 
-    engine = "extractive"
-    overview = ""
-    points = _extractive_points(scope)
-
     # ---- 指纹与缓存：输入没变就直接返回上次结果，一次模型都不调 ----
-    # 只有"本来会调模型"的情况才值得查缓存；抽取式本来就不花钱，重算也无所谓。
-    fp = ""
-    if engine_pref in ("auto", "llm") and _worth_llm(scope.rows)[0]:
-        fp = _fingerprint(scope.rows, mode, filters, settings.resolve()["model"] or "")
-        if engine_pref == "auto":
-            hit = store.summary_by_fingerprint(conn, sid, mode, fp)
-            if hit:
-                hit = dict(hit)
-                hit["cached"] = True
-                hit["usage"] = None
-                hit["fingerprint"] = fp
-                # 缓存的是"当时的名字"，用户后来可能改过名；标题条要按当前库里的状态画，
-                # 否则会出现"总结说叫 A、顶上说叫 B"。
-                st = titles.state(conn, sid)
-                hit["session_title"] = st["title"]
-                hit["title_source"] = st["source"]
-                hit["title_applied"] = bool(st["title"]) and st["title"] == hit.get("title")
-                hit["engine_reason"] = ("输入没变（文本 / 分类 / 主题 / 模型 / 筛选都没动），"
-                                        "直接复用上次结果，本次 0 token")
-                return hit
+    # 「强制用大模型」不复用缓存：用户点它就是为了重新生成一份。
+    fp = _fingerprint(scope.rows, mode, filters, cfg["model"] or "")
+    if engine_pref == "auto":
+        hit = store.summary_by_fingerprint(conn, sid, mode, fp)
+        if hit:
+            hit = dict(hit)
+            hit["cached"] = True
+            hit["usage"] = None
+            hit["fingerprint"] = fp
+            # 缓存的是"当时的名字"，用户后来可能改过名；标题条要按当前库里的状态画，
+            # 否则会出现"总结说叫 A、顶上说叫 B"。
+            st = titles.state(conn, sid)
+            hit["session_title"] = st["title"]
+            hit["title_source"] = st["source"]
+            hit["title_applied"] = bool(st["title"]) and st["title"] == hit.get("title")
+            hit["engine_reason"] = ("输入没变（文本 / 分类 / 主题 / 模型 / 筛选都没动），"
+                                    "直接复用上次结果，本次 0 token")
+            return hit
+
+    ok, why = _worth_llm(scope.rows)
+    if not ok and engine_pref == "auto":
+        raise RuntimeError(why)
 
     usage: dict = {}
     llm_errors: list = []
@@ -869,48 +779,30 @@ def make_summary(conn: sqlite3.Connection, sid: str, filters: dict,
     topics: list[str] = []
     host_speaker: str = ""
     if mode == "category":
-        # 按分类：真正的按类分组，而不是把五类混在一起。
-        # 默认（auto）走本地汇总：标签已经在库里，分组、计数、证据都能直接算出来，
-        # 没必要再调一次模型；只有用户明确选「强制用大模型」才写要点文案。
-        if engine_pref == "llm":
-            t0 = time.time()
-            g = _llm_groups(scope, usage, llm_errors)
-            usage["ms"] = int((time.time() - t0) * 1000)
-            if g:
-                overview, groups, name_title, name_alts = g
-                engine = "llm(" + (settings.resolve()["model"] or "configured") + ")"
-                reason = "按你的选择，用大模型写分类要点"
-            else:
-                reason = _fallback_reason(llm_errors, "本地汇总")
-        if not groups:
-            groups = _label_groups(conn, sid, scope)
-            if engine_pref == "auto":
-                reason = reason or "按 AI 标签本地汇总（0 token）"
-            elif engine_pref == "extractive":
-                reason = "你选了「只用本地抽取」"
-        points = [p for g in groups for p in g["points"]]
-        if not overview:
-            n_ai = store.ai_state(conn, sid)["labeled"]
-            overview = (f"本场共纳入 {len(scope.rows)} 条有效发言，按 {len(groups)} 个类别组织，"
-                        f"共 {len(points)} 组要点；每个要点都绑定该类别下的原句。"
-                        + ("标签来自 AI 标注。" if n_ai else "标签来自关键词规则。"))
-    elif engine_pref in ("auto", "llm"):
-        ok, why = (_worth_llm(scope.rows) if engine_pref == "auto" else (True, ""))
-        if not ok:
-            reason = why
-        else:
-            t0 = time.time()
-            llm = _llm_points(scope, usage, llm_errors)
-            usage["ms"] = int((time.time() - t0) * 1000)
-            reason = ("内容足够，自动使用大模型" if llm
-                      else _fallback_reason(llm_errors))
-    if llm:
+        # 按分类：真正的按类分组，而不是把五类混在一起。也走模型——
+        # 本地按标签拼出来的「要点」正是这次要移除的东西。
+        t0 = time.time()
+        g = _llm_groups(scope, usage, llm_errors)
+        usage["ms"] = int((time.time() - t0) * 1000)
+        if not g:
+            raise RuntimeError(_failure_reason(llm_errors))
+        overview, groups, name_title, name_alts = g
+        points = store.sort_summary_points(
+            [p for grp in groups for p in grp["points"]])
+        reason = "按分类组织，用大模型写要点"
+    else:
+        t0 = time.time()
+        llm = _llm_points(scope, usage, llm_errors)
+        usage["ms"] = int((time.time() - t0) * 1000)
+        if not llm:
+            raise RuntimeError(_failure_reason(llm_errors))
         overview, points, name_title, name_alts, topics, host_speaker = llm
-        engine = "llm(" + (settings.resolve()["model"] or "configured") + ")"
-    elif mode != "category" and engine_pref == "llm":
-        engine = "extractive(LLM 不可用，已回退)"
-    elif mode != "category" and engine_pref == "extractive":
-        reason = "你选了「只用本地抽取」"
+        reason = ("内容足够，自动使用大模型" if engine_pref == "auto"
+                  else "按你的选择，强制使用大模型")
+
+    model_used = str(usage.get("model") or cfg["model"] or "")
+    # 不知道模型名就写 "llm"，不要编一个 "configured" 冒充型号。
+    engine = ("llm(" + model_used + ")") if model_used else "llm"
 
     # ---- 把 P1 产出的主题词表落库：后续逐句标注只能用这套词 ----
     # 只有"这句还没被标过"的场次才写：否则改词表会让所有已标句子的指纹失效，
@@ -922,41 +814,30 @@ def make_summary(conn: sqlite3.Connection, sid: str, filters: dict,
     if topics and whole_scope and store.ai_state(conn, sid)["labeled"] == 0:
         store.set_ai_topics(conn, sid, topics)
 
-    if not overview:
-        if not scope.rows:
-            overview = "当前条件下没有可用发言，无法生成总结。"
-        else:
-            overview = (f"本场共纳入 {len(scope.rows)} 条有效发言，涉及 {len(speakers)} 个说话人、"
-                        f"{len(points)} 个要点分组；已剔除广告、闲聊、控场及重叠语音。"
-                        "下列要点均由原文原句构成，点「查看原文」可回溯对应时间段。")
     shape_info = shape.summarize(scope.rows,
                                  duration_s=float(scope.session.get("duration_s") or 0.0))
     caveats = list(scope.caveats)
-    if engine.startswith("llm") and len(scope.rows) > LLM_SUMMARY_MAX_ROWS:
+    if len(scope.rows) > LLM_SUMMARY_MAX_ROWS:
         caveats.append("内容较长，按时间分层抽样 %d/%d 句送模型；结论覆盖全段，细节可能省略。"
                        % (LLM_SUMMARY_MAX_ROWS, len(scope.rows)))
-    if engine.startswith("extractive"):
-        caveats.append("本地抽取式总结：要点为高权重原句组合，未做生成式改写；配置 LLM 环境变量后可切换。")
 
     # ---- 顺手起名：同一份内容只读一遍，名字与「能不能改」的决定都交给 titles ----
-    engine_kind = "llm" if engine.startswith("llm") else "extractive"
     enough = _worth_llm(scope.rows)[0]
     whole = whole_scope
     if not name_title:
-        name_title = titles.structural(conn, sid)     # 没调模型也能给个结构化的候选
+        name_title = titles.structural(conn, sid)     # 模型没起名时的结构化候选
         name_kind = "structural"
     else:
         name_kind = "llm"
     named = titles.apply_summary(conn, sid, title=name_title, alts=name_alts,
-                                 engine_kind=engine_kind, whole=whole, enough=enough,
+                                 engine_kind="llm", whole=whole, enough=enough,
                                  title_kind=name_kind)
 
     payload = {
         "session_id": sid, "scope": mode, "engine": engine,
-        "engine_kind": engine_kind,
-        "engine_model": settings.resolve()["model"],
+        "engine_kind": "llm",
+        "engine_model": model_used,
         "engine_reason": reason,
-        # 有值说明「本来要调模型，但失败了/预算不够」，业务层据此不缓存降级结果
         "llm_error": (str(llm_errors[-1])[:200] if llm_errors else ""),
         "budget": scheduler.budget_status(sid),
         "usage": usage or None,
@@ -971,13 +852,11 @@ def make_summary(conn: sqlite3.Connection, sid: str, filters: dict,
         "shape": shape_info,
         "title": named["title"], "title_alts": named["alts"],
         "title_applied": named["applied"], "title_source": named["source"],
+        "title_kind": name_kind,
         "title_reason": named["reason"], "session_title": named["current"],
     }
-    # 只给真正走成了模型的结果盖指纹：模型失败退回抽取式时不能盖，
-    # 否则下次命中缓存，会把"一次失败"永久固化成这场唯一的总结。
-    saved_fp = fp if engine_kind == "llm" else ""
-    payload["fingerprint"] = saved_fp
-    store.save_summary(conn, sid, mode, filters, engine, payload, saved_fp)
+    payload = store.normalize_summary_payload(payload)
+    store.save_summary(conn, sid, mode, filters, engine, payload, fp)
     return payload
 
 
@@ -1021,26 +900,12 @@ def finalize(conn: sqlite3.Connection, sid: str, filters: dict | None = None) ->
     filters = dict(filters or WHOLE_FILTERS)
     scope = build_scope(conn, sid, filters, "content")
     row = _summary_for_filters(conn, sid, filters)
-    payload = dict((row or {}).get("payload") or {})
+    payload = store.normalize_summary_payload((row or {}).get("payload"))
 
     if not payload:
-        # 理解段没跑成：本地抽一份，至少让面板有东西可看（不补调模型）
-        payload = {
-            "session_id": sid, "scope": "content",
-            "engine": "extractive", "engine_kind": "extractive",
-            "engine_model": settings.resolve()["model"],
-            "engine_reason": "理解段没有产出结果，这里用本地抽取补齐（0 token）",
-            "usage": None, "cached": False,
-            "generated_at": datetime.now().isoformat(timespec="seconds"),
-            "filter": filters, "overview": "", "stats": {}, "coverage": {},
-            "caveats": list(scope.caveats), "points": _extractive_points(scope),
-            "topics": [], "host_speaker": "",
-            "shape": shape.summarize(
-                scope.rows,
-                duration_s=float(scope.session.get("duration_s") or 0.0)),
-            "title": None, "title_alts": [], "title_applied": False,
-            "title_source": "", "title_reason": "", "session_title": "",
-        }
+        # 理解段没跑成：不再本地拼一份假总结。P1 没结果就是没结果，
+        # 明确失败，让用户看到原因后重试。
+        raise RuntimeError("还没有 AI 总结可汇总：先完成「理解与主题」这一步")
 
     # ---- 证据重取：标签变了，evidence 里的类别/主题快照要跟着变 ----
     pts = payload.get("points") or []
@@ -1087,9 +952,11 @@ def finalize(conn: sqlite3.Connection, sid: str, filters: dict | None = None) ->
         "t_to": max((r["t_end"] for r in scope.rows), default=0.0),
     }
     payload["coverage"] = scope.coverage
-    payload["caveats"] = list(scope.caveats) + (
-        ["本地抽取式总结：要点为高权重原句组合，未做生成式改写。"]
-        if str(payload.get("engine", "")).startswith("extractive") else [])
+    caveats = list(scope.caveats)
+    if str(payload.get("engine_kind") or "") != "llm":
+        # 老库里可能还有本地稿；保留内容，但把来源写清楚，绝不冒充 AI。
+        caveats.append("这条总结来自旧版本地摘要，不是 AI 生成；重新生成会改用大模型。")
+    payload["caveats"] = caveats
     payload["filter"] = filters
     payload["topics"] = store.get_ai_topics(conn, sid)
     payload["shape"] = shape.summarize(
@@ -1098,10 +965,10 @@ def finalize(conn: sqlite3.Connection, sid: str, filters: dict | None = None) ->
     payload["cached"] = False
     fp = _fingerprint(scope.rows, "content", filters, settings.resolve()["model"] or "")
     # 和 make_summary 同一条规矩：只有真正走成模型的结果才盖指纹。
-    # 理解段挂了、这里是本地抽取兜底时若也盖章，下次「生成总结」就会命中缓存，
-    # 把"一次失败"永久固化成这场唯一的总结（0 token 且看起来一切正常）。
+    # 老本地稿即使被 P3 刷新了证据，也不该盖指纹冒充可复用的 AI 结果。
     saved_fp = fp if str(payload.get("engine") or "").startswith("llm") else ""
+    payload = store.normalize_summary_payload(payload)
     payload["fingerprint"] = saved_fp
     store.save_summary(conn, sid, "content", filters,
-                       str(payload.get("engine") or "extractive"), payload, saved_fp)
+                       str(payload.get("engine") or "llm"), payload, saved_fp)
     return payload
