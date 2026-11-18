@@ -23,6 +23,7 @@ from datetime import datetime
 from typing import Any
 
 from .config import DATA_DIR
+from .traffic import sanitize_traffic
 
 PATH = DATA_DIR / "rooms.json"
 _LOCK = threading.Lock()
@@ -245,7 +246,8 @@ def remove(room_id: str) -> bool:
 # ---------------------------------------------------------------- 采集端心跳
 
 def capture_update(room_id: str, alive: bool, pid: int | None = None,
-                   adopted: bool = False, reason: str = "") -> dict:
+                   adopted: bool = False, reason: str = "",
+                   traffic: dict | None = None) -> dict:
     """记录采集代理的一次心跳。age_s 由读取时现算，避免时钟漂移。"""
     rid = str(room_id or "")
     if not rid:
@@ -262,6 +264,9 @@ def capture_update(room_id: str, alive: bool, pid: int | None = None,
         "at": now(),
         "_mono": time.monotonic(),
     }
+    clean = sanitize_traffic(traffic)
+    if clean is not None:
+        entry["traffic"] = clean
     with _CAP_LOCK:
         _CAPTURE[rid] = entry
         if len(_CAPTURE) > 200:
@@ -279,3 +284,34 @@ def capture_status() -> dict[str, dict]:
             item["age_s"] = round(max(0.0, now_mono - e["_mono"]), 1)
             out[rid] = item
         return out
+
+
+def traffic_report() -> dict[str, Any]:
+    """按房间汇总最近一次流量快照，给 /api/traffic 和排障页用。"""
+    status = capture_status()
+    rows: list[dict[str, Any]] = []
+    totals = {
+        "rooms": 0,
+        "platform_bytes": 0,
+        "audio_bytes": 0,
+        "platform_mb_per_hour": 0.0,
+        "audio_mb_per_hour": 0.0,
+    }
+    for rid, entry in status.items():
+        traffic = entry.get("traffic")
+        if not isinstance(traffic, dict):
+            continue
+        row = {"id": rid, "alive": bool(entry.get("alive")),
+               "age_s": entry.get("age_s")}
+        row.update(traffic)
+        rows.append(row)
+        totals["rooms"] += 1
+        totals["platform_bytes"] += int(traffic.get("platform_bytes") or 0)
+        totals["audio_bytes"] += int(traffic.get("audio_bytes") or 0)
+        totals["platform_mb_per_hour"] += float(
+            traffic.get("platform_mb_per_hour") or 0)
+        totals["audio_mb_per_hour"] += float(
+            traffic.get("audio_mb_per_hour") or 0)
+    totals["platform_mb_per_hour"] = round(totals["platform_mb_per_hour"], 1)
+    totals["audio_mb_per_hour"] = round(totals["audio_mb_per_hour"], 1)
+    return {"generated_at": now(), "rooms": rows, "totals": totals}

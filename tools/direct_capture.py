@@ -52,6 +52,9 @@ except ImportError:  # 作为 python tools/capture_agent.py 的依赖导入
     from capture_agent import (Agent, SharedAgent, SharedBrowser, api,
                                find_chrome, find_shared_browser)
 
+from app.traffic import (CountingProxy, parse_bitrate_kbps,  # noqa: E402
+                         parse_video_resolution, resolution_kbps)
+
 CHUNK_SAMPLES = 4096
 CHUNK_BYTES = CHUNK_SAMPLES * 2       # s16le：256ms
 DIRECT_WARN_S = 10.0                  # 先提示，不重建
@@ -67,6 +70,11 @@ DIRECT_ZERO_RMS = 0.0001              # 与 app.config.LIVE_ZERO_RMS 同口径
 DIRECT_ZERO_PROBE_AFTER_S = 120.0     # 连续全零这么久才值得去问一次页面
 DIRECT_ZERO_PROBE_EVERY_S = 60.0      # 两次探测的最小间隔，别把抖音页面当轮询接口
 PROBE_TIMEOUT_S = 8.0
+
+# 精确流量计量：流先经过本地计数代理再交给 ffmpeg。默认关闭，避免改变媒体
+# 路径；需要精确数字时设 LIVENOTES_TRAFFIC_PROXY=1（代理只监听 127.0.0.1）。
+TRAFFIC_PROXY = os.environ.get("LIVENOTES_TRAFFIC_PROXY", "").strip().lower() in (
+    "1", "true", "yes", "on")
 
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
@@ -570,7 +578,9 @@ def spawn_ffmpeg(stream: str) -> subprocess.Popen:
     exe = shutil.which("ffmpeg")
     if not exe:
         raise RuntimeError("找不到 ffmpeg，请安装并加入 PATH")
-    cmd = [exe, "-hide_banner", "-loglevel", "error", "-nostdin",
+    # info + nostats：启动时打印输入流码率/分辨率，供流量估算；不打印周期性
+    # 进度行，stderr 仍然是「有错才长」的形状，旧看门狗不受影响。
+    cmd = [exe, "-hide_banner", "-loglevel", "info", "-nostats", "-nostdin",
            "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5",
            "-i", stream, "-vn", "-ac", "1", "-ar", "16000", "-f", "s16le", "-"]
     return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -609,6 +619,18 @@ def post_chunk(base: str, sid: str, data: bytes, timeout: float = 5.0) -> None:
 
 _GONE_RE = re.compile(r"(?:Server returned|HTTP error)\s*(?:403|404)"
                       r"|(?:403|404)\s*(?:Not Found|Forbidden)", re.I)
+
+# -loglevel info 会把输入流元数据也打到 stderr；只把像错误的行留在
+# stderr_tail 里，保持旧逻辑「tail 最后一行就是失败原因」的形状。
+_ERR_MARKS = ("error", "failed", "failure", "403", "404", "forbidden",
+              "not found", "invalid", "timed out", "timeout",
+              "connection refused", "connection reset", "unable",
+              "could not", "cannot", "broken pipe", "no such")
+
+
+def _looks_error(text: str) -> bool:
+    low = str(text or "").lower()
+    return any(mark in low for mark in _ERR_MARKS)
 
 
 def _stream_gone(text: str) -> bool:
@@ -716,8 +738,42 @@ class DirectAgent(Agent):
             # 全零音频的起点（墙钟，0 = 当前有声）；probed_at 是上次页面探针时间。
             "zero_since": 0.0, "probed_at": 0.0, "probing": False, "ended": False,
             "gen": 0, "recovering": False, "renewing": False,
-            "eof": False, "stderr_tail": "",
+            "eof": False, "stderr_tail": "", "stderr_log": "",
+            "traffic": None, "traffic_proxy": None, "stream_input": stream,
         }
+
+    def _spawn_ffmpeg(self, rid: str, stream: str, info: dict):
+        """流地址 ->（可选计数代理）-> ffmpeg 子进程。
+
+        proxy 只在 LIVENOTES_TRAFFIC_PROXY=1 时启用；启动失败退回直连，
+        并把计量标成不可用——绝不能因为「量流量」把录音搞停。
+        """
+        meter = info.get("traffic") or self._meter(rid)
+        info["traffic"] = meter
+        old = info.get("traffic_proxy")
+        if old is not None:
+            try:
+                old.stop()
+            except Exception:
+                pass
+            info["traffic_proxy"] = None
+        target = stream
+        proxy = None
+        if TRAFFIC_PROXY:
+            def on_bytes(n: int) -> None:
+                meter.set_source("proxy", "计数代理实测")
+                meter.add_platform(n)
+            try:
+                proxy = CountingProxy(stream, on_bytes=on_bytes)
+                target = proxy.start()
+            except Exception as e:
+                proxy = None
+                target = stream
+                meter.set_source("unavailable",
+                                 "计数代理启动失败：%s" % str(e)[:160])
+        info["traffic_proxy"] = proxy
+        info["stream_input"] = target
+        return spawn_ffmpeg(target)
 
     def _start_reader(self, rid: str, room: dict, info: dict) -> None:
         gen = int(info.get("gen") or 0)
@@ -738,8 +794,22 @@ class DirectAgent(Agent):
                     return
                 text = line.decode("utf-8", "replace").strip()
                 if text:
-                    info["stderr_tail"] = (str(info.get("stderr_tail") or "")
-                                           + text + "\n")[-800:]
+                    info["stderr_log"] = (str(info.get("stderr_log") or "")
+                                          + text + "\n")[-4000:]
+                    if _looks_error(text):
+                        info["stderr_tail"] = (str(info.get("stderr_tail") or "")
+                                               + text + "\n")[-800:]
+                    meter = info.get("traffic")
+                    if meter is not None:
+                        # 启动时的 Input/Stream 行带码率或分辨率；拿不到精确
+                        # 代理时用这个估算，至少给出量级。
+                        kb = parse_bitrate_kbps(text)
+                        if kb <= 0:
+                            w, h = parse_video_resolution(text)
+                            kb = resolution_kbps(w, h)
+                        if kb > 0:
+                            meter.set_estimate_kbps(
+                                kb, "按 ffmpeg 码率/分辨率估算")
         except Exception:
             return
 
@@ -828,13 +898,15 @@ class DirectAgent(Agent):
                          % (resolve_ms / 1000.0),
                     engine="direct", session_id=sid)
 
+        info = self._new_info(None, sid, stream)
+        info["traffic"] = self._meter(rid, reset=not session)
         try:
-            proc = spawn_ffmpeg(stream)
+            proc = self._spawn_ffmpeg(rid, stream, info)
         except Exception as e:
+            self._stop_traffic(info)
             self._fallback_or_fail(room, sid, "ffmpeg 启动失败：%s" % e, 2)
             return
-
-        info = self._new_info(proc, sid, stream)
+        info["proc"] = proc
         info["resolve_ms"] = resolve_ms
         self.running[rid] = info
         self.beat(rid, True, info)
@@ -881,6 +953,9 @@ class DirectAgent(Agent):
         info["rms"] = pcm_rms(chunk)
         info["chunks"] = int(info.get("chunks") or 0) + 1
         info["last_chunk_at"] = time.time()
+        meter = info.get("traffic")
+        if meter is not None:
+            meter.add_audio(len(chunk))
         # 全零不是"主播安静"：安静的直播间有底噪，只有断掉的流才是精确的 0。
         if info["rms"] < DIRECT_ZERO_RMS:
             if not info.get("zero_since"):
@@ -1098,8 +1173,9 @@ class DirectAgent(Agent):
                 return
             info["retry_at"] = 0.0
             try:
-                proc = spawn_ffmpeg(stream)
+                proc = self._spawn_ffmpeg(rid, stream, info)
             except Exception as e:
+                self._stop_traffic(info)
                 info["retry_at"] = time.time() + DIRECT_RETRY_S
                 self.report(rid, "live", stage=6,
                             note="ffmpeg 重启失败，%d 秒后重试：%s"
@@ -1261,6 +1337,7 @@ class DirectAgent(Agent):
             return
         with self._beat_lock:
             self._beat(rid, False, info, reason or "direct stopped")
+        self._stop_traffic(info)
         info["gen"] = int(info.get("gen") or 0) + 1
         _kill_proc(info.get("proc"))
         if stop_session and info.get("sid"):
@@ -1409,11 +1486,18 @@ class DirectAgent(Agent):
         try:
             stream, note = resolve_douyin(room["url"])
             self._report_page_url(rid, room)
-            proc = spawn_ffmpeg(stream)
         except Exception as e:
             print("[%s] 接管直取失败：%s" % (rid, e), flush=True)
             return
-        info = self._new_info(proc, sid, stream, adopted=True)
+        info = self._new_info(None, sid, stream, adopted=True)
+        info["traffic"] = self._meter(rid, reset=True)
+        try:
+            proc = self._spawn_ffmpeg(rid, stream, info)
+        except Exception as e:
+            self._stop_traffic(info)
+            print("[%s] 接管直取失败：%s" % (rid, e), flush=True)
+            return
+        info["proc"] = proc
         self.running[rid] = info
         self.beat(rid, True, info)
         self._start_stderr(proc, info, 0)
@@ -1425,6 +1509,7 @@ class DirectAgent(Agent):
         for info in list(self.running.values()):
             info["gen"] = int(info.get("gen") or 0) + 1
             _kill_proc(info.get("proc"))
+            self._stop_traffic(info)
         self.running.clear()
         super().shutdown()
         if self.fallback is not None:

@@ -39,6 +39,9 @@ except ImportError:       # pragma: no cover - 缺依赖时由 _ws_connect 明�
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from app.traffic import (CdpTrafficCounter, TrafficMeter,  # noqa: E402
+                         resolution_kbps)
+
 
 def _data_dir() -> Path:
     """和 app/config.py 用同一个数据目录：压测/自测把运行数据放到临时目录时，
@@ -498,6 +501,67 @@ async def cdp_eval_await(ws_url: str, expression: str, timeout: float = 12.0):
                 return m
 
 
+class CdpTrafficMeter:
+    """常驻监听一个页面 target 的 Network 事件，累计平台侧下行字节。
+
+    现有的 cdp_eval / cdp_lock 都是「连上、问一句、断开」；流量计量需要
+    一条长连接，否则直播流每 256ms 一个块，根本来不及采样。这里单独开
+    一个守护线程，失败只影响计量，不影响采集。
+    """
+
+    def __init__(self, ws_url: str, meter: TrafficMeter, rid: str = "") -> None:
+        self.ws_url = str(ws_url or "")
+        self.meter = meter
+        self.rid = rid
+        self.counter = CdpTrafficCounter(meter)
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._error = ""
+
+    def start(self) -> None:
+        if not self.ws_url:
+            return
+        self._thread = threading.Thread(
+            target=self._thread_main, name="cdp-traffic-" + (self.rid or "?"),
+            daemon=True)
+        self._thread.start()
+
+    def alive(self) -> bool:
+        return (self._thread is not None and self._thread.is_alive()
+                and not self._stop.is_set())
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    @property
+    def error(self) -> str:
+        return self._error
+
+    def _thread_main(self) -> None:
+        try:
+            asyncio.run(self._run())
+        except Exception as e:
+            self._error = str(e)[:200]
+            self.meter.demote_source("CDP 流量计量失败：%s" % self._error)
+            print("[%s] CDP 流量计量断开：%s"
+                  % (self.rid or "traffic", self._error), flush=True)
+
+    async def _run(self) -> None:
+        async with _ws_connect(self.ws_url, max_size=None, open_timeout=5) as ws:
+            await ws.send(json.dumps({"id": 1, "method": "Network.enable",
+                                      "params": {}}))
+            while not self._stop.is_set():
+                try:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    continue
+                try:
+                    msg = json.loads(raw)
+                except Exception:
+                    continue
+                self.counter.feed(msg)
+
+
 class Agent:
     adopt_on_start = False
     # 上报给房间的采集引擎名；direct/shared 子类各自覆盖。
@@ -510,6 +574,8 @@ class Agent:
         # ffmpeg/streamlink 的机器会在启动阶段就被 SystemExit 拦下。
         self.chrome = chrome or (find_chrome() if need_browser else "")
         self.running: dict[str, dict] = {}   # room_id -> {proc, port, profile, started, locked}
+        # 每路一份流量计数器：跨 ffmpeg/浏览器重建累计，房间重试时重新开始。
+        self.traffic_meters: dict[str, TrafficMeter] = {}
         # bring_up 一个房间可能几十秒（等页面、等音频会话），这段时间不能
         # 让其它房间的心跳断掉，否则 N 路时会互相把对方"看死"。
         self._beat_lock = threading.Lock()
@@ -526,6 +592,100 @@ class Agent:
                     if info is None:      # 这一轮刚好被 reap 掉了
                         continue
                     self._beat(rid, True, info)
+
+    # ---------------------------------------------------------------- 流量
+    def _meter(self, rid: str, reset: bool = False) -> TrafficMeter:
+        meter = self.traffic_meters.get(rid)
+        if meter is None:
+            meter = self.traffic_meters[rid] = TrafficMeter()
+        elif reset:
+            meter.reset()
+        return meter
+
+    def _start_cdp_meter(self, rid: str, info: dict, ws_url: str) -> None:
+        """给一个页面 target 挂上常驻 Network 监听；失败只标记不可用。"""
+        if not ws_url:
+            return
+        old = info.get("traffic_cdp")
+        if old is not None:
+            try:
+                old.stop()
+            except Exception:
+                pass
+        meter = info.get("traffic") or self._meter(rid)
+        info["traffic"] = meter
+        cm = CdpTrafficMeter(ws_url, meter, rid=rid)
+        info["traffic_cdp"] = cm
+        cm.start()
+        # CDP 挂不上/页面还没出视频时，用分辨率给一个保底估算；精确源优先。
+        threading.Thread(target=self._prime_browser_estimate,
+                         args=(rid, info, ws_url), name="traffic-est-" + rid,
+                         daemon=True).start()
+
+    def _prime_browser_estimate(self, rid: str, info: dict, ws_url: str) -> None:
+        time.sleep(6.0)
+        meter = info.get("traffic")
+        if meter is None:
+            return
+        try:
+            if meter.snapshot().get("source") in ("cdp", "proxy"):
+                return
+            kb = self._estimate_browser_kbps(ws_url)
+            if kb > 0:
+                meter.set_estimate_kbps(kb, "按视频分辨率估算")
+        except Exception:
+            return
+
+    def _stop_traffic(self, info: dict) -> None:
+        cm = info.get("traffic_cdp")
+        if cm is not None:
+            try:
+                cm.stop()
+            except Exception:
+                pass
+            info["traffic_cdp"] = None
+        proxy = info.get("traffic_proxy")
+        if proxy is not None:
+            try:
+                proxy.stop()
+            except Exception:
+                pass
+            info["traffic_proxy"] = None
+
+    def _page_ws_for_room(self, port: int, room: dict) -> str:
+        """按房间 URL 找一个页面 target 的 CDP 地址（接管/共享模式用）。"""
+        if not port:
+            return ""
+        want = canonical_live_url(str(room.get("resolved_url")
+                                      or room.get("url") or ""))
+        try:
+            pages = http_json("http://127.0.0.1:%d/json/list" % port, timeout=2)
+        except Exception:
+            return ""
+        for p in pages:
+            if p.get("type") != "page":
+                continue
+            u = str(p.get("url") or "")
+            if not u.startswith(("http://", "https://")):
+                continue
+            if want and canonical_live_url(u) == want:
+                return str(p.get("webSocketDebuggerUrl") or "")
+        return ""
+
+    def _estimate_browser_kbps(self, ws_url: str) -> float:
+        """CDP 拿不到字节时的兜底：读 <video> 分辨率，按档位估算。"""
+        if not ws_url:
+            return 0.0
+        js = ("(() => { const v=document.querySelector('video');"
+              " return v ? [v.videoWidth||0, v.videoHeight||0] : null; })()")
+        try:
+            r = asyncio.run(cdp_eval(ws_url, js, timeout=3.0))
+        except Exception:
+            return 0.0
+        val = ((r.get("result") or {}).get("result") or {}).get("value")
+        if not isinstance(val, (list, tuple)) or len(val) < 2:
+            return 0.0
+        return resolution_kbps(int(val[0] or 0), int(val[1] or 0))
 
     # ---------------------------------------------------------------- 上报
     def report(self, rid: str, state: str | None = None, stage: int | None = None,
@@ -599,6 +759,12 @@ class Agent:
             proc = info.get("proc")
             body["pid"] = proc.pid if proc is not None else None
             body["adopted"] = bool(info.get("adopted"))
+            meter = info.get("traffic")
+            if meter is not None:
+                try:
+                    body["traffic"] = meter.snapshot()
+                except Exception:
+                    pass
         if reason:
             body["reason"] = reason[:120]
         try:
@@ -609,6 +775,9 @@ class Agent:
     # ---------------------------------------------------------------- 启动
     def bring_up(self, room: dict, session: str = "") -> None:
         rid = room["id"]
+        # 没有续接会话 = 新的一场：流量从 0 开始；断流重建沿用原计数器。
+        if not session:
+            self._meter(rid, reset=True)
         self.report(rid, "starting", stage=1, note="正在启动采集浏览器",
                     session_id=session or None)
         port = free_port()
@@ -642,7 +811,8 @@ class Agent:
             print("[%s] 端口被占，Chrome 自己换了 %d -> %d" % (rid, port, real), flush=True)
             port = real
         self.running[rid] = {"proc": proc, "port": port, "profile": profile,
-                             "started": time.time(), "locked": False, "cap_opened": False}
+                             "started": time.time(), "locked": False,
+                             "cap_opened": False, "traffic": self._meter(rid)}
         print("[%s] 启动 Chrome pid=%s port=%d" % (rid, proc.pid, port), flush=True)
         self.beat(rid, True, self.running[rid])
         if not port:
@@ -655,6 +825,10 @@ class Agent:
         if not page:
             self.fail(rid, "浏览器起来了但页面没加载出来", 2)
             return
+
+        # 页面一出现就挂上 Network 计量：越早挂，漏掉的页面/媒体字节越少。
+        self._start_cdp_meter(rid, self.running[rid],
+                              str(page.get("webSocketDebuggerUrl") or ""))
 
         why = self.probe_playing(rid, page)
         if why:
@@ -1105,6 +1279,7 @@ class Agent:
         # 一定排在它前面，不会被延迟写回"活着"。
         with self._beat_lock:
             self._beat(rid, False, info, reason or "browser closed")
+        self._stop_traffic(info)
         if info.get("muted") and info.get("profile"):
             mute_room(info["profile"], False)
         proc = info.get("proc")
@@ -1144,12 +1319,17 @@ class Agent:
                 continue
             # 端口从浏览器自己写的 DevToolsActivePort 里读回来：不留着 0，
             # 否则接管来的这一路做不了「还在播吗」的复查。
-            self.running[rid] = {"proc": None,
-                                 "port": devtools_port(PROFILES / rid, timeout=1.0),
-                                 "profile": PROFILES / rid,
-                                 "started": time.time(), "locked": True,
-                                 "cap_opened": True, "adopted": True}
-            self.beat(rid, True, self.running[rid])
+            info = {"proc": None,
+                    "port": devtools_port(PROFILES / rid, timeout=1.0),
+                    "profile": PROFILES / rid,
+                    "started": time.time(), "locked": True,
+                    "cap_opened": True, "adopted": True,
+                    "traffic": self._meter(rid, reset=True)}
+            self.running[rid] = info
+            ws = self._page_ws_for_room(int(info.get("port") or 0), r)
+            if ws:
+                self._start_cdp_meter(rid, info, ws)
+            self.beat(rid, True, info)
             print("[%s] 接管已在跑的采集（不重复拉浏览器）" % rid, flush=True)
 
     def tick(self, rooms: list[dict]) -> None:
@@ -1518,7 +1698,8 @@ class SharedAgent(Agent):
         info = {"proc": self.shared.proc, "port": self.shared.port,
                 "profile": self.shared.profile, "tab_id": tab_id,
                 "started": time.time(), "locked": True, "cap_opened": True,
-                "shared": True}
+                "shared": True,
+                "traffic": self._meter(rid, reset=not session)}
         self.running[rid] = info
         self.beat(rid, True, info)
         print("[%s] 共享标签页 tab=%d" % (rid, tab_id), flush=True)
@@ -1583,6 +1764,11 @@ class SharedAgent(Agent):
             self.report(rid, url=resolved)
             room["resolved_url"] = resolved
 
+        # 标签页已经在播：给它挂上 Network 计量。共享浏览器里同时有多个
+        # 直播间标签页，必须按 URL 精确匹配，不能把别的房间算进这一路。
+        self._start_cdp_meter(rid, info,
+                              self._page_ws_for_room(self.shared.port, room))
+
         self.report(rid, "starting", stage=3, note="已确认开播，正在启动音频采集",
                     session_id=session or None)
         st = self._call({"type": "page-start", "tabId": tab_id,
@@ -1618,6 +1804,7 @@ class SharedAgent(Agent):
             return
         with self._beat_lock:
             self._beat(rid, False, info, reason or "browser closed")
+        self._stop_traffic(info)
         tab_id = int(info.get("tab_id") or 0)
         if tab_id and self.shared.alive():
             # 先让页面内采集收手并停会话，再关标签页；顺序反了会丢掉收尾。
@@ -1667,13 +1854,17 @@ class SharedAgent(Agent):
                            if str(c.get("sid") or "") == sid), 0)
             if not tab_id:
                 continue
-            self.running[rid] = {
+            info = {
                 "proc": self.shared.proc, "port": self.shared.port,
                 "profile": self.shared.profile, "tab_id": tab_id,
                 "started": time.time(), "locked": True, "cap_opened": True,
                 "adopted": True, "shared": True,
+                "traffic": self._meter(rid, reset=True),
             }
-            self.beat(rid, True, self.running[rid])
+            self.running[rid] = info
+            self._start_cdp_meter(
+                rid, info, self._page_ws_for_room(self.shared.port, r))
+            self.beat(rid, True, info)
             print("[%s] 接管共享浏览器里已在采的标签页 tab=%d" % (rid, tab_id),
                   flush=True)
 
@@ -1692,6 +1883,7 @@ class SharedAgent(Agent):
                 if info:
                     with self._beat_lock:
                         self._beat(rid, False, info, "shared browser exited")
+                    self._stop_traffic(info)
 
         # 一次拿齐标签页和采集状态，别每个房间各问一次。
         tabs: dict[int, dict] = {}

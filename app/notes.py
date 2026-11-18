@@ -17,16 +17,26 @@ import sqlite3
 from datetime import datetime, timedelta
 from typing import Any
 
-from . import store
+from . import shape, store
+
+
+# 分组展示顺序：主持先说、主讲其次，提问和上麦跟在后面，认不出的一起放最后。
+ROLE_ORDER = {"host": 0, "speaker": 1, "guest": 2, "asker": 3, "shared": 4}
 
 
 def _summary(conn: sqlite3.Connection, sid: str) -> dict:
     row = store.latest_summary(conn, sid, "content")
     if not row:
-        rows = [dict(r) for r in conn.execute(
+        row = conn.execute(
             "SELECT payload_json FROM summaries WHERE session_id=? "
-            "ORDER BY created_at DESC, id DESC LIMIT 1", (sid,))]
-        return {}
+            "ORDER BY created_at DESC, id DESC LIMIT 1", (sid,)).fetchone()
+        if not row:
+            return {}
+        try:
+            payload = json.loads(row["payload_json"] or "{}")
+        except (TypeError, ValueError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
     payload = row.get("payload") or {}
     return payload if isinstance(payload, dict) else {}
 
@@ -121,6 +131,8 @@ def build_note(conn: sqlite3.Connection, sid: str) -> dict:
             "gist": str(p.get("gist") or ""),
             "t_from": p.get("t_from"), "t_to": p.get("t_to"),
             "quote": quote, "speakers": p.get("speakers") or [],
+            "claim_speaker": str(p.get("claim_speaker") or ""),
+            "stance": str(p.get("stance") or ""),
             "evidence": [{"id": e.get("id"), "t": e.get("t_start"),
                           "text": str(e.get("text") or "")[:200],
                           "speaker": e.get("speaker_label") or ""}
@@ -128,6 +140,15 @@ def build_note(conn: sqlite3.Connection, sid: str) -> dict:
         })
     generated_at = (note or {}).get("generated_at") or summary.get("generated_at") \
         or (s.get("started_at") or "")
+    shape_info = _shape_info(conn, sid, summary)
+    names_by_label = {}
+    for sp in speakers:
+        names_by_label.setdefault(str(sp["label"]), sp["speaker_id"])
+    by_speaker = _group_points(points, shape_info, names_by_label)
+    # 主持的显示名：形态层判出来的主持优先，其次是模型认的主讲人。
+    host_id = str(shape_info.get("host_id") or "")
+    host_label = names.get(host_id, "") if host_id else ""
+    streamer = streamer or host_label
     rel = _related(conn, sid, summary.get("topics") or [], streamer)
     return {
         "ok": True,
@@ -144,13 +165,65 @@ def build_note(conn: sqlite3.Connection, sid: str) -> dict:
                     "engine_kind": summary.get("engine_kind") or "",
                     "caveats": summary.get("caveats") or [],
                     "stats": summary.get("stats") or {}},
-        "streamer": streamer, "points": points,
+        "streamer": streamer, "host": host_label or streamer,
+        "shape": shape_info, "points": points, "by_speaker": by_speaker,
         "highlights": highlights, "bookmarks": marks,
         "speakers": speakers, "generated_at": generated_at,
         "related": rel,
         "counts": {"points": len(points), "highlights": len(highlights),
                    "bookmarks": len(marks), "speakers": len(speakers)},
     }
+
+
+def _shape_info(conn: sqlite3.Connection, sid: str, summary: dict) -> dict:
+    """形态优先用总结里存的那份（跟要点同一批输入）；老总结没有就现算。"""
+    saved = summary.get("shape")
+    if isinstance(saved, dict) and saved.get("kind"):
+        return saved
+    return shape.session_shape(conn, sid)
+
+
+def _group_points(points: list[dict], shape_info: dict,
+                  names_by_label: dict[str, str]) -> list[dict]:
+    """按「谁提的」重排要点，供笔记页的观点分组。
+
+    - 归属来自 ``claim_speaker``（标签）；认不出的人归到「本场共同讨论」，
+      且只在圆桌/问答里才单列，单人场不需要多一层。
+    - 角色取自 ``shape``（主持 / 主讲 / 提问 / 上麦），只影响展示顺序与徽标。
+    - 组内按时间排序，组间按「实质发言量」排，主讲在前。
+    """
+    if not points:
+        return []
+    roles = (shape_info or {}).get("roles") or {}
+    buckets: dict[str, list[dict]] = {}
+    for p in points:
+        who = str(p.get("claim_speaker") or "").strip()
+        buckets.setdefault(who, []).append(p)
+
+    out: list[dict] = []
+    for who, items in buckets.items():
+        items.sort(key=lambda p: (p.get("t_from") is None, p.get("t_from") or 0))
+        sid = names_by_label.get(who, "") if who else ""
+        role = (roles.get(sid) or {}) if sid else {}
+        label = str(role.get("label") or "")
+        out.append({
+            "who": who or "本场共同讨论",
+            "speaker_id": sid,
+            "role": str(role.get("role") or ("shared" if not who else "")),
+            "role_label": label,
+            "seconds": float(role.get("seconds") or 0.0),
+            "points": items,
+        })
+
+    def _rank(group: dict) -> tuple:
+        role = group.get("role") or ""
+        return (ROLE_ORDER.get(role, len(ROLE_ORDER)),
+                -float(group.get("seconds") or 0.0),
+                0 if group.get("points") else 1,
+                str(group.get("who") or ""))
+
+    out.sort(key=_rank)
+    return out
 
 
 def _related(conn: sqlite3.Connection, sid: str, topics: list[str],

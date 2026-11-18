@@ -62,6 +62,7 @@ import { render, roomById } from './render.js';
       switchReason: room.switch_reason || "",
       switchRequested: !!room.switch_requested,
       browser: capture || null,
+      traffic: (capture && capture.traffic) || null,
       created_at: room.created_at || "",
       updated_at: room.updated_at || "",
       subtitles: []

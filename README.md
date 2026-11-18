@@ -32,6 +32,10 @@
   则解析抖音直播流地址（优先 live 页内嵌 `stream_url`）、用 ffmpeg 直取，
   5 路并发实测 139MB；直取失败不会偷偷切浏览器，会在收听页停下来让你确认切换。
   见 [docs/02](docs/02-live-tab-capture.md#三种采集底座)
+- **采集流量计量**：房间详情显示这一路的平台下行（字节、Mbps、折合 MB/h）与音频
+  上行，列表里带 `↓ MB/h`；浏览器采集用 CDP Network 实测，直取默认按码率/分辨率
+  估算，设 `LIVENOTES_TRAFFIC_PROXY=1` 可改走本机计数代理拿逐字节实测。
+  `/api/traffic` 给出所有在听房间的汇总。见 [docs/42](docs/42-traffic-metering.md)
 - **实时字幕**：主播开口约 1 秒后出现灰色「识别中」字幕，每 4 秒切句成定稿
 - **说话人分离**：基于 CAM++ 声纹在线聚类，两位说话人轮流发言会自动分成「主播 / 嘉宾」
 - **逐字稿与时间轴**：按说话人、关键词、时间筛选；点时间码直接跳到那一刻
@@ -311,6 +315,7 @@ data/               数据库、录音、日志（不提交）
 | `LIVENOTES_MAX_ROOMS` | `5` | 同时监听几路（独立浏览器约 0.9GB/路；共享模式 3 路实测浏览器 2.4GB） |
 | `LIVENOTES_CAPTURE_MODE` | `per_room` | 采集底座：`per_room` = 每个房间一个浏览器；`shared` = 一个 Edge 开多个房间标签页（省内存，实验性）；`direct` = 解析抖音直播流地址、ffmpeg 直取（最省内存；失败停下等你确认，不自动切浏览器） |
 | `LIVENOTES_DIRECT_FALLBACK` | 空（用设置页） | direct 失败后怎么办：`ask`（默认，停在收听页等你点「切换浏览器采集」）/ `auto`（旧行为，自动切 `per_room`，不可用再 `shared`）/ `per_room`、`shared`（自动切到指定引擎）/ `none`（只报失败，不提供切换）。平时在「⚙ 设置 → 采集」里选，改完立即生效；这里设了环境变量则覆盖设置页，留给脚本/临时调试 |
+| `LIVENOTES_TRAFFIC_PROXY` | 空 | `1` = 直取模式经本机回环计数代理拉流，下行按实际转发字节实测；不设则按 ffmpeg 报的码率/分辨率估算。见 [docs/42](docs/42-traffic-metering.md) |
 | `LIVENOTES_SHARED_BROWSER` | 空 | 共享模式指定 Edge / Chrome for Testing 的 `exe` 路径；不填按 Edge → Chrome for Testing 顺序找 |
 | `LIVENOTES_CONFIRM_TTL` | `600` | 陌生站点的确认卡多久失效（秒） |
 | `LIVENOTES_ALLOW_LOCAL` | 空 | 设为 `1` 才允许本机/局域网链接（调试用） |
@@ -376,6 +381,7 @@ python tools/stress_live.py --tracks 1,3,5,10 --duration 7200 --warmup 60 \
 - [`docs/38-p2-growth-and-monetization-options.md`](docs/38-p2-growth-and-monetization-options.md) P2 增长与商业化：9 条补充方案、收费边界与授权地基
 - [`docs/39-polish-delivery-implementation.md`](docs/39-polish-delivery-implementation.md) M4 精修交付：项目/报告版本/质检/打包工作台与人工交付 SOP
 - [`docs/40-distribution-and-updates.md`](docs/40-distribution-and-updates.md) 分发与更新：发版流水线、壳/引擎/模型三条通道与签名路线
+- [`docs/41-voice-room-knowledge-product-iteration.md`](docs/41-voice-room-knowledge-product-iteration.md) 语音厅知识化：场次形态、观点原子与「AI 管家」的落地顺序
 
 ## 许可证
 

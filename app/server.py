@@ -1262,6 +1262,17 @@ p{font-size:14px;line-height:1.75;margin:8px 0}
         if p == "/api/capture/status":
             # 采集代理心跳：浏览器到底还在不在，不靠房间状态推
             return self._json({"rooms": rooms.capture_status()})
+        if p == "/api/traffic":
+            # 按房间汇总平台下行/音频上行；名字/引擎/状态从房间表补上，
+            # 采集代理只负责报字节，不重复维护房间元数据。
+            data = rooms.traffic_report()
+            by_id = {r["id"]: r for r in rooms.list_rooms()}
+            for row in data.get("rooms") or []:
+                r = by_id.get(str(row.get("id") or "")) or {}
+                row["name"] = r.get("name") or ""
+                row["engine"] = r.get("capture_engine") or ""
+                row["state"] = r.get("state") or ""
+            return self._json(data)
         if p == "/api/live/info":
             return self._json(live.info())
         if p == "/api/live/status":
@@ -2151,7 +2162,9 @@ p{font-size:14px;line-height:1.75;margin:8px 0}
                 return self._json({"error": "缺少房间 id"}, 400)
             item = rooms.capture_update(
                 rid, bool(b.get("alive", True)), pid=b.get("pid"),
-                adopted=bool(b.get("adopted")), reason=str(b.get("reason") or ""))
+                adopted=bool(b.get("adopted")), reason=str(b.get("reason") or ""),
+                traffic=b.get("traffic") if isinstance(b.get("traffic"), dict)
+                else None)
             return self._json({"ok": True, "capture": item})
         if p == "/api/rooms/close":
             # 关房间 = 停会话 + 交给采集端回收浏览器/ffmpeg

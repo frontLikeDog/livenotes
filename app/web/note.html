@@ -180,27 +180,61 @@ try{var _t=new URLSearchParams(location.search).get('theme');if(_t)document.docu
 
     var points = data.points || [];
     if (points.length) {
-      var sec = section('要点', points.length + ' 条 · 可回溯原话');
-      var list = el('ol', 'point-list');
-      points.forEach(function (point, index) {
-        var item = el('li', 'point-item');
-        item.setAttribute('data-t', point.t_from != null ? point.t_from : '');
-        item.appendChild(el('span', 'point-num', P1.pad(index + 1)));
-        var body = el('div', 'point-body');
-        var title = String(point.title || '').trim();
-        var gist = String(point.gist || '').trim();
-        if (title) body.appendChild(el('p', 'point-text', title));
-        if (gist && gist !== title) body.appendChild(el('p', 'point-gist', gist));
-        if (point.quote) {
-          var quote = el('p', 'point-quote');
-          if (point.t_from != null) quote.appendChild(timeLink(point.t_from));
-          var speaker = (point.speakers || [])[0] || '';
-          quote.appendChild(document.createTextNode(
-            ' ' + (speaker ? speaker + '：' : '') + point.quote));
-          body.appendChild(quote);
+      var groups = data.by_speaker || [];
+      // 圆桌/问答才按人分：单人场「谁说的」没有信息，分了反而多一层。
+      var shape = data.shape || {};
+      var byPerson = groups.length > 1 && shape.kind !== 'single';
+      var sec = section(byPerson ? '观点 · 按人' : '要点',
+        points.length + ' 条 · 可回溯原话');
+      var list = el(byPerson ? 'div' : 'ol', byPerson ? 'who-list' : 'point-list');
+      var seq = 0;
+      var groupsToDraw = byPerson ? groups : [{ who: '', points: points }];
+      groupsToDraw.forEach(function (group) {
+        var wrap = list;
+        if (byPerson) {
+          var g = el('div', 'who-group');
+          var head = el('div', 'who-head');
+          var name = group.who || '本场共同讨论';
+          if (group.who) {
+            var avatar = el('span', 'mini-avatar ' + P1.tone(name), P1.initial(name));
+            avatar.setAttribute('aria-hidden', 'true');
+            head.appendChild(avatar);
+          }
+          head.appendChild(el('b', 'who-name', name));
+          if (group.role_label) head.appendChild(el('span', 'who-role', group.role_label));
+          head.appendChild(el('span', 'who-count', group.points.length + ' 条'));
+          g.appendChild(head);
+          wrap = el('div', 'point-list');
+          g.appendChild(wrap);
+          list.appendChild(g);
         }
-        item.appendChild(body);
-        list.appendChild(item);
+        (group.points || []).forEach(function (point) {
+          seq += 1;
+          var item = el('li', 'point-item');
+          item.setAttribute('data-t', point.t_from != null ? point.t_from : '');
+          item.appendChild(el('span', 'point-num', P1.pad(seq)));
+          var body = el('div', 'point-body');
+          var title = String(point.title || '').trim();
+          var gist = String(point.gist || '').trim();
+          var stance = String(point.stance || '').trim();
+          if (title) body.appendChild(el('p', 'point-text', title));
+          // 主张句比「要点概述」更像一句话结论，能独立成立时优先给它；
+          // 且和标题一字不差时不重复画。
+          if (stance && stance !== title) body.appendChild(el('p', 'point-stance', stance));
+          if (gist && gist !== title && gist !== stance) {
+            body.appendChild(el('p', 'point-gist', gist));
+          }
+          if (point.quote) {
+            var quote = el('p', 'point-quote');
+            if (point.t_from != null) quote.appendChild(timeLink(point.t_from));
+            var speaker = point.claim_speaker || (point.speakers || [])[0] || '';
+            quote.appendChild(document.createTextNode(
+              ' ' + (speaker ? speaker + '：' : '') + point.quote));
+            body.appendChild(quote);
+          }
+          item.appendChild(body);
+          wrap.appendChild(item);
+        });
       });
       sec.appendChild(list);
       doc.appendChild(sec);
@@ -325,9 +359,13 @@ try{var _t=new URLSearchParams(location.search).get('theme');if(_t)document.docu
     var source = P1.$('#noteSource');
     source.innerHTML = '';
     var session = data.session || {};
+    var shape = data.shape || {};
     var rows = [
       ['来源', P1.sourceName(session.source_mode)],
-      ['主播', data.streamer || '未识别'],
+      [shape.kind === 'single' ? '主播' : '主持', data.host || data.streamer || '未识别'],
+      ['形态', (shape.label || '')
+        + (shape.kind && shape.kind !== 'single' && shape.speaker_count
+          ? ' · ' + shape.speaker_count + ' 位' : '')],
       ['记录时间', P1.fmtStamp(session.started_at), true],
       ['时长', P1.durText(session.duration_s), true],
       ['发言', ((data.summary || {}).stats || {}).included_utterances
@@ -369,11 +407,14 @@ try{var _t=new URLSearchParams(location.search).get('theme');if(_t)document.docu
     P1.$('#noteTitle').textContent = title;
     var meta = P1.$('#noteMeta');
     meta.innerHTML = '';
-    var who = data.streamer || '未识别主播';
+    var shape = data.shape || {};
+    var who = data.host || data.streamer || '';
     var bits = [
       P1.fmtStamp(session.started_at),
       P1.durText(session.duration_s),
-      who,
+      shape.label && shape.kind !== 'single'
+        ? shape.label + ' · ' + (data.speakers || []).length + ' 位'
+        : (who || '未识别主播'),
       (data.speakers || []).length + ' 位说话人',
       P1.noteState(data.note_state, data.progress).label
     ];

@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 
-from . import llm, scheduler, settings, store, titles
+from . import llm, scheduler, settings, shape, store, titles
 from .config import LLM_SUMMARY_MAX_ROWS, SUMMARY_BUCKET_SECONDS
 from .models import CATEGORY_META, category_label, fmt_ts
 
@@ -49,7 +49,8 @@ FILLER_RE = re.compile(r"^(嗯|啊|哦|对|就是|然后|那个|吧|哈+)[\s，�
 
 # 改提示词/改编码格式/改送模型的句子范围就 +1，否则旧总结会被指纹误判为"还能用"。
 # v3：长直播改为按时间分层抽样（不再只取前 350 句），旧缓存必须作废。
-SUMMARY_PROMPT_VERSION = "v3"
+# v4：理解段开始要求 claim_speaker / stance（观点归属），旧要点没有归属，必须重跑。
+SUMMARY_PROMPT_VERSION = "v4"
 
 
 def _pack_rows(rows: list[dict], char_limit: int = 200,
@@ -486,19 +487,26 @@ def _extractive_points(scope: Scope) -> list[dict]:
             continue
         ranked = sorted(rs, key=lambda r: (r["importance"], len(r["text"])), reverse=True)
         ev = [_evidence(r, scope) for r in ranked[:3]]
-        gist_parts = [r["text"].strip() for r in ranked[:2] if r["text"].strip()]
-        gist = "；".join(p[:80] for p in gist_parts)
+        stance = _stance(str(ev[0].get("quote") or "")) if ev else ""
+        # 立场句取自 ranked[0]，gist 再把它抄一遍就是同一句话读两遍：从第二句接。
+        others = [r["text"].strip() for r in ranked[1:] if r["text"].strip()]
+        gist = "；".join(p[:80] for p in others[:2])
+        claim = _claim_speaker(ev)
         points.append({
             "title": _group_title(key, rs, scope.mode, scope),
-            "gist": gist or "（该组无明显高价值原句）",
+            "gist": gist or ("" if stance else "（该组无明显高价值原句）"),
             "t_from": min(r["t_start"] for r in rs),
             "t_to": max(r["t_end"] for r in rs),
             "importance": round(sum(r["importance"] for r in rs) / len(rs), 3),
             "utterance_count": len(rs),
             "speakers": sorted({r["speaker_label"] for r in rs}),
+            "claim_speaker": claim, "stance": stance,
             "evidence": ev,
         })
-    return sorted(points, key=lambda p: (p["utterance_count"], p["importance"]), reverse=True)[:14]
+    out = sorted(points, key=lambda p: (p["utterance_count"], p["importance"]),
+                 reverse=True)[:14]
+    _attach_claims(out)
+    return out
 
 
 _LLM_PROMPT = """你在整理一份多人语音直播的可检索纪要。只允许使用下面给出的原始发言，禁止补充外部知识、禁止推测。
@@ -512,7 +520,10 @@ _LLM_PROMPT = """你在整理一份多人语音直播的可检索纪要。只允
 {"title":"这场直播的名字","title_alts":["备选名1","备选名2"],"overview":"一段话概述，不超过120字",
  "topics":["主题1","主题2","主题3"],
  "host_speaker":spk 表里的下标,
- "points":[{"title":"话题名，不超过20字","gist":"讨论要点，不超过100字","evidence_ids":[整数id数组，2~4个]}]}
+ "points":[{"title":"话题名，不超过20字","gist":"讨论要点，不超过100字",
+            "claim_speaker":spk 表里的下标（这条主张主要属于谁）,
+            "stance":"不超过40字的立场句，只用他自己的话",
+            "evidence_ids":[整数id数组，2~4个]}]}
 
 topics 规则：
 - 6~10 个，名词短语、每个不超过 6 个汉字（如「设备预算」「账号风控」「引流话术」）；
@@ -524,12 +535,103 @@ topics 规则：
 1. evidence_ids 中的 id 必须来自给定发言；每个 point 至少 2 个 id。
 2. gist 必须能由这些 id 对应的原文直接支持，不得编造因果或数字。
 3. 只保留有信息量的话题；闲聊、广告、控场话术不单独成点。
-4. 最多 8 个 point。""" + _TITLE_RULES
+4. 最多 8 个 point。
+5. claim_speaker 必须是 evidence_ids 里出现过的说话人；主张是几个人共同说的就选主要那位。
+6. stance 写成陈述句（他主张什么），不要写「他讲了××」；找不到就留空字符串。""" + _TITLE_RULES
 
 
 # 低于这个规模就不值得烧 token：短录音直接用本地抽取式
 LLM_MIN_ROWS = 15
 LLM_MIN_CHARS = 400
+
+
+# 有名字的人（人工改过名 / 声纹底库命中的昵称）优先归属：位置标签
+# 「主播/嘉宾2/聚类标签 09」只是这一场里的占位，不配给观点署名。
+_POSITIONAL_RE = re.compile(
+    r"^(主播|嘉宾|说话人|用户|观众|有人|未识别|连麦|路人|网友|聚类标签|簇|"
+    r"SPK[_-]?\d+)")
+
+# 展示层把位置和人名拼成「主播 · 阿哲」（store.speaker_display）：
+# 真正能署名的在后半段，不能因为前缀是「主播」就把整串当占位。
+_NAME_SUFFIX_RE = re.compile(r"^[^·]+·\s*(.+?)\s*(?:（疑似）)?$")
+
+
+def _looks_like_name(label: str) -> bool:
+    text = str(label or "").strip()
+    if not text:
+        return False
+    m = _NAME_SUFFIX_RE.match(text)
+    if m:
+        text = m.group(1).strip()
+        return bool(text) and not _POSITIONAL_RE.match(text)
+    return not _POSITIONAL_RE.match(text)
+
+
+def _claim_speaker(ev: list[dict]) -> str:
+    """一条要点归给谁：证据里真名发言最多的人，没有真名才退回位置标签。
+
+    每条证据按自己的时长计票，同名多句累加。「主播/嘉宾2」这类位置标签只是
+    本场占位，有真名时一律不署名。返回 speaker_label（空 = 认不出来，
+    前端显示「本场」）。
+    """
+    mass: dict[str, float] = {}
+    named: dict[str, float] = {}
+    for e in ev:
+        label = str(e.get("speaker_label") or "").strip()
+        if not label:
+            continue
+        dur = max(0.0, float(e.get("t_end") or 0.0) - float(e.get("t_start") or 0.0))
+        mass[label] = mass.get(label, 0.0) + max(1.0, dur)
+        if _looks_like_name(label):
+            named[label] = mass[label]      # 跟着 mass 走，同名多句要累加
+    # 有真名时只在真名里选：位置标签（嘉宾1/说话人2）是这一场的占位，
+    # 拿它给观点署名，用户看到的是一张「嘉宾1 认为……」的卡片。
+    pool = named or mass
+    if not pool:
+        return ""
+    return max(pool, key=lambda k: pool[k])
+
+
+# 口头禅开头：抽出来当「立场」只会得到「我觉得」「就是说」，等于没写。
+_DISCOURSE_RE = re.compile(
+    r"^(?:我个人觉得|我个人认为|我觉得|我认为|我感觉|我建议|我理解|在我看来|"
+    r"其实|就是说|也就是说|换句话说|然后|但是|不过|所以|因此|而且|"
+    r"首先|另外|说实话|坦白说|客观讲|对|是的)"
+    r"(?:吧|啊|呀|呢|嘛|哈)?[，,、：:\s]*")
+
+
+def _stance(text: str, limit: int = 40) -> str:
+    """主张句：跳过口头禅，取第一个有内容的短分句，去掉语气词尾巴。
+
+    本地兜底，不做生成式改写——原话怎么说的就怎么截，只是别把「我觉得吧」
+    当成一个人的观点。
+    """
+    t = re.sub(r"[\s]+", " ", str(text or "")).strip().strip("“”\"'")
+    if not t:
+        return ""
+    best = ""
+    for clause in re.split(r"[，。！？；,.!?;:：]", t):
+        head = clause.strip()
+        for _ in range(2):                      # 「我觉得吧，就是说」这种连着的
+            head = _DISCOURSE_RE.sub("", head).strip()
+        head = re.sub(r"[呢吧啊呀嘛哦哈]+$", "", head).strip()
+        if not head:
+            continue
+        if len(head) >= 6:
+            return head[:limit]
+        best = best or head                     # 都很短就先用第一个，别返回空
+    return best[:limit]
+
+
+def _attach_claims(points: list[dict]) -> None:
+    """给每条要点补 claim_speaker / stance（有就不动，保护模型给的归属）。"""
+    for p in points or []:
+        ev = p.get("evidence") or []
+        if not p.get("claim_speaker"):
+            p["claim_speaker"] = _claim_speaker(ev)
+        if not p.get("stance"):
+            p["stance"] = _stance(str(ev[0].get("quote") or ev[0].get("text") or "")
+                                  if ev else "")
 
 
 def _worth_llm(rows: list[dict]) -> tuple[bool, str]:
@@ -595,6 +697,16 @@ def _llm_points(scope: Scope, usage: dict | None = None,
         content = re.sub(r"^```(?:json)?|```$", "", content.strip(), flags=re.M).strip()
         data = json.loads(content)
         by_id = {r["id"]: r for r in candidates}
+        labels = packed.get("spk") or []
+
+        def _label_at(idx: Any) -> str:
+            """模型给的说话人下标 -> 标签；越界或不是整数就当没给。"""
+            try:
+                i = int(idx)
+            except (TypeError, ValueError):
+                return ""
+            return labels[i] if 0 <= i < len(labels) else ""
+
         points: list[dict] = []
         for p in data.get("points", [])[:8]:
             ids = [int(i) for i in p.get("evidence_ids", []) if str(i).isdigit() and int(i) in id_set]
@@ -602,6 +714,10 @@ def _llm_points(scope: Scope, usage: dict | None = None,
             # ---- 证据闸门：无有效证据的要点一律丢弃 ----
             if len(ev) < 2:
                 continue
+            # 归属也要过闸门：模型说的人必须真的出现在这条要点的证据里
+            who = _label_at(p.get("claim_speaker"))
+            if who and who not in {e["speaker_label"] for e in ev}:
+                who = ""
             points.append({
                 "title": str(p.get("title", "未命名话题"))[:40],
                 "gist": str(p.get("gist", ""))[:300],
@@ -609,16 +725,17 @@ def _llm_points(scope: Scope, usage: dict | None = None,
                 "t_to": max(e["t_end"] for e in ev),
                 "importance": 0.0, "utterance_count": len(ev),
                 "speakers": sorted({e["speaker_label"] for e in ev}),
+                "claim_speaker": who,
+                "stance": str(p.get("stance") or "").strip().strip("“”\"'")[:40],
                 "evidence": ev,
             })
         if not points:
             return None
+        _attach_claims(points)          # 模型没给或给错的那几条，本地补齐
         topics = _clean_topics(data.get("topics"))
         host = ""
-        idx = data.get("host_speaker")
-        labels = packed.get("spk") or []
-        if isinstance(idx, int) and 0 <= idx < len(labels):
-            want = labels[idx]
+        want = _label_at(data.get("host_speaker"))
+        if want:
             host = next((r["speaker_id"] for r in candidates
                          if r.get("speaker_label") == want), "")
         return (str(data.get("overview", ""))[:300], points,
@@ -812,6 +929,8 @@ def make_summary(conn: sqlite3.Connection, sid: str, filters: dict,
             overview = (f"本场共纳入 {len(scope.rows)} 条有效发言，涉及 {len(speakers)} 个说话人、"
                         f"{len(points)} 个要点分组；已剔除广告、闲聊、控场及重叠语音。"
                         "下列要点均由原文原句构成，点「查看原文」可回溯对应时间段。")
+    shape_info = shape.summarize(scope.rows,
+                                 duration_s=float(scope.session.get("duration_s") or 0.0))
     caveats = list(scope.caveats)
     if engine.startswith("llm") and len(scope.rows) > LLM_SUMMARY_MAX_ROWS:
         caveats.append("内容较长，按时间分层抽样 %d/%d 句送模型；结论覆盖全段，细节可能省略。"
@@ -849,6 +968,7 @@ def make_summary(conn: sqlite3.Connection, sid: str, filters: dict,
         "coverage": scope.coverage, "caveats": caveats, "points": points,
         "topics": topics or store.get_ai_topics(conn, sid),
         "host_speaker": host_speaker,
+        "shape": shape_info,
         "title": named["title"], "title_alts": named["alts"],
         "title_applied": named["applied"], "title_source": named["source"],
         "title_reason": named["reason"], "session_title": named["current"],
@@ -915,6 +1035,9 @@ def finalize(conn: sqlite3.Connection, sid: str, filters: dict | None = None) ->
             "filter": filters, "overview": "", "stats": {}, "coverage": {},
             "caveats": list(scope.caveats), "points": _extractive_points(scope),
             "topics": [], "host_speaker": "",
+            "shape": shape.summarize(
+                scope.rows,
+                duration_s=float(scope.session.get("duration_s") or 0.0)),
             "title": None, "title_alts": [], "title_applied": False,
             "title_source": "", "title_reason": "", "session_title": "",
         }
@@ -945,6 +1068,13 @@ def finalize(conn: sqlite3.Connection, sid: str, filters: dict | None = None) ->
         p["speakers"] = sorted({e["speaker_label"] for e in ev})
         p["utterance_count"] = len(ev)
 
+    # 归属也要跟着新证据刷新；模型给的那个若已不在证据里，退回本地判定。
+    names = {e["speaker_label"] for p in pts for e in (p.get("evidence") or [])}
+    for p in pts:
+        if p.get("claim_speaker") not in names:
+            p["claim_speaker"] = ""
+    _attach_claims(pts)
+
     speakers = sorted({r["speaker_label"] for r in scope.rows})
     cats: dict[str, int] = {}
     for r in scope.rows:
@@ -962,6 +1092,8 @@ def finalize(conn: sqlite3.Connection, sid: str, filters: dict | None = None) ->
         if str(payload.get("engine", "")).startswith("extractive") else [])
     payload["filter"] = filters
     payload["topics"] = store.get_ai_topics(conn, sid)
+    payload["shape"] = shape.summarize(
+        scope.rows, duration_s=float(scope.session.get("duration_s") or 0.0))
     payload["generated_at"] = datetime.now().isoformat(timespec="seconds")
     payload["cached"] = False
     fp = _fingerprint(scope.rows, "content", filters, settings.resolve()["model"] or "")

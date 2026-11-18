@@ -8,6 +8,18 @@ import { fetchDetailHistory, startDetailPoll, stopDetailPoll } from './data.js';
 import { agoText, browserMeta, diagRooms, engineLabel, ingestMeta, isListening, lastChunkAgo, lastLine, lineSpeaker, stageIndex, stageLabel, stageNote, statusMeta, stepState, switchEngineLabel } from './derived.js';
 import { roomById, visibleRooms } from './render.js';
 import { syncUrl } from './view.js';
+  function fmtBytes(n){
+    n = Number(n) || 0;
+    if(n >= 1e9) return (n/1e9).toFixed(2)+" GB";
+    if(n >= 1e6) return (n/1e6).toFixed(1)+" MB";
+    if(n >= 1e3) return (n/1e3).toFixed(0)+" KB";
+    return Math.round(n)+" B";
+  }
+  function trafficSourceLabel(src){
+    return ({proxy:"实测 · 计数代理", cdp:"实测 · 浏览器 Network",
+      estimate:"估算 · 码率/分辨率", mixed:"部分实测",
+      unavailable:"不可用"})[String(src||"")] || "—";
+  }
   function detailSignalHtml(r){
     const st = statusMeta(r);
     const ing = ingestMeta(r);
@@ -118,6 +130,22 @@ import { syncUrl } from './view.js';
     const bm = browserMeta(r);
     kv.push('<dt>房间状态</dt><dd class="'+st.tone+'">'+st.label+'</dd>');
     kv.push('<dt>采集浏览器</dt><dd class="'+bm.tone+'">'+esc(bm.label)+'</dd>');
+    const tr = r.traffic;
+    if(tr){
+      const exact = tr.source==="proxy" || tr.source==="cdp";
+      kv.push('<dt>平台下行</dt><dd>'+fmtBytes(tr.platform_bytes)+' · '
+        +num(tr.platform_mbps).toFixed(2)+' Mbps</dd>');
+      kv.push('<dt>折合每小时</dt><dd>'+Math.round(num(tr.platform_mb_per_hour))+' MB/h</dd>');
+      kv.push('<dt title="采集端推给本机服务的音频；同机运行时走回环，不占宽带出口">音频上行</dt>'
+        +'<dd>'+fmtBytes(tr.audio_bytes)+' · '
+        +Math.round(num(tr.audio_kbps))+' kbps</dd>');
+      const ratio = num(tr.ratio);
+      if(ratio > 0){
+        kv.push('<dt>音频占比</dt><dd class="muted">'+(ratio*100).toFixed(1)+'%</dd>');
+      }
+      kv.push('<dt>流量计量</dt><dd class="'+(exact?"ok":"muted")+'" title="'
+        +esc(tr.note||"")+'">'+esc(trafficSourceLabel(tr.source))+'</dd>');
+    }
     kv.push('<dt>入库</dt><dd class="'+ing.tone+'">'+ing.label+'</dd>');
     kv.push('<dt>会话</dt><dd class="'+(r.sessionId?"mono":"muted")+'">'+esc(r.sessionId||"—")+'</dd>');
     kv.push('<dt>已录</dt><dd>'+(session?fmt(session.elapsed):"—")+'</dd>');

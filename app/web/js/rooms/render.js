@@ -251,6 +251,10 @@ import { openDetail, openDiag, renderDetail, renderDiag } from './detail.js';
       let meta = (eng?eng+" · ":"") + (r.url || "");
       if(r.session) meta = "已录 "+fmt(r.session.elapsed)+" · "+num(r.session.n_utterances)+" 句 · "+meta;
       else if(r.state==="stopped") meta = (r.hasRecording ? "录音已保存" : "没有录到音频") + " · " + meta;
+      const tr = r.traffic;
+      if(tr && num(tr.platform_mb_per_hour) > 0){
+        meta += " · ↓" + Math.round(num(tr.platform_mb_per_hour)) + " MB/h";
+      }
       const acts = [];
       if(isListening(r)) acts.push('<a href="/live?session='+encodeURIComponent(r.sessionId||"")+'">实时字幕</a>');
       if(r.sessionId) acts.push('<a href="/reader?session='+encodeURIComponent(r.sessionId)+'">回放</a>');

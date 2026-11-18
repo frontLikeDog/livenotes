@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import re
 import sqlite3
 from datetime import datetime
 from typing import Iterable
@@ -23,6 +24,27 @@ def _srt_ts(seconds: float) -> str:
 
 def _mode_name(code: str) -> str:
     return (SOURCE_MODE_META.get(code) or ("未知", ""))[0]
+
+
+# 抽取式的 gist 是原句拼接，句首常带「我觉得吧」「就是说」：导出时清掉，
+# 读起来才是结论而不是口头禅。分析和存储保持原样，证据要能对回原文。
+_FILLER_RE = re.compile(
+    r"^(?:我个人觉得|我个人认为|我觉得|我认为|我感觉|我建议|我理解|在我看来|"
+    r"其实|就是说|也就是说|换句话说|然后|但是|不过|所以|因此|而且|"
+    r"首先|另外|说实话|坦白说|客观讲|对|是的|嗯|呃)"
+    r"(?:吧|啊|呀|呢|嘛|哈)?[，,、：:\s]*")
+
+
+def _strip_fillers(text: str) -> str:
+    """把每条分句开头的口头禅去掉；一句都不剩就返回原文。"""
+    parts = [p.strip() for p in str(text or "").split("；")]
+    out = []
+    for p in parts:
+        for _ in range(2):
+            p = _FILLER_RE.sub("", p).strip()
+        if p:
+            out.append(p)
+    return "；".join(out) if out else str(text or "")
 
 
 def to_srt(conn: sqlite3.Connection, sid: str) -> str:
@@ -100,15 +122,41 @@ def to_note_md(conn: sqlite3.Connection, sid: str) -> str:
     s = note["session"]
     summary = note["summary"]
     out = ["# %s" % (s.get("title") or sid), ""]
+    shape = note.get("shape") or {}
+    if shape.get("label") and shape.get("kind") != "single":
+        out.append("形态：%s · %d 位说话人" % (shape["label"],
+                                             int(shape.get("speaker_count") or 0)))
     if note.get("streamer"):
-        out.append("主播：%s" % note["streamer"])
+        out.append("%s：%s" % ("主持" if shape.get("kind") not in ("", "single")
+                              else "主播", note["streamer"]))
     out.append("时间：%s　时长：%s" % (s.get("started_at") or "-",
                                     fmt_ts(s.get("duration_s") or 0)))
     out.append("")
     if summary.get("overview"):
         out += ["## 一句话", "", str(summary["overview"]), ""]
     points = note.get("points") or []
-    if points:
+    groups = note.get("by_speaker") or []
+    # 圆桌/问答按人分；单人场沿用原来的扁平列表，导出格式不变。
+    if points and len(groups) > 1 and shape.get("kind") != "single":
+        out += ["## 观点", ""]
+        for g in groups:
+            role = ("（%s）" % g["role_label"]) if g.get("role_label") else ""
+            out += ["### %s%s" % (g.get("who") or "本场共同讨论", role), ""]
+            for p in g.get("points") or []:
+                stance = p.get("stance") or p.get("title") or "要点"
+                detail = _strip_fillers(p.get("gist") or "")
+                if detail and detail.strip() != stance.strip():
+                    out.append("- **%s**：%s" % (stance, detail))
+                else:
+                    out.append("- **%s**" % stance)
+                # 原文只在它不是这条要点的来源句时才引：stance/gist 都是从它截的，
+                # 再引一遍就是把同一句话读第三遍。
+                quote = str(p.get("quote") or "").strip()
+                used = [str(q) for q in (stance, detail) if q]
+                if quote and not any(q[:30] in quote for q in used):
+                    out.append("  > %s" % quote)
+            out.append("")
+    elif points:
         out += ["## 要点", ""]
         for i, p in enumerate(points, 1):
             out.append("### %d. %s" % (i, p.get("title") or "要点"))

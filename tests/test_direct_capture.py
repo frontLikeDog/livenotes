@@ -94,6 +94,10 @@ def test_bring_up_creates_session_and_reports_live(api_calls, fake_media):
         info = a.running["rm1"]
         assert info["sid"] == "LIVE_test"
         assert info["first_audio_ms"] is not None
+        # 流量计量：每块 PCM 都记进 audio_bytes，默认没有精确平台字节。
+        traffic = info["traffic"].snapshot()
+        assert traffic["audio_bytes"] == direct_capture.CHUNK_BYTES
+        assert traffic["platform_bytes"] == 0
     finally:
         a.shutdown()
 

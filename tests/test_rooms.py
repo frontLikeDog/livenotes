@@ -91,6 +91,56 @@ def test_capture_heartbeat_and_remove_cleanup():
     assert room["id"] not in rooms.capture_status()
 
 
+def test_capture_heartbeat_carries_traffic_and_report():
+    room, _ = rooms.add("https://live.douyin.com/2-traffic")
+    rooms.capture_update(room["id"], True, traffic={
+        "platform_bytes": 1_234_567,
+        "audio_bytes": 8192,
+        "platform_mbps": 2.5,
+        "platform_mb_per_hour": 1125,
+        "audio_kbps": 256,
+        "audio_mb_per_hour": 115.2,
+        "ratio": 0.0066,
+        "source": "cdp",
+        "note": "CDP Network 实测",
+    })
+    st = rooms.capture_status()[room["id"]]
+    assert st["traffic"]["platform_bytes"] == 1_234_567
+    assert st["traffic"]["source"] == "cdp"
+
+    report = rooms.traffic_report()
+    assert report["totals"]["rooms"] == 1
+    assert report["totals"]["platform_bytes"] == 1_234_567
+    assert report["totals"]["platform_mb_per_hour"] == 1125
+    assert report["rooms"][0]["id"] == room["id"]
+
+    # 脏数据不能把心跳打挂，也不能进报告。
+    rooms.capture_update(room["id"], True,
+                         traffic={"platform_bytes": "oops", "source": "???"})
+    st = rooms.capture_status()[room["id"]]
+    assert "platform_bytes" not in st["traffic"]
+    assert st["traffic"]["source"] == "unavailable"
+
+
+def test_traffic_api_merges_room_meta(http_base):
+    """/api/traffic 只存采集端报的字节，名字/引擎/状态从房间表补。"""
+    room, _ = rooms.add("https://live.douyin.com/2-traffic-api", name="示例主播")
+    rooms.update(room["id"], state="live", capture_engine="direct")
+    rooms.capture_update(room["id"], True, traffic={
+        "platform_bytes": 2_000_000, "audio_bytes": 16_384,
+        "platform_mb_per_hour": 3600, "audio_kbps": 256.0,
+        "audio_mb_per_hour": 115.2, "source": "proxy",
+    })
+    with urllib.request.urlopen(http_base + "/api/traffic", timeout=5) as resp:
+        data = json.loads(resp.read().decode())
+    row = next(r for r in data["rooms"] if r["id"] == room["id"])
+    assert row["name"] == "示例主播" and row["engine"] == "direct"
+    assert row["state"] == "live"
+    assert row["platform_bytes"] == 2_000_000 and row["source"] == "proxy"
+    assert data["totals"]["rooms"] == 1
+    assert data["totals"]["platform_bytes"] == 2_000_000
+
+
 def test_get_by_session():
     room, _ = rooms.add("https://live.douyin.com/3")
     rooms.update(room["id"], state="live", session_id="LIVE_X")
