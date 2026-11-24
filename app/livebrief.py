@@ -5,7 +5,7 @@
 
 1. **状态 0 token、秒回**：只读内存/房间/采集心跳，不碰模型。
 2. **话题和总结必须能点回原文**：模型输出的每个证据 id 都必须在本次输入里，
-   少于两条证据的要点直接丢弃；全部丢弃就回退本地抽取。
+   少于两条证据的要点直接丢弃；全部丢弃就报错，不拼本地抽取。
 3. **问答不能吃掉收尾总结的预算**：单独软上限、缓存、单飞、冷却都只服务
    这个入口，不写 `summaries` 表，也不改场次名。
 """
@@ -29,12 +29,9 @@ from .config import (
     BRIEF_SUMMARY_TTL_S, BRIEF_TOPICS_COOLDOWN_S, BRIEF_TOPICS_TTL_S,
     LIVE_STALL_WARN_S,
 )
-from .models import category_label
-
 ACTIVE = ("pending", "starting", "live")
 PROMPT_VERSION = "brief-v1"
 CACHE_MAX = 128
-GENERIC_TOPICS = {"", "综合", "综合/未归类", "未归类", "其他", "其它"}
 
 _chat = llm.chat
 
@@ -156,6 +153,33 @@ def _session_of(sessions: list[dict], sid: str) -> dict | None:
         if str(s.get("id") or "") == str(sid or ""):
             return s
     return None
+
+
+def _offline_counts(conn: sqlite3.Connection,
+                    sessions: list[dict]) -> list[dict]:
+    """仅采集场次的逐字稿在 DB 里，不在 LiveSession 内存里。
+
+    这里补一次 count/last，飞书不用等引擎重启就能看到「补转写 N 句」。
+    """
+    out: list[dict] = []
+    for s in sessions or []:
+        if not s.get("capture_only"):
+            out.append(s)
+            continue
+        sid = str(s.get("id") or "")
+        try:
+            row = conn.execute(
+                "SELECT COUNT(*) AS n, "
+                " (SELECT text FROM utterances WHERE session_id=? "
+                "  ORDER BY t_end DESC LIMIT 1) AS last "
+                "FROM utterances WHERE session_id=?", (sid, sid)).fetchone()
+            s = dict(s)
+            s["n_utterances"] = int(row["n"] or 0) if row else 0
+            s["last_line"] = str((row["last"] or "") if row else "")[:60]
+        except sqlite3.Error:
+            pass
+        out.append(s)
+    return out
 
 
 def status(rooms: list[dict], sessions: list[dict], capture: dict) -> dict:
@@ -335,38 +359,6 @@ def _point(title: str, gist: str, ev: list[dict], title_max: int,
     }
 
 
-# ---------------------------------------------------------------- 规则兜底
-
-def _rule_points(scope, limit: int = 5) -> list[dict]:
-    sid = str(scope.session.get("id") or scope.filters.get("session_id") or "")
-    groups: dict[str, list[dict]] = {}
-    for r in scope.rows:
-        key = str(r.get("topic") or "").strip()
-        if key in GENERIC_TOPICS:
-            key = category_label(str(r.get("category") or "")) or "综合内容"
-        groups.setdefault(key, []).append(r)
-    # 有具体话题时，别让「综合/未归类」挤掉它们
-    named = [k for k in groups if k not in GENERIC_TOPICS]
-    if named:
-        groups = {k: v for k, v in groups.items() if k not in GENERIC_TOPICS}
-    points: list[dict] = []
-    for key, rows in sorted(groups.items(),
-                            key=lambda kv: (len(kv[1]),
-                                            sum(float(x.get("importance") or 0)
-                                                for x in kv[1])), reverse=True):
-        ranked = sorted(rows, key=lambda r: (float(r.get("importance") or 0),
-                                             len(str(r.get("text") or ""))),
-                        reverse=True)
-        ev = [_evidence(r, sid) for r in ranked[:2]]
-        gist = "；".join(str(r.get("text") or "").strip()[:80] for r in ranked[:2])
-        p = _point(key, gist, ev, 14, 90)
-        if p:
-            points.append(p)
-        if len(points) >= limit:
-            break
-    return points
-
-
 # ---------------------------------------------------------------- LLM 调用
 
 _JSON_FENCE = re.compile(r"^```(?:json)?|```$", re.M)
@@ -456,26 +448,28 @@ def _note_tokens(sid: str, usage: dict | None) -> None:
 
 
 def _llm_plan(rows: list[dict], sid: str) -> tuple[bool, str, str]:
-    """返回 (能不能调模型, 软状态 code, 给人看的原因)。"""
+    """返回 (能不能调模型, 软状态 code, 给人看的原因)。
+
+    简报不再生成本地抽取版：这里返回 False 时调用方直接报错，不降级。
+    """
     if not BRIEF_LLM:
-        return False, "llm_not_configured", "简报模型已关闭，本次用本地抽取"
+        return False, "llm_not_configured", "简报模型已关闭"
     cfg = settings.resolve()
     if not cfg.get("configured"):
-        return False, "llm_not_configured", "还没配置大模型，本次用本地抽取"
+        return False, "llm_not_configured", "还没配置大模型"
     ok, why = analysis._worth_llm(rows)
     if not ok:
-        return False, "content_short", why + "，本次用本地抽取"
+        return False, "content_short", why
     if BRIEF_DAILY_CAP and _daily_used() >= BRIEF_DAILY_CAP:
-        return False, "budget_exceeded", ("今天的简报模型调用已达上限 %d 次，"
-                                          "本次用本地抽取" % BRIEF_DAILY_CAP)
+        return False, "budget_exceeded", (
+            "今天的简报模型调用已达上限 %d 次" % BRIEF_DAILY_CAP)
     if BRIEF_SESSION_TOKEN_CAP and _brief_tokens(sid) >= BRIEF_SESSION_TOKEN_CAP:
-        return False, "budget_exceeded", ("这一场的简报 token 软上限已用完，"
-                                          "本次用本地抽取")
+        return False, "budget_exceeded", "这一场的简报 token 软上限已用完"
     b = scheduler.budget_status(sid)
     if b["session"]["limit"] and b["session"]["remaining"] <= 0:
-        return False, "budget_exceeded", "本场 token 预算已用完，本次用本地抽取"
+        return False, "budget_exceeded", "本场 token 预算已用完"
     if b["daily"]["limit"] and b["daily"]["remaining"] <= 0:
-        return False, "budget_exceeded", "今日全局 token 预算已用完，本次用本地抽取"
+        return False, "budget_exceeded", "今日全局 token 预算已用完"
     return True, "", "内容足够，使用模型"
 
 
@@ -495,13 +489,26 @@ def _call_model(sid: str, prompt: str, packed: dict, max_tokens: int,
 
 def _llm_reason(errors: list[BaseException], model: str) -> tuple[str, str]:
     if not errors:
-        return "llm_failed", "模型输出没有通过证据校验，已回退本地抽取"
+        return "llm_failed", "模型输出没有通过证据校验"
     e = errors[-1]
     if isinstance(e, scheduler.BudgetExceeded):
-        return "budget_exceeded", "%s，已回退本地抽取" % e
+        return "budget_exceeded", str(e)
     text = str(e).strip()
-    return "llm_failed", "模型调用失败（%s），已回退本地抽取" % (
+    return "llm_failed", "模型调用失败（%s）" % (
         text[:120] if text else type(e).__name__)
+
+
+def _llm_unavailable(code: str, why: str) -> BriefError:
+    """简报失败就失败，不再拼一份本地抽取糊弄用户。"""
+    status = {"llm_not_configured": 503, "content_short": 422,
+              "budget_exceeded": 429}.get(code, 502)
+    msg = (why or "模型没有生成可用结果").strip()
+    if not msg.endswith(("。", "！", "？")):
+        msg += "。"
+    msg += "未使用本地抽取"
+    if code == "llm_failed":
+        msg += "，请重试"
+    return BriefError(code, msg, status)
 
 
 # ---------------------------------------------------------------- 缓存 / 单飞 / 冷却
@@ -558,6 +565,11 @@ def _cache_get(key: tuple) -> dict | None:
     return out
 
 
+def _cache_usable(hit: dict | None) -> bool:
+    """老缓存里的本地抽取稿不再复用；宁可重跑模型或报错。"""
+    return bool(hit) and str(hit.get("engine") or "") != "extractive"
+
+
 def _latest_summary_cache(sid: str, t_to: float):
     """找同场次最近一份仍在 TTL 内的总结，用于“有缓存但有新内容”的提示。"""
     model = settings.resolve().get("model") or ""
@@ -569,6 +581,8 @@ def _latest_summary_cache(sid: str, t_to: float):
                 continue
             if (key[0] != sid or key[1] != "summary" or key[4] != PROMPT_VERSION
                     or key[5] != model):
+                continue
+            if not _cache_usable(payload):
                 continue
             end = float((payload.get("coverage") or {}).get("t_to") or 0)
             if end <= 0 or end > float(t_to):
@@ -674,37 +688,28 @@ def _topics_compute(conn, sid: str, minutes: int, t_from: float, t_to: float,
         }
 
     can_llm, code, why = _llm_plan(scope.rows, sid)
-    topics: list[dict] = []
-    engine = "extractive"
-    engine_reason = why
-    notice = None if can_llm else {"code": code, "message": why}
+    if not can_llm:
+        raise _llm_unavailable(code, why)
     samples = _sample_rows(scope.rows, BRIEF_SUMMARY_MAX_ROWS)
-    if can_llm:
-        packed = analysis._pack_rows(samples, char_limit=200,
-                                     with_topic=False, with_cat=False)
-        packed.update(minutes=int(minutes), from_s=round(t_from, 1),
-                      to_s=round(t_to, 1))
-        usage: dict = {}
-        t0 = time.monotonic()
-        data, errors = _call_model(sid, _TOPICS_PROMPT, packed, 900, usage)
-        _note_tokens(sid, usage)
-        metrics.METRICS.observe("brief.latency_ms",
-                                (time.monotonic() - t0) * 1000, session_id=sid)
-        by_id = {int(r["id"]): r for r in samples}
-        topics = _gate(data.get("topics") or [], by_id, sid, 5, 12, 80)
-        if topics:
-            engine = "llm"
-            engine_reason = "内容足够，使用模型"
-        else:
-            code, why = _llm_reason(errors, settings.resolve().get("model") or "")
-            metrics.METRICS.inc("brief.llm_failed", 1, session_id=sid)
-            notice = {"code": code, "message": why}
-            engine_reason = why
+    packed = analysis._pack_rows(samples, char_limit=200,
+                                 with_topic=False, with_cat=False)
+    packed.update(minutes=int(minutes), from_s=round(t_from, 1),
+                  to_s=round(t_to, 1))
+    usage: dict = {}
+    t0 = time.monotonic()
+    data, errors = _call_model(sid, _TOPICS_PROMPT, packed, 900, usage)
+    _note_tokens(sid, usage)
+    metrics.METRICS.observe("brief.latency_ms",
+                            (time.monotonic() - t0) * 1000, session_id=sid)
+    by_id = {int(r["id"]): r for r in samples}
+    topics = _gate(data.get("topics") or [], by_id, sid, 5, 12, 80)
     if not topics:
-        topics = _rule_points(scope, 5)
-        if not notice and topics:
-            notice = {"code": "content_short",
-                      "message": "内容较少，本次用本地抽取，不消耗 token"}
+        code, why = _llm_reason(errors, settings.resolve().get("model") or "")
+        metrics.METRICS.inc("brief.llm_failed", 1, session_id=sid)
+        raise _llm_unavailable(code, why)
+    engine = "llm"
+    engine_reason = "内容足够，使用模型"
+    notice = None
     if coverage.get("stale"):
         ago = float(coverage.get("last_utterance_ago_s") or 0)
         msg = ("最近约 %d 分钟没有新内容，以下是断流前的内容"
@@ -740,7 +745,7 @@ def topics(conn: sqlite3.Connection, sid: str, minutes: int = 10,
     key = _key(sid, "topics", minutes, t_from, float(t_to))
     if not refresh:
         hit = _cache_get(key)
-        if hit:
+        if _cache_usable(hit):
             metrics.METRICS.inc("brief.cache_hit", 1, session_id=sid)
             if room:
                 hit["room"] = _room_info(room, sid)
@@ -792,41 +797,27 @@ def _summary_compute(conn, sid: str, t_from: float, t_to: float,
         }
 
     can_llm, code, why = _llm_plan(scope.rows, sid)
-    points: list[dict] = []
-    overview = ""
-    engine = "extractive"
-    engine_reason = why
-    notice = None if can_llm else {"code": code, "message": why}
-    if can_llm:
-        packed = analysis._pack_rows(samples, char_limit=200,
-                                     with_topic=False, with_cat=False)
-        packed.update(from_s=0.0, to_s=round(t_to, 1))
-        usage: dict = {}
-        t0 = time.monotonic()
-        data, errors = _call_model(sid, _SUMMARY_PROMPT, packed, 1600, usage)
-        _note_tokens(sid, usage)
-        metrics.METRICS.observe("brief.latency_ms",
-                                (time.monotonic() - t0) * 1000, session_id=sid)
-        by_id = {int(r["id"]): r for r in samples}
-        points = _gate(data.get("points") or [], by_id, sid, 6, 16, 100)
-        overview = re.sub(r"\s+", " ", str(data.get("overview") or "")).strip()[:120]
-        if points:
-            engine = "llm"
-            engine_reason = "内容足够，使用模型"
-        else:
-            code, why = _llm_reason(errors, settings.resolve().get("model") or "")
-            metrics.METRICS.inc("brief.llm_failed", 1, session_id=sid)
-            notice = {"code": code, "message": why}
-            engine_reason = why
+    if not can_llm:
+        raise _llm_unavailable(code, why)
+    packed = analysis._pack_rows(samples, char_limit=200,
+                                 with_topic=False, with_cat=False)
+    packed.update(from_s=0.0, to_s=round(t_to, 1))
+    usage: dict = {}
+    t0 = time.monotonic()
+    data, errors = _call_model(sid, _SUMMARY_PROMPT, packed, 1600, usage)
+    _note_tokens(sid, usage)
+    metrics.METRICS.observe("brief.latency_ms",
+                            (time.monotonic() - t0) * 1000, session_id=sid)
+    by_id = {int(r["id"]): r for r in samples}
+    points = _gate(data.get("points") or [], by_id, sid, 6, 16, 100)
+    overview = re.sub(r"\s+", " ", str(data.get("overview") or "")).strip()[:120]
     if not points:
-        points = _rule_points(scope, 6)
-        if not overview:
-            gists = [p["gist"] for p in points[:3] if p.get("gist")]
-            overview = ("；".join(gists)[:120] or
-                        "本段没有足够内容生成概述。")
-        if not notice and points:
-            notice = {"code": "content_short",
-                      "message": "内容较少，本次用本地抽取，不消耗 token"}
+        code, why = _llm_reason(errors, settings.resolve().get("model") or "")
+        metrics.METRICS.inc("brief.llm_failed", 1, session_id=sid)
+        raise _llm_unavailable(code, why)
+    engine = "llm"
+    engine_reason = "内容足够，使用模型"
+    notice = None
 
     caveats = _caveats(scope, ["阶段性总结，不是最终稿"])
     if len(samples) < len(scope.rows):
@@ -851,7 +842,7 @@ def summary(conn: sqlite3.Connection, sid: str, refresh: bool = False,
     key = _key(sid, "summary", 0, 0.0, float(t_to))
     if not refresh:
         hit = _cache_get(key)
-        if hit:
+        if _cache_usable(hit):
             metrics.METRICS.inc("brief.cache_hit", 1, session_id=sid)
             if room:
                 hit["room"] = _room_info(room, sid)
@@ -888,7 +879,7 @@ def peek(conn: sqlite3.Connection, sid: str, kind: str, minutes: int = 10,
     else:
         t_from = 0.0
         hit = _cache_get(_key(sid, "summary", 0, 0.0, float(t_to)))
-    if hit:
+    if _cache_usable(hit):
         if room:
             hit["room"] = _room_info(room, sid)
         hit["dry"] = True
@@ -901,12 +892,22 @@ def peek(conn: sqlite3.Connection, sid: str, kind: str, minutes: int = 10,
             stale["dry"] = True
             return stale
     scope = _scope(conn, sid, t_from, float(t_to))
+    if not scope.rows:
+        return {
+            "ok": True, "kind": kind, "dry": True, "cached": False,
+            "room": _room_info(room, sid), "rows": 0,
+            "would_use_llm": False,
+            "notice": {"code": "no_utterances", "message": "还没有可用字幕"},
+            "model": settings.resolve().get("model") or "",
+        }
     can_llm, code, why = _llm_plan(scope.rows, sid)
+    if not can_llm:
+        raise _llm_unavailable(code, why)
     return {
         "ok": True, "kind": kind, "dry": True, "cached": False,
         "room": _room_info(room, sid), "rows": len(scope.rows),
-        "would_use_llm": can_llm,
-        "notice": None if can_llm else {"code": code, "message": why},
+        "would_use_llm": True,
+        "notice": None,
         "model": settings.resolve().get("model") or "",
     }
 
@@ -926,7 +927,7 @@ def api(conn: sqlite3.Connection, rooms: list[dict], sessions: list[dict],
                 rows = [r for r in rooms if str(r.get("id")) == room_id]
                 if not rows:
                     raise BriefError("room_not_found", "没有找到这个房间", 404)
-            return 200, status(rows, sessions, capture)
+            return 200, status(rows, _offline_counts(conn, sessions), capture)
 
         room_id = str(params.get("room_id") or "")
         sid = str(params.get("session_id") or "")

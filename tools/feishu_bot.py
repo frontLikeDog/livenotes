@@ -14,6 +14,7 @@
 """
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import re
@@ -135,10 +136,32 @@ _LOOPBACK_RE = re.compile(
     r"^https?://(?:127\.0\.0\.1|localhost|0\.0\.0\.0)(?::\d+)?(?:/|$)", re.I)
 
 
+def _is_phone_url(url: str) -> bool:
+    """这个链接手机能不能打开：回环和私网地址都不行。"""
+    url = str(url or "").strip()
+    if not url or _LOOPBACK_RE.match(url + "/"):
+        return False
+    try:
+        host = (urllib.parse.urlsplit(url).hostname or "").strip("[]")
+    except ValueError:
+        return False
+    if not host:
+        return False
+    try:
+        return ipaddress.ip_address(host).is_global
+    except ValueError:
+        return True          # 域名：交给公网 DNS，不在这里判死
+
+
 def _public_base() -> str:
-    """给手机点的链接必须是非回环地址；云端节点只绑 127.0.0.1 时返回空串。"""
+    """给手机点的链接必须是公网地址；云端只绑回环/私网时返回空串。
+
+    阿里云节点会从桌面端继承一个 172.24.x.x 的局域网地址；它不是回环，
+    却同样打不开。只看 loopback 会把私网链接发到手机上，所以这里用
+    ``ipaddress.is_global`` 再挡一层。
+    """
     base = (lan.base_url() or "").rstrip("/")
-    return "" if not base or _LOOPBACK_RE.match(base + "/") else base
+    return base if _is_phone_url(base) else ""
 
 
 def _play_hint(room: dict) -> str:
@@ -524,15 +547,18 @@ def _status_one(r: dict, sess: dict | None, cap: dict | None) -> str:
     if not sess:
         lines.append("  还没有会话，等采集端建会话。")
     elif sess.get("capture_only"):
-        # 仅采集：没有逐字稿，「0 句」和「还没有字幕」都会让人以为出故障了。
-        lines.append("  已录 %s · 有声 %s · 仅录制%s" % (
-            _hms(sess.get("elapsed")), _hms(sess.get("audible_s")),
-            " · 已暂停" if sess.get("paused") else ""))
+        # 仅采集：逐字稿由离线进程补写。还没有字时写「仅录制」，补上之后
+        # 直接给条数和最后一句，别让「0 句」看起来像故障。
+        lines.append("  %s%s" % (_capture_bits(sess),
+                                 " · 已暂停" if sess.get("paused") else ""))
         if chunk is None:
             lines.append("  最近一块音频：—")
         else:
             broken = state == "live" and float(chunk) >= LIVE_STALL_WARN_S
             lines.append("  最近一块音频：%s%s" % (_ago(chunk), "  ⚠️ 断流" if broken else ""))
+        last = str(sess.get("last_line") or "")
+        if last:
+            lines.append("  最后一句 %s" % last[:40])
         eng = str(r.get("capture_engine") or "")
         if eng:
             lines.append("  采集：%s" % _ENGINES.get(eng, eng))
@@ -1220,17 +1246,22 @@ def _topics_text(data: dict) -> str:
         ev = t.get("evidence") or []
         if ev:
             lines.append("   「%s」" % _md_safe(ev[0].get("quote")))
-            lines.append("   回听 %s" % ev[0].get("reader_url"))
+            if _is_phone_url(ev[0].get("reader_url")):
+                lines.append("   回听 %s" % ev[0].get("reader_url"))
     if data.get("caveats"):
         lines.append("")
         lines.append("说明：" + "；".join(str(x) for x in data["caveats"][:2]))
     if data.get("minutes_url"):
         lines.append("")
         lines.append("整场回听 %s" % data["minutes_url"])
-    if lan.local_only():
+    if not _public_base():
         lines.append("")
-        lines.append("（回听链接是电脑本机地址，手机上打不开；"
-                     "在电脑上打开设置 →「手机访问」开启后重新生成。）")
+        if CAPTURE_ONLY:
+            lines.append("（云端没有公网回听页；听原声发 /分享 %s 90秒）"
+                         % (room.get("ch") or "CH01"))
+        else:
+            lines.append("（回听链接是电脑本机地址，手机上打不开；"
+                         "在电脑上打开设置 →「手机访问」开启后重新生成。）")
     return "\n".join(lines)
 
 
@@ -1268,17 +1299,22 @@ def _summary_text(data: dict) -> str:
         ev = p.get("evidence") or []
         if ev:
             lines.append("   「%s」" % _md_safe(ev[0].get("quote")))
-            lines.append("   回听 %s" % ev[0].get("reader_url"))
+            if _is_phone_url(ev[0].get("reader_url")):
+                lines.append("   回听 %s" % ev[0].get("reader_url"))
     if data.get("caveats"):
         lines.append("")
         lines.append("说明：" + "；".join(str(x) for x in data["caveats"][:3]))
     if data.get("minutes_url"):
         lines.append("")
         lines.append("整场回听 %s" % data["minutes_url"])
-    if lan.local_only():
+    if not _public_base():
         lines.append("")
-        lines.append("（回听链接是电脑本机地址，手机上打不开；"
-                     "在电脑上打开设置 →「手机访问」开启后重新生成。）")
+        if CAPTURE_ONLY:
+            lines.append("（云端没有公网回听页；听原声发 /分享 %s 90秒）"
+                         % (room.get("ch") or "CH01"))
+        else:
+            lines.append("（回听链接是电脑本机地址，手机上打不开；"
+                         "在电脑上打开设置 →「手机访问」开启后重新生成。）")
     return "\n".join(lines)
 
 
@@ -1351,6 +1387,14 @@ def _status_icon(state: str) -> str:
     return _STATE.get(state, ("·", state))[0]
 
 
+def _capture_bits(r: dict) -> str:
+    """仅采集场次的时长文案：补转写有结果后别再只写「仅录制」。"""
+    n = int(r.get("n_utterances") or 0)
+    return "已录 %s · 有声 %s · %s" % (
+        _hms(r.get("elapsed")), _hms(r.get("audible_s")),
+        ("补转写 %d 句" % n) if n else "仅录制")
+
+
 def _console_card(data: dict) -> dict:
     rows = data.get("rooms") or []
     elements: list[dict] = []
@@ -1360,8 +1404,7 @@ def _console_card(data: dict) -> dict:
                                    _status_icon(r.get("room_state")))]
         if r.get("elapsed") is not None:
             if r.get("capture_only"):
-                bits.append("已录 %s · 有声 %s · 仅录制" % (
-                    _hms(r.get("elapsed")), _hms(r.get("audible_s"))))
+                bits.append(_capture_bits(r))
             else:
                 bits.append("已录 %s · %s 句" % (_hms(r.get("elapsed")),
                                                 int(r.get("n_utterances") or 0)))
@@ -1375,8 +1418,8 @@ def _console_card(data: dict) -> dict:
         elements.append({"tag": "div",
                          "text": {"tag": "lark_md", "content": "\n".join(bits)}})
         acts = [_btn("状态", {"act": "brief_status", "room": r.get("room_id")})]
-        if not r.get("capture_only"):
-            # 仅采集没有逐字稿：近聊/总结只会得到「窗口内还没有可用字幕」。
+        if not r.get("capture_only") or int(r.get("n_utterances") or 0) > 0:
+            # 仅采集要等离线补转写出字；有字之后近聊/总结才有意义。
             acts += [_btn("近10分钟", {"act": "brief_topics", "room": r.get("room_id"),
                                       "minutes": 10}),
                      _btn("总结", {"act": "brief_summary", "room": r.get("room_id"),
@@ -1423,8 +1466,7 @@ def _console_text(data: dict) -> str:
                               _status_icon(r.get("room_state")))
         if r.get("elapsed") is not None:
             if r.get("capture_only"):
-                line += " · 已录 %s · 有声 %s · 仅录制" % (
-                    _hms(r.get("elapsed")), _hms(r.get("audible_s")))
+                line += " · " + _capture_bits(r)
             else:
                 line += " · 已录 %s · %s 句" % (_hms(r.get("elapsed")),
                                                int(r.get("n_utterances") or 0))
@@ -1463,12 +1505,11 @@ def _room_session_bits(room: dict, sessions: dict[str, dict]) -> list[str]:
     bits: list[str] = []
     if s.get("elapsed") is not None:
         if s.get("capture_only"):
-            bits.append("已录 %s · 有声 %s · 仅录制" % (
-                _hms(s.get("elapsed")), _hms(s.get("audible_s"))))
+            bits.append(_capture_bits(s))
         else:
             bits.append("已录 %s · %s 句" % (_hms(s.get("elapsed")),
                                             int(s.get("n_utterances") or 0)))
-    if s.get("capture_only"):
+    if s.get("capture_only") and not int(s.get("n_utterances") or 0):
         return bits
     last = str(s.get("last_line") or "")
     if not last:

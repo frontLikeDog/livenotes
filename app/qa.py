@@ -6,7 +6,8 @@ P1 不引入向量库（docs/36 §8.2）：``note_units`` 的 FTS5 trigram + 类
 片段（每条 ≤200 字、总预算 ≤3000 tokens），不发送整场逐字稿和音频。
 
 证据门：模型返回的 citations 必须是给定单元的子集；引用非法就剔除，全空
-则降级为「没找到」。没有模型/模型失败时返回抽取式原话列表，不报错、不空屏。
+则失败。没有配置模型、模型调用失败或输出不合格时，问答直接失败并给出
+原因，不再拼一段本地摘录。
 """
 from __future__ import annotations
 
@@ -247,16 +248,19 @@ def _thread_block(conn: sqlite3.Connection, row: dict) -> tuple[str, str]:
     return block, _THREAD_RULE
 
 
-def _extractive(units: list[dict]) -> tuple[str, list[dict], str]:
-    if not units:
-        return "", [], "extractive"
-    top = units[:5]
-    lines = ["找到 %d 段相关内容：" % len(units)]
-    for u in top:
-        t = _fmt_t(u.get("t"))
-        prefix = ("%s " % t) if t else ""
-        lines.append("%s%s" % (prefix, str(u.get("text") or "")[:120]))
-    return "\n".join(lines), [_citation(u) for u in top], "extractive"
+def _fail(conn: sqlite3.Connection, qid: int, why: str,
+          retry: bool = False) -> dict:
+    """问答失败就失败，不再拿本地摘录凑一段答案。"""
+    msg = (why or "模型没有生成可用回答").strip()
+    if not msg.endswith(("。", "！", "？")):
+        msg += "。"
+    msg += "未使用本地抽取"
+    if retry:
+        msg += "，请重试"
+    store.qa_update(conn, qid, state="failed", answer="", citations=[],
+                    engine="", error=msg)
+    logs.log_event("qa.failed", level="warn", error=msg[:200])
+    return {"ok": False, "state": "failed", "error": msg, "items": []}
 
 
 def answer(conn: sqlite3.Connection, qid: int) -> dict:
@@ -273,50 +277,57 @@ def answer(conn: sqlite3.Connection, qid: int) -> dict:
         units = []
     if not units:
         store.qa_update(conn, qid, state="no_result", answer="",
-                        citations=[], engine="extractive")
+                        citations=[], engine="")
         return {"ok": True, "state": "no_result", "items": []}
 
-    text, cites, engine = _extractive(units)
     thread_block, thread_rule = _thread_block(conn, row)
     try:
         configured = bool(settings.resolve().get("configured"))
     except Exception:
         configured = False
-    if configured:
-        try:
-            raw = llm.chat([
-                {"role": "system",
-                 "content": "你只根据用户提供的笔记片段回答，输出严格 JSON。"},
-                {"role": "user", "content": _QA_PROMPT % (
-                    thread_block, thread_rule, _context(units))},
-            ], temperature=0.2, session_id=str(scope.get("session_id") or ""),
-                task="qa", max_tokens=800)
-            raw = re.sub(r"^```(?:json)?|```$", "", raw.strip(), flags=re.M).strip()
-            data = json.loads(raw)
-            ans = str(data.get("answer") or "").strip()
-            wanted = data.get("citations") or []
-            by_n = {int(u["n"]): u for u in units}
-            valid: list[dict] = []
-            for n in wanted:
-                try:
-                    n = int(n)
-                except (TypeError, ValueError):
-                    continue
-                if n in by_n and by_n[n] not in valid:
-                    valid.append(by_n[n])
-            # 证据门：答案里引用了不存在的编号也剔掉；全空则降级。
-            ans = re.sub(r"\[(\d+)\]",
-                         lambda m: m.group(0) if int(m.group(1)) in
-                         {int(u["n"]) for u in valid} else "", ans).strip()
-            if ans and valid and ans != "没找到相关内容":
-                text, cites, engine = ans, [_citation(u) for u in valid], "llm"
-            elif ans == "没找到相关内容":
-                store.qa_update(conn, qid, state="no_result", answer=ans,
-                                citations=[], engine="llm")
-                return {"ok": True, "state": "no_result", "items": []}
-        except Exception as e:
-            logs.log_event("qa.llm_failed", level="warn", error=str(e)[:200])
-            text, cites, engine = _extractive(units)
+    if not configured:
+        return _fail(conn, qid, "还没配置大模型")
+
+    try:
+        raw = llm.chat([
+            {"role": "system",
+             "content": "你只根据用户提供的笔记片段回答，输出严格 JSON。"},
+            {"role": "user", "content": _QA_PROMPT % (
+                thread_block, thread_rule, _context(units))},
+        ], temperature=0.2, session_id=str(scope.get("session_id") or ""),
+            task="qa", max_tokens=800)
+        raw = re.sub(r"^```(?:json)?|```$", "", raw.strip(), flags=re.M).strip()
+        data = json.loads(raw)
+        ans = str(data.get("answer") or "").strip()
+        wanted = data.get("citations") or []
+        by_n = {int(u["n"]): u for u in units}
+        valid: list[dict] = []
+        for n in wanted:
+            try:
+                n = int(n)
+            except (TypeError, ValueError):
+                continue
+            if n in by_n and by_n[n] not in valid:
+                valid.append(by_n[n])
+        # 证据门：答案里引用了不存在的编号也剔掉；全空就失败。
+        ans = re.sub(r"\[(\d+)\]",
+                     lambda m: m.group(0) if int(m.group(1)) in
+                     {int(u["n"]) for u in valid} else "", ans).strip()
+        if ans == "没找到相关内容":
+            store.qa_update(conn, qid, state="no_result", answer=ans,
+                            citations=[], engine="llm")
+            return {"ok": True, "state": "no_result", "items": []}
+        if not ans or not valid:
+            return _fail(conn, qid, "模型输出没有通过证据校验")
+        text, cites, engine = ans, [_citation(u) for u in valid], "llm"
+    except Exception as e:
+        logs.log_event("qa.llm_failed", level="warn", error=str(e)[:200])
+        text = str(e).strip()
+        if isinstance(e, scheduler.BudgetExceeded):
+            return _fail(conn, qid, "预算不足（%s）" % (
+                text[:120] if text else "模型额度已用完"))
+        return _fail(conn, qid, "模型调用失败（%s）" % (
+            text[:120] if text else type(e).__name__), retry=True)
     store.qa_update(conn, qid, state="ready", answer=text,
                     citations=cites, engine=engine)
     logs.log_event("qa.answer", engine=engine, citations=len(cites),

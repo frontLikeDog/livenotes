@@ -17,7 +17,9 @@
 
 - **不连续实时推流**。飞书没有给机器人持续推音频的接口，只能按需截一段
   （单条 ≤5 分钟，`app/clips.py` 的 `MAX_SECONDS`）。
-- 不做转写/说话人/总结；这些仍要回到有算力的机器处理。
+- 机器人本身不做转写/说话人/总结。同机可以另跑一个离线补转写进程
+  （[45](45-offline-asr.md)）：它把录音增量转成文字写回库，之后
+  `/总结`、`/近聊` 正常可用，采集和机器人都不用改。
 - 不开公网端口、不需要域名和 ICP 备案、不用 VPN/组网/远程桌面。
   机器人是**出站长连接**，云端只监听 `127.0.0.1`。
 
@@ -27,13 +29,14 @@
 
 ## 2. 组成
 
-同一台 VPS 上三个 systemd 服务：
+同一台 VPS 上三个核心 systemd 服务（第四个离线补转写可选）：
 
 | 服务 | 作用 | 端口 |
 |---|---|---|
 | `livenotes.service` | 引擎：仅采集 + 直取，SQLite、录音、m4a | `127.0.0.1:8765` |
 | `livenotes-capture.service` | 采集代理：按房间拉起 ffmpeg | 无 |
 | `livenotes-feishu.service` | 飞书机器人：长连接收命令、发状态/语音 | 出站 |
+| `livenotes-offline-asr.service` | 可选：离线补转写，给仅采集场次补逐字稿 | 无 |
 
 机器人只读 `data/feishu.json`（`chmod 600`），通过 `LIVENOTES_API`
 访问本机引擎；它不直接写数据库。
@@ -113,8 +116,11 @@ journalctl -u livenotes-feishu -f
 | `/控制台` | 一张卡片看所有房间和按钮 |
 | `/回听` | 没有公网页面时返回 `/分享` 提示，不会给手机发打不开的 127.0.0.1 链接 |
 
-仅采集场次没有逐字稿，`/近聊`、`/总结`、`/周报` 没有内容可用；
-状态和回执里也不会再出现「0 句」「还没有字幕」。
+仅采集场次在离线补转写出字前没有逐字稿，`/近聊`、`/总结`、`/周报`
+没有内容可用；出字后状态显示「补转写 N 句」，`/总结` 直接可用。
+状态和回执里不会出现「0 句」「还没有字幕」这种像故障的措辞。
+云端没有公网页面时，简报证据只保留原话，不再发 127/172.24 这类
+手机上打不开的回听链接；要听原声发 `/分享 CH01 90秒`。
 
 ## 5. 生命周期
 
@@ -140,9 +146,12 @@ journalctl -u livenotes-capture -n 50 --no-pager
 - 磁盘：WAV 保留 2 天、m4a 保留 14 天（见 `livenotes.env`）。
   一路语音厅约 110MB/小时下行，7×24 约 79GB/月；先确认套餐的
   100GB 是入站还是出站口径，再决定能常开几路。
-- 内存：飞书机器人（lark-oapi 长连接）常驻约 200MB；加引擎约 50MB、
-  采集代理约 30MB，三件套约 280MB。1GB 机器跑 1~2 路语音厅可以，
-  3 路以上建议 2GB 起，并保留 swap。
+- 内存：飞书机器人（lark-oapi 长连接）常驻约 170MB；加引擎约 30MB、
+  采集代理约 20MB，三件套约 220MB。再加离线补转写（实测约 440MB）
+  在标称 1GB、实际 `MemTotal` 701MB 的机器上放不下两份热数据：
+  必须配 2GB swap，并把补转写关进 `MemoryHigh/MemoryMax` cgroup
+  （见 [45](45-offline-asr.md)）。内核会把空闲的机器人换出，命令仍可用，
+  但首次响应会慢几秒；要长期流畅建议升 2GB，3 路以上必须 2GB 起。
 - 直取节点建议在 `livenotes.env` 设 `LIVENOTES_DIRECT_FALLBACK=none`：
   Linux 上没有可用的浏览器采集，失败时只报错，不再提示「切换到浏览器」。
 - 安全：机器人只做出站连接；引擎仍只绑回环；不要把 8765 开到公网。
@@ -151,7 +160,7 @@ journalctl -u livenotes-capture -n 50 --no-pager
 ## 7. 测试
 
 ```bash
-python -m pytest tests/test_feishu_capture_only.py -q
+python -m pytest tests/test_feishu_capture_only.py tests/test_offline_asr.py -q
 ```
 
 用例覆盖：仅采集状态文案、停止场次的 `/分享` 提示、`/重试` 的

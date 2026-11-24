@@ -67,6 +67,17 @@ CREATE INDEX IF NOT EXISTS idx_u_speaker  ON utterances(session_id, speaker_id);
 CREATE INDEX IF NOT EXISTS idx_u_category ON utterances(session_id, category);
 CREATE INDEX IF NOT EXISTS idx_u_value    ON utterances(session_id, value_tag);
 
+-- 离线补转写进度：仅采集场次没有实时 ASR，独立进程按 spool/WAV 增量补齐。
+-- processed_s 是已经送进 VAD 的音频秒数；重启后从这里继续，避免整场重跑。
+CREATE TABLE IF NOT EXISTS offline_asr (
+    session_id    TEXT PRIMARY KEY,
+    processed_s   REAL NOT NULL DEFAULT 0,
+    status        TEXT NOT NULL DEFAULT '',   -- running | done | error
+    error         TEXT NOT NULL DEFAULT '',
+    n_utterances  INTEGER NOT NULL DEFAULT 0,
+    updated_at    TEXT
+);
+
 CREATE TABLE IF NOT EXISTS speakers (
     session_id   TEXT NOT NULL,
     speaker_id   TEXT NOT NULL,
@@ -383,7 +394,7 @@ CREATE TABLE IF NOT EXISTS qa_answers (
     state          TEXT NOT NULL,        -- running|ready|no_result|failed
     answer         TEXT NOT NULL DEFAULT '',
     citations_json TEXT NOT NULL DEFAULT '[]',
-    engine         TEXT NOT NULL DEFAULT '',   -- llm|extractive
+    engine         TEXT NOT NULL DEFAULT '',   -- llm|''（历史数据可能为 extractive）
     feedback       TEXT NOT NULL DEFAULT '',   -- up|down|''
     job_id         TEXT NOT NULL DEFAULT '',
     error          TEXT NOT NULL DEFAULT '',
@@ -844,6 +855,47 @@ def finish_session(conn: sqlite3.Connection, sid: str, duration_s: float,
         (float(duration_s), audio_path, float(untranscribed_s), audio_format,
          int(audio_bytes) if audio_bytes is not None else None,
          audio_original_path, sid))
+    conn.commit()
+
+
+def ensure_offline_asr(conn: sqlite3.Connection) -> None:
+    """离线服务可能先于引擎重启启动；自己保证进度表存在。"""
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS offline_asr ("
+        " session_id TEXT PRIMARY KEY,"
+        " processed_s REAL NOT NULL DEFAULT 0,"
+        " status TEXT NOT NULL DEFAULT '',"
+        " error TEXT NOT NULL DEFAULT '',"
+        " n_utterances INTEGER NOT NULL DEFAULT 0,"
+        " updated_at TEXT)")
+    conn.commit()
+
+
+def get_offline_asr(conn: sqlite3.Connection, sid: str) -> dict | None:
+    row = conn.execute("SELECT * FROM offline_asr WHERE session_id=?", (sid,)).fetchone()
+    return rowdict(row)
+
+
+def set_offline_asr(conn: sqlite3.Connection, sid: str, *,
+                    processed_s: float | None = None,
+                    status: str | None = None,
+                    error: str | None = None,
+                    n_utterances: int | None = None) -> None:
+    """离线转写进度。只更新传入的字段，没传的保持原值。"""
+    old = get_offline_asr(conn, sid) or {}
+    vals = {
+        "processed_s": old.get("processed_s", 0.0) if processed_s is None else processed_s,
+        "status": old.get("status", "") if status is None else status,
+        "error": old.get("error", "") if error is None else error,
+        "n_utterances": (old.get("n_utterances", 0) if n_utterances is None
+                         else n_utterances),
+    }
+    conn.execute(
+        "INSERT OR REPLACE INTO offline_asr"
+        "(session_id,processed_s,status,error,n_utterances,updated_at) "
+        "VALUES (?,?,?,?,?,?)",
+        (sid, float(vals["processed_s"]), vals["status"], vals["error"],
+         int(vals["n_utterances"]), now()))
     conn.commit()
 
 

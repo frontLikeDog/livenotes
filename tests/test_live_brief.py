@@ -76,15 +76,14 @@ def test_topics_llm_valid_and_cache(db, monkeypatch):
     assert len(calls) == 1
 
 
-def test_topics_invalid_evidence_falls_back(db, monkeypatch):
+def test_topics_invalid_evidence_fails_without_extractive(db, monkeypatch):
     _seed(db)
     monkeypatch.setattr(livebrief, "_chat", _fake_chat("topics", False))
     # active=True：这个用例只关心证据闸门，别让「断流」提示按真实时钟盖掉它。
-    data = livebrief.topics(db, "S1", 10, t_to=400, active=True)
-    assert data["engine"] == "extractive"
-    assert data["notice"]["code"] == "llm_failed"
-    assert data["topics"]
-    assert all(len(t["evidence"]) >= 2 for t in data["topics"])
+    with pytest.raises(livebrief.BriefError) as ei:
+        livebrief.topics(db, "S1", 10, t_to=400, active=True)
+    assert ei.value.code == "llm_failed"
+    assert "未使用本地抽取" in str(ei.value)
 
 
 def test_topics_no_utterances_does_not_call_model(db, monkeypatch):
@@ -101,24 +100,24 @@ def test_summary_points_carry_beijing_wall_clock(db, monkeypatch):
     add_session(db, "CLK", started_at="2026-11-09T14:09:48", duration_s=3600,
                 started_utc="2026-11-09T06:09:48+00:00", tz_offset_min=480)
     rows = [utt_row(i, "第%d句：讨论内容足够长，包含信息量与结论。" % i,
-                    t=i * 20, topic="账号风控", importance=0.6) for i in range(8)]
+                    t=i * 20, topic="账号风控", importance=0.6) for i in range(20)]
     add_rows(db, "CLK", rows)
     monkeypatch.setattr(livebrief, "_chat", _fake_chat("summary", True))
-    data = livebrief.summary(db, "CLK", t_to=140)
+    data = livebrief.summary(db, "CLK", t_to=400)
     cov = data["coverage"]
     assert cov["start_clock"] == "11-09 14:09"
     assert cov["clock_tz"] == "北京时间"
-    assert cov["from_clock"] == "14:09" and cov["to_clock"] == "14:12"
+    assert cov["from_clock"] == "14:09" and cov["to_clock"] == "14:16"
     p = data["points"][0]
     # 证据取前两句（t=0 / t=20，各 2 秒），14:09:48 起算
     assert p["from_clock"] == "14:09" and p["to_clock"] == "14:10"
     # 缓存命中也要带着墙上时间
-    again = livebrief.summary(db, "CLK", t_to=140)
+    again = livebrief.summary(db, "CLK", t_to=400)
     assert again["cached"] is True
     assert again["points"][0]["from_clock"] == "14:09"
 
 
-def test_summary_budget_exceeded_falls_back(db, monkeypatch):
+def test_summary_budget_exceeded_fails_without_extractive(db, monkeypatch):
     _seed(db)
     monkeypatch.setattr(livebrief.scheduler, "budget_status", lambda sid="": {
         "session": {"limit": 100, "remaining": 0, "used": 100},
@@ -126,23 +125,24 @@ def test_summary_budget_exceeded_falls_back(db, monkeypatch):
     })
     called: list = []
     monkeypatch.setattr(livebrief, "_chat", lambda *a, **k: called.append(1))
-    data = livebrief.summary(db, "S1", t_to=400)
-    assert data["engine"] == "extractive"
-    assert data["notice"]["code"] == "budget_exceeded"
-    assert data["points"]
+    with pytest.raises(livebrief.BriefError) as ei:
+        livebrief.summary(db, "S1", t_to=400)
+    assert ei.value.code == "budget_exceeded"
+    assert "未使用本地抽取" in str(ei.value)
     assert not called
 
 
-def test_summary_llm_budget_exception_falls_back(db, monkeypatch):
+def test_summary_llm_budget_exception_fails_without_extractive(db, monkeypatch):
     _seed(db)
 
     def boom(*a, **k):
         raise scheduler.BudgetExceeded("session", 100, 100)
 
     monkeypatch.setattr(livebrief, "_chat", boom)
-    data = livebrief.summary(db, "S1", t_to=400)
-    assert data["engine"] == "extractive"
-    assert data["notice"]["code"] == "budget_exceeded"
+    with pytest.raises(livebrief.BriefError) as ei:
+        livebrief.summary(db, "S1", t_to=400)
+    assert ei.value.code == "budget_exceeded"
+    assert "未使用本地抽取" in str(ei.value)
 
 
 def test_summary_long_session_samples_latest_and_spread(db, monkeypatch):
@@ -275,19 +275,19 @@ def test_refresh_does_not_bypass_cooldown(db, monkeypatch):
 
 
 def test_summary_stale_cache_reports_new_content(db, monkeypatch):
-    _seed(db)
+    _seed(db, n=40)
     calls: list = []
     monkeypatch.setattr(livebrief, "_chat", _fake_chat("summary", True, calls))
-    first = livebrief.summary(db, "S1", t_to=200)
+    first = livebrief.summary(db, "S1", t_to=400)
     assert first["ok"]
     made = len(calls)
 
-    peek = livebrief.peek(db, "S1", "summary", t_to=400)
+    peek = livebrief.peek(db, "S1", "summary", t_to=800)
     assert peek["dry"] is True and peek["cached"] is True
     assert peek["notice"]["code"] == "cached_new"
     assert peek["new_utterances"] > 0
 
-    second = livebrief.summary(db, "S1", t_to=400)
+    second = livebrief.summary(db, "S1", t_to=800)
     assert second["cached"] is True
     assert second["notice"]["code"] == "cached_new"
     assert second["new_utterances"] == peek["new_utterances"]

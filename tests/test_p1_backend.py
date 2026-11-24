@@ -2,6 +2,7 @@
 """P1 后端单元与轻量集成：二维码、偏好、关注、笔记库、书签、问答、周报、导出。"""
 from __future__ import annotations
 
+import json
 from datetime import date, datetime
 
 import pytest
@@ -315,23 +316,57 @@ def test_bookmarks_merge_marks_and_collected_highlights(db):
     assert len(notes.bookmarks(db, "S1")) == 2
 
 
-def test_qa_extractive_answer_has_citations(db):
+def test_qa_without_llm_fails_not_extractive(db):
     _seed_note(db)
     notes.index_session(db, "S1")
     row = store.qa_create(db, "复购率", {})
     out = qa.answer(db, int(row["id"]))
+    assert out["ok"] is False
+    assert out["state"] == "failed"
+    assert "还没配置大模型" in out["error"]
+    assert "未使用本地抽取" in out["error"]
+
+    saved = store.qa_get(db, int(row["id"]))
+    assert saved["state"] == "failed"
+    assert saved["answer"] == ""
+    assert saved["citations"] == []
+    assert "未使用本地抽取" in saved["error"]
+
+
+def test_qa_llm_answer_has_citations(db, monkeypatch):
+    _seed_note(db)
+    notes.index_session(db, "S1")
+    monkeypatch.setattr(qa.settings, "resolve",
+                        lambda *a, **k: {"configured": True, "model": "test"})
+    monkeypatch.setattr(qa.llm, "chat", lambda *a, **k: json.dumps({
+        "answer": "复购率比单场 GMV 更重要 [1]。",
+        "citations": [1],
+        "confidence": "high"}, ensure_ascii=False))
+    row = store.qa_create(db, "复购率", {})
+    out = qa.answer(db, int(row["id"]))
     assert out["ok"] is True
     assert out["state"] == "ready"
-    assert out["engine"] == "extractive"
-    assert out["answer"]
+    assert out["engine"] == "llm"
+    assert "复购率" in out["answer"]
     assert out["citations"]
     cite = out["citations"][0]
     assert cite["session_id"] == "S1"
     assert cite["text"]
 
-    saved = store.qa_get(db, int(row["id"]))
-    assert saved["state"] == "ready"
-    assert saved["citations"]
+
+def test_qa_invalid_evidence_fails_not_extractive(db, monkeypatch):
+    _seed_note(db)
+    notes.index_session(db, "S1")
+    monkeypatch.setattr(qa.settings, "resolve",
+                        lambda *a, **k: {"configured": True, "model": "test"})
+    monkeypatch.setattr(qa.llm, "chat", lambda *a, **k: json.dumps({
+        "answer": "模型编的答案 [99]。", "citations": [99]},
+        ensure_ascii=False))
+    row = store.qa_create(db, "复购率", {})
+    out = qa.answer(db, int(row["id"]))
+    assert out["state"] == "failed"
+    assert "证据校验" in out["error"]
+    assert "未使用本地抽取" in out["error"]
 
 
 def test_qa_retrieve_scoped_to_session(db):

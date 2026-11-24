@@ -858,9 +858,9 @@ CREATE TABLE IF NOT EXISTS reports (
 5. **范围**：`session_id` 给定则只取该场，且优先取该场全部 point/highlight（最多 8 条），保证「这场」问题不被其他场挤掉。
 6. **预算**：每条单元 ≤ 200 字；总上下文 ≤ 3000 tokens（`llm.estimate_tokens`）；超出按分数截断。
 7. **回答**：调度器 `qa` 任务，提示词要求「只根据给定片段回答，每条结论带 [n]，找不到就说没找到」；输出 JSON `{answer, citations:[unit_id], confidence}`。
-8. **证据门**：`citations` 必须是给定 unit_id 的子集；非法 id 剔除；剔除后为空则降级为「没找到」；answer 里引用了不存在的 [n] 也剔除。沿用 `scenes.judge` 的「证据不存在就不采信」原则。
+8. **证据门**：`citations` 必须是给定 unit_id 的子集；非法 id 剔除；剔除后为空则问答失败（`state=failed`）；answer 里引用了不存在的 [n] 也剔除。沿用 `scenes.judge` 的「证据不存在就不采信」原则。
 9. **缓存**：指纹 = 问题 + 范围 + 索引版本；24 小时内同一问题直接返回；索引更新后指纹变化，自动失效。
-10. **无 LLM / 失败**：返回抽取式结果「找到 N 段相关内容」+ top 5 原话 + 时间码；页面标明「未配置模型，先给你相关原话」，不显示错误码。
+10. **无 LLM / 失败**：不再生成抽取式结果。未配置模型、调用失败或证据全空都写 `state=failed`，原因放进 `error`，页面显示「没答成 + 原因」。2026-11-25 起本地抽取已从问答链路删除。
 
 ### 8.3 数据与接口
 
@@ -872,7 +872,7 @@ CREATE TABLE IF NOT EXISTS qa_answers (
   state          TEXT NOT NULL,        -- running|ready|no_result|failed
   answer         TEXT NOT NULL DEFAULT '',
   citations_json TEXT NOT NULL DEFAULT '[]',
-  engine         TEXT NOT NULL DEFAULT '',   -- llm|extractive
+  engine         TEXT NOT NULL DEFAULT '',   -- llm|''（历史数据可能为 extractive）
   feedback       TEXT NOT NULL DEFAULT '',   -- up|down|''
   job_id         TEXT NOT NULL DEFAULT '',
   error          TEXT NOT NULL DEFAULT '',
@@ -897,9 +897,9 @@ CREATE TABLE IF NOT EXISTS qa_answers (
 ### 8.4 隐私与成本
 
 - 只把检索到的片段发给模型，不发整场逐字稿、不发音频、不发文件名；单条 ≤200 字，总 ≤3000 tokens。
-- 首次使用弹一次说明：「问笔记会把相关片段发给模型；不配置模型时只做本地检索。」可不再提示。
+- 首次使用弹一次说明：「问笔记会把相关片段发给模型；不配置模型时问答直接失败，不做本地抽取。」可不再提示。
 - 设置里 `qa_enabled`（默认开）与 `qa_suggest_enabled`（默认开，控制搜索面板的追问建议）；关闭问笔记后搜索仍可用，问笔记入口隐藏。
-- 每日 token 预算沿用调度器配置；超预算时只走抽取式。
+- 每日 token 预算沿用调度器配置；超预算时直接失败并说明原因。
 - 日志只记 `qa_ask` 事件和耗时/token 数，不记问题和答案正文。
 - 诊断包导出不含问答内容。
 
@@ -907,7 +907,7 @@ CREATE TABLE IF NOT EXISTS qa_answers (
 
 | 文件 | 改动 |
 |---|---|
-| `app/qa.py` | 新增：时间解析、召回、排序、证据门、抽取式降级、历史 |
+| `app/qa.py` | 新增：时间解析、召回、排序、证据门、失败态、历史 |
 | `app/tasks.py` | 注册 `qa` 任务；`submit_qa` |
 | `app/scheduler.py` | 不改；用现有优先级/预算/重试 |
 | `app/notes.py` | `note_units` 索引与 `index_session` |
@@ -1368,7 +1368,7 @@ P1 的硬指标：
 | `tests/test_notes_api.py` | `/api/note` 字段冻结、状态推导（ready/partial/running/failed/empty/insufficient）、无总结降级 |
 | `tests/test_library_cards.py` | 游标分页、筛选、排序、状态映射、1000 场不重不漏 |
 | `tests/test_bookmarks.py` | `marks.kind` / `highlights.source` 迁移、撤销、收尾重算保留 `source in (manual,live)`、导出包含书签 |
-| `tests/test_qa.py` | 时间范围解析、两字/三字召回、排序、同场限流、引用子集校验、无 LLM 抽取式、24h 缓存 |
+| `tests/test_qa.py` | 时间范围解析、两字/三字召回、排序、同场限流、引用子集校验、无 LLM 明确失败、24h 缓存 |
 | `tests/test_reports_weekly.py` | ISO 周边界、空周、幂等、旧文件补行、无 LLM 规则版 |
 | `tests/test_export_note_md.py` | golden 文件、无 evidence 的要点剔除、文件名清洗、批量 zip |
 | `tests/test_perf_mode.py` | 自动判定、环境变量优先、引擎参数下一场生效、`/api/perf` |

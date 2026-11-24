@@ -24,6 +24,20 @@ RESUME_ROOMS = os.environ.get("LIVENOTES_RESUME_ROOMS", "0").lower() in ("1", "t
 # 面向 1~2GB 的 VPS 录制节点。逐场可用 /api/live/start 的 capture_only 覆盖。
 CAPTURE_ONLY = os.environ.get("LIVENOTES_CAPTURE_ONLY", "0").lower() in (
     "1", "true", "yes", "on")
+
+# 离线补转写：给仅采集场次补逐字稿的独立进程。它扫当前的 .pcm spool 和
+# 收尾后的 WAV，按 VAD 断句后写入 utterances；不改变采集链路，也不要求
+# 服务端加载模型。默认只处理最近两天内的场次，老场次用 CLI --backfill 指定。
+OFFLINE_ASR_INTERVAL_S = float(os.environ.get(
+    "LIVENOTES_OFFLINE_ASR_INTERVAL", "5"))
+OFFLINE_ASR_DAYS = float(os.environ.get(
+    "LIVENOTES_OFFLINE_ASR_DAYS", "2"))
+# 每轮每个场次最多补这么多秒音频，避免一场几小时的积压把其它场次饿死。
+OFFLINE_ASR_MAX_FEED_S = float(os.environ.get(
+    "LIVENOTES_OFFLINE_ASR_MAX_FEED_S", "120"))
+# 关掉声纹可以再省一份 CAM++ 和逐句 embedding；代价是只有「说话人」一个标签。
+OFFLINE_ASR_SPEAKERS = os.environ.get(
+    "LIVENOTES_OFFLINE_ASR_SPEAKERS", "1").lower() in ("1", "true", "yes", "on")
 def _lan_ip() -> str:
     """取本机局域网 IP。手机点卡片链接时不能用 127.0.0.1，这里自动填对。
 
@@ -421,7 +435,7 @@ LLM_PRICE_OUTPUT_PER_MTOK = max(0.0, _env_float("LIVENOTES_LLM_PRICE_OUTPUT", 0.
 
 # ---- 飞书直播简报（app/livebrief.py）----
 # 简报和结束时的正式总结共用调度器，但有自己的软上限：一次问答不能把整场
-# 收尾的预算吃光。预算不足时一律回退本地抽取，不阻塞状态查询。
+# 收尾的预算吃光。预算不足时简报直接报错，不阻塞状态查询。
 BRIEF_LLM = os.environ.get("LIVENOTES_BRIEF_LLM", "1").lower() not in ("0", "false", "no")
 BRIEF_TOPICS_COOLDOWN_S = max(0.0, _env_float("LIVENOTES_BRIEF_TOPICS_COOLDOWN", 60))
 BRIEF_SUMMARY_COOLDOWN_S = max(0.0, _env_float("LIVENOTES_BRIEF_SUMMARY_COOLDOWN", 120))

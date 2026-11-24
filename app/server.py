@@ -1361,7 +1361,10 @@ p{font-size:14px;line-height:1.75;margin:8px 0}
         if p == "/api/live/audio":
             return self._live_audio(conn, q)
         if p == "/api/live/list":
-            return self._json({"sessions": live.list_active()})
+            # 仅采集的逐字稿由离线进程写库，不在 live 内存里；这里补一次，
+            # 飞书的 /状态 不用等引擎重启也能看到条数。
+            return self._json({"sessions": livebrief._offline_counts(
+                conn, live.list_active())})
         if p == "/api/live/brief":
             code, data = livebrief.api(
                 conn, rooms.list_rooms(), live.list_active(),

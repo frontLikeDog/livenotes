@@ -452,6 +452,11 @@ class LiveSession:
         # 本场实时高光候选（只在本机展示，进不进通知中心是另一回事）
         self.live_highlights: list[dict] = []
         self.n_utts = 0                    # 本场已落库的发言条数（status 只回最后 60 句，数不了总数）
+        # 仅采集场次的逐字稿由独立进程补写，不在本进程内存里；status 每 3 秒
+        # 查一次库，既能让飞书看到「补转写 N 句」，又不会每次轮询都打 SQLite。
+        self._offline_n = 0
+        self._offline_last = ""
+        self._offline_at = 0.0
         self.last_speech_s = 0.0           # 最后一次判定"有人说话"的秒数，用来算静默了多久
         self.level = 0.0                   # 最近一块的 RMS，用来判断标签页是不是静音
         self.chars = 0                     # 已转写字数，用于实时语速
@@ -1440,8 +1445,33 @@ class LiveSession:
             traceback.print_exc()
 
     # -------------------------------------------------- 查询
+    def _offline_stats(self) -> tuple[int, str]:
+        """仅采集场次的逐字稿条数与最后一句；3 秒缓存。"""
+        now = time.monotonic()
+        if now - self._offline_at < 3.0:
+            return self._offline_n, self._offline_last
+        try:
+            conn = store.connect()
+            try:
+                row = conn.execute(
+                    "SELECT COUNT(*) AS n, "
+                    " (SELECT text FROM utterances WHERE session_id=? "
+                    "  ORDER BY t_end DESC LIMIT 1) AS last "
+                    "FROM utterances WHERE session_id=?", (self.id, self.id)).fetchone()
+                self._offline_n = int(row["n"] or 0) if row else 0
+                self._offline_last = str((row["last"] or "") if row else "")[:60]
+                self._offline_at = now
+            finally:
+                conn.close()
+        except Exception:
+            # 查询失败不能影响采集状态；沿用上一次的值。
+            traceback.print_exc()
+        return self._offline_n, self._offline_last
+
     def status(self) -> dict:
         asr = {} if self.capture_only else POOL.session_stats(self.id)
+        offline_n, offline_last = ((0, "") if not self.capture_only
+                                   else self._offline_stats())
         with self.lock:
             rows = list(self.utts)
             c = self.clusters
@@ -1482,7 +1512,11 @@ class LiveSession:
                 "speech_s": round(min(self.speech_s, self.total_samples / SAMPLE_RATE), 1),
                 # 仅采集没有 VAD：「有声」= 非全零音频的累计时长。
                 "audible_s": round(min(self.audible_s, self.total_samples / SAMPLE_RATE), 1),
-                "n_utterances": self.n_utts,
+                "n_utterances": offline_n if self.capture_only else self.n_utts,
+                # 仅采集的逐字稿在库里，不在 self.utts；飞书状态靠这一行显示
+                # 「最后一句」，否则只能看到录音时长，像是一直没出字。
+                "last_line": (offline_last if self.capture_only
+                              else (rows[-1]["text"][:60] if rows else "")),
                 "level": round(self.level, 5),
                 "idle_s": round(max(0.0, self.total_samples / SAMPLE_RATE - self.last_speech_s), 1),
                 # 连续全零音频的时长：流没断但内容已经空了。和 idle_s（没人声）是
@@ -2023,7 +2057,10 @@ def list_active() -> list[dict]:
             n = len(s.utts)
         st["n_recent_utts"] = n
         st["pushed"] = getattr(s, "pushed", 0)
-        st["last_line"] = last
+        # 仅采集的逐字稿在库里，status() 已经查过；内存里没有 utts，
+        # 不能拿空字符串把它覆盖掉。
+        if last:
+            st["last_line"] = last
         out.append(st)
     out.sort(key=lambda x: str(x.get("started_at") or ""))
     return out

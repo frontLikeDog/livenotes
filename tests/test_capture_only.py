@@ -96,6 +96,22 @@ def test_capture_only_records_without_models(db, no_models):
     assert not live.is_active(sid)
 
 
+def test_capture_only_status_sees_offline_transcript(db, no_models):
+    """离线进程把字写进库后，采集进程的状态也要能看见。"""
+    out = live.start("离线补字", capture_only=True)
+    sid = out["session_id"]
+    live.feed(sid, _pcm(1.0, 1200))
+    _wait_until(lambda: live._SESSIONS[sid].total_samples >= SR)
+    store.insert_utterances(db, [{
+        "session_id": sid, "t_start": 0.0, "t_end": 1.0,
+        "speaker_id": "SPK_00", "speaker_label": "说话人", "text": "离线补出来的一句",
+    }])
+    st = live.status(sid)
+    assert st["n_utterances"] == 1
+    assert st["last_line"] == "离线补出来的一句"
+    live.stop(sid, finalize=False)
+
+
 def test_capture_only_reader_says_recording_only(db, no_models):
     """回放页要能分清「没转写」和「转写失败」。"""
     from app import reader

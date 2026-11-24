@@ -615,7 +615,7 @@
         S.asking = false;
         return;
       }
-      if (d.state === 'ready' || d.state === 'no_result') {
+      if (d.state === 'ready' || d.state === 'no_result' || d.state === 'failed') {
         showAnswer(box, d, question);
         return;
       }
@@ -640,7 +640,7 @@
       }
       api('/api/qa/answer?id=' + encodeURIComponent(id)).then(function (d) {
         if (seq !== S.seq) return;
-        if (d.state === 'ready' || d.state === 'no_result') {
+        if (d.state === 'ready' || d.state === 'no_result' || d.state === 'failed') {
           showAnswer(box, d, question);
           return;
         }
@@ -658,6 +658,14 @@
     box.innerHTML = '';
     var kicker = document.createElement('div');
     kicker.className = 'sp-answer-kicker';
+    if (data.state === 'failed') {
+      kicker.textContent = '没答成';
+      box.appendChild(kicker);
+      var fail = document.createElement('p');
+      fail.textContent = data.error || '模型没有生成可用回答。请稍后重试。';
+      box.appendChild(fail);
+      return;
+    }
     if (data.state === 'no_result') {
       kicker.textContent = '没有找到直接相关的内容';
       box.appendChild(kicker);
@@ -667,8 +675,7 @@
       return;
     }
     var cites = data.citations || [];
-    kicker.textContent = '问笔记 · ' + cites.length + ' 条出处' +
-      (data.engine === 'extractive' ? ' · 本地摘录' : '');
+    kicker.textContent = '问笔记 · ' + cites.length + ' 条出处';
     box.appendChild(kicker);
     var answer = document.createElement('p');
     answer.textContent = data.answer || '';

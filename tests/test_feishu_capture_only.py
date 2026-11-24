@@ -40,6 +40,60 @@ def test_console_text_capture_only_has_audible():
     assert "0 句" not in out
 
 
+def test_capture_only_after_offline_transcript_shows_count():
+    r = {"elapsed": 125, "audible_s": 120, "n_utterances": 3,
+         "capture_only": True}
+    assert "补转写 3 句" in fb._capture_bits(r)
+    assert "仅录制" not in fb._capture_bits(r)
+
+    sess = {"capture_only": True, "elapsed": 125.0, "audible_s": 120.0,
+            "n_utterances": 3, "last_line": "这是补出来的一句",
+            "last_chunk_ago_s": 0.2, "running": True}
+    out = fb._status_one(_room(), sess, None)
+    assert "补转写 3 句" in out
+    assert "最后一句 这是补出来的一句" in out
+
+
+def test_console_card_shows_summary_after_offline_transcript():
+    data = {"rooms": [{
+        "room_id": "rm1", "ch": "CH01", "name": "语音厅", "room_state": "live",
+        "session_id": "S1", "elapsed": 125, "audible_s": 120,
+        "capture_only": True, "n_utterances": 3,
+    }]}
+    card = fb._console_card(data)
+    text = str(card)
+    assert "brief_summary" in text and "brief_topics" in text
+    assert "补转写 3 句" in text
+
+
+def test_public_base_rejects_private_ip(monkeypatch):
+    monkeypatch.setattr(fb.lan, "base_url",
+                        lambda: "http://172.24.4.219:46535")
+    assert fb._public_base() == ""
+    monkeypatch.setattr(fb.lan, "base_url",
+                        lambda: "http://39.106.210.20:46535")
+    assert fb._public_base() == "http://39.106.210.20:46535"
+
+
+def test_summary_hides_private_reader_links(monkeypatch):
+    monkeypatch.setattr(fb, "CAPTURE_ONLY", True)
+    monkeypatch.setattr(fb, "_public_base", lambda: "")
+    data = {
+        "room": {"ch": "CH01"},
+        "coverage": {"t_to": 60, "included": 3},
+        "overview": "概述",
+        "points": [{
+            "title": "话题", "gist": "要点", "t_from": 1, "t_to": 2,
+            "evidence": [{"quote": "原话",
+                          "reader_url": "http://172.24.4.219:46535/live?t=1"}],
+        }],
+    }
+    text = fb._summary_text(data)
+    assert "172.24.4.219" not in text
+    assert "原话" in text
+    assert "/分享 CH01 90秒" in text
+
+
 def test_cmd_retry_requeues_stopped_room(monkeypatch):
     calls = []
 

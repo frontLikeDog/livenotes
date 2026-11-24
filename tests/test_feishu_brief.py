@@ -410,7 +410,7 @@ def test_summary_cached_dry_sends_without_confirm(monkeypatch, bot):
     assert fb._LAST_BRIEF["ou"]["kind"] == "summary"
 
 
-def test_summary_without_llm_generates_extractive(monkeypatch, bot):
+def test_summary_without_llm_reports_error_not_extractive(monkeypatch, bot):
     room = _room()
     calls: list = []
 
@@ -418,17 +418,17 @@ def test_summary_without_llm_generates_extractive(monkeypatch, bot):
         calls.append(dict(params))
         if params.get("dry"):
             return {"ok": True, "cached": False, "would_use_llm": False, "rows": 12}
-        return _summary_payload()
+        return {"ok": False, "error": {
+            "code": "llm_not_configured",
+            "message": "还没配置大模型。未使用本地抽取"}}
 
     monkeypatch.setattr(fb, "_brief_api", api)
-    sent: list = []
-    monkeypatch.setattr(fb, "_send_card_target",
-                        lambda card, text, oid, cid="", ctype="p2p":
-                        sent.append(text) or True)
     fb._summary_worker(room, "ou")
     assert len(calls) == 2
     assert calls[1].get("refresh") == 0
-    assert sent and not fb._BRIEF_PENDING
+    assert any("未使用本地抽取" in text for _, text in bot.texts)
+    assert not bot.cards
+    assert not fb._BRIEF_PENDING
 
 
 def test_summary_skip_confirm_generates_without_card(monkeypatch, bot):
