@@ -21,8 +21,9 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from . import (analysis, analysis_job, audio, cards, claims, classify, coach,
                config, copy, delivery, diagnostics, export, feishu_drive,
-               feedback, follows, glossary, highlight, lan, live, livebrief,
-               llm, logs, metrics, notes, notify, polish, profile, qa, qr,
+               feedback, follows, glossary, highlight, identity, lan, live,
+               livebrief, liveprobe, llm, logs, metrics, naming, notes, notify,
+               polish, profile, qa, qr,
                reader, rooms, roundtable, runtime, scheduler, seed_demo,
                settings, share, store, tasks, timefmt, titles, voiceprint,
                webroot, weekly)
@@ -149,6 +150,58 @@ def _record_capture_event(rid: str, ev: dict) -> None:
                            engine=str(ev.get("engine") or ""))
     except Exception:
         traceback.print_exc()
+
+
+def _preresolve_room(rid: str, url: str) -> None:
+    """加房间后后台把分享短链落到 live.douyin.com/<web_rid>，写回 resolved_url。
+
+    短链跳转是采集链上最容易超时的一跳。入库时解析一次，之后启动、重试、
+    自愈都直接用稳定的房号页；这里失败也不影响加房间本身，采集端第一次
+    启动仍会按原链接解析。
+    """
+    try:
+        target = liveprobe.canonical_douyin_url(url, timeout=8.0)
+        if not target:
+            return
+        room = rooms.get(rid)
+        if not room or str(room.get("resolved_url") or "").strip():
+            return
+        rooms.update(rid, resolved_url=target)
+        logs.log_event("rooms.preresolve", room_id=rid, resolved_url=target)
+    except Exception:
+        # 预解析只是优化：失败就维持原样，绝不能把加房间弄挂。
+        pass
+
+
+def preresolve_pending_rooms() -> list[tuple[str, str]]:
+    """启动时补一次预解析：还没有 resolved_url 的抖音房间各排一个后台任务。
+
+    这些房间多半是在「入库预解析」之前加的，或者加房间时网络抖了没解析成。
+    补上之后，重试/自愈直接走稳定的房号页，不再赌短链那一跳。返回排进
+    后台的 (房间 id, 原链接)，方便测试断言。
+    """
+    scheduled: list[tuple[str, str]] = []
+    try:
+        for room in rooms.list_rooms():
+            url = str(room.get("url") or "")
+            rid = str(room.get("id") or "")
+            if (not rid or str(room.get("resolved_url") or "").strip()
+                    or not liveprobe.is_douyin(url)):
+                continue
+            scheduled.append((rid, url))
+    except Exception:
+        # 列表读到一半出错也把已经拿到的房间排上：它们的预解析仍然有效。
+        pass
+    # 一个后台线程顺序补，不按房间数量无上限开线程：云端节点恢复时可能
+    # 一次挂几十个房间，每个都开线程去撞抖音跳转反而更容易一起超时。
+    def _run() -> None:
+        for rid, url in scheduled:
+            _preresolve_room(rid, url)
+
+    if scheduled:
+        threading.Thread(target=_run, daemon=True,
+                         name="rooms-preresolve").start()
+    return scheduled
 
 
 def _move_audio(sid: str, to_trash: bool) -> None:
@@ -666,7 +719,10 @@ def _mark_session_quality(rows: list[dict]) -> list[dict]:
         s["is_demo"] = sid.startswith("DEMO_") or s.get("source_mode") == "demo"
         duration = float(s.get("duration_s") or 0)
         n = int(s.get("n_utterances") or 0)
-        empty = duration <= 5 or (n == 0 and duration < 60)
+        # 仅采集本来就没有逐字稿，不能拿 n==0 判「空采集」；只有真的没录到
+        # 时长（duration<=5）才算空，否则刚录的短片会被默认勾进清理候选。
+        empty = duration <= 5 or (n == 0 and duration < 60
+                                  and not s.get("capture_only"))
         dup = duplicate_of.get(sid, "")
         reason = []
         if empty:
@@ -984,6 +1040,9 @@ class Handler(BaseHTTPRequestHandler):
         conn = store.connect()
         try:
             claim = claims.get(conn, cid) if cid else None
+            ref = (identity.claim_ref(
+                claim, identity.roster(conn, str(claim.get("session_id") or "")))
+                if claim else None)
         finally:
             conn.close()
         if not claim:
@@ -994,7 +1053,7 @@ class Handler(BaseHTTPRequestHandler):
         metrics.METRICS.inc("p1.claim_page_open")
         logs.log_event("share.claim_page", claim_id=cid,
                        session_id=str(claim.get("session_id") or ""))
-        return self._bytes(cards.claim_page(claim).encode("utf-8"),
+        return self._bytes(cards.claim_page(claim, ref).encode("utf-8"),
                            "text/html; charset=utf-8")
 
     def _person_card(self, q: dict) -> None:
@@ -1177,6 +1236,11 @@ p{font-size:14px;line-height:1.75;margin:8px 0}
             snap = metrics.build_snapshot()
             return self._json({"metrics": snap.get("counters") or {},
                                "events": store.list_metric_events(limit=20)})
+        if p == "/api/product/health":
+            # 产品指标：top 3 命名率 / 可分享内容产出率，不再看全员标注率。
+            # days=0 是「不限时间」，不能被 `or 30` 吃掉。
+            return self._json(naming.product_health(
+                conn, int(_num(q.get("days"), 30))))
         if p == "/api/metrics":
             return self._get_metrics(q)
         if p == "/api/metrics/events":
@@ -1258,6 +1322,13 @@ p{font-size:14px;line-height:1.75;margin:8px 0}
             if not sid:
                 return self._json({"error": "缺少 session_id"}, 400)
             return self._json({"speakers": store.speaker_totals(conn, sid)})
+        if p == "/api/sessions/top_speakers":
+            sid = str(q.get("session_id") or q.get("id") or "")
+            if not sid:
+                return self._json({"error": "缺少 session_id"}, 400)
+            out = naming.top_speakers(conn, sid,
+                                      int(_num(q.get("limit"), 5) or 5))
+            return self._json(out, 200 if out.get("ok") else 404)
         if p == "/api/timeline":
             bucket = int(_num(q.get("bucket"), 300) or 300)
             return self._json({"bucket": bucket,
@@ -1318,9 +1389,12 @@ p{font-size:14px;line-height:1.75;margin:8px 0}
                         has_recording=_has_recording(conn, sid))
                     if upd:
                         rows[i] = upd
+            prefs = settings.prefs()
             return self._json({"rooms": rows,
                                "capture": {
                                    "direct_fallback": settings.direct_fallback()["mode"],
+                                   "direct_quality": prefs.get("direct_quality") or "low",
+                                   "traffic_exact": bool(prefs.get("traffic_exact")),
                                }})
         if p == "/api/capture/status":
             # 采集代理心跳：浏览器到底还在不在，不靠房间状态推
@@ -2089,6 +2163,13 @@ p{font-size:14px;line-height:1.75;margin:8px 0}
                                           str(b.get("name") or ""))
             except ValueError as e:
                 return self._json({"error": str(e)}, 400)
+            if (not str(room.get("resolved_url") or "").strip()
+                    and liveprobe.is_douyin(room.get("url") or "")):
+                # 后台解析，不阻塞加房间：短链抖一下就等它自己补上。
+                threading.Thread(target=_preresolve_room,
+                                 args=(str(room.get("id") or ""),
+                                       str(room.get("url") or "")),
+                                 daemon=True).start()
             return self._json({"room": room, "created": created},
                               201 if created else 200)
         if p == "/api/rooms/rename":
@@ -2360,6 +2441,11 @@ p{font-size:14px;line-height:1.75;margin:8px 0}
                 mode = str(b.get("source_mode") or "tab").strip().lower()
                 if mode not in SOURCE_MODE_META:
                     mode = "tab"
+                # 仅采集：不传就跟全局 LIVENOTES_CAPTURE_ONLY 走；传了逐场覆盖。
+                co_raw = b.get("capture_only", None)
+                capture_only = None if co_raw is None else (
+                    bool(co_raw) if isinstance(co_raw, bool)
+                    else str(co_raw).strip().lower() in ("1", "true", "yes", "on"))
                 room_id = str(b.get("room_id") or "").strip()
                 # 同一路重复 start 只认已有会话：桌面壳恢复采集、采集页刷新、
                 # 用户连点两次「开始听」，都不该再产生一个同标题双胞胎。
@@ -2375,7 +2461,12 @@ p{font-size:14px;line-height:1.75;margin:8px 0}
                                 return self._json(st, 200)
                             except live.LiveError:
                                 pass
-                    out = live.start(str(b.get("title") or ""), source_mode=mode)
+                    start_kw = {"source_mode": mode}
+                    if capture_only is not None:
+                        # 不传时让 live.start 跟全局 LIVENOTES_CAPTURE_ONLY 走；
+                        # 也不给老调用方的 monkeypatch/包装函数塞新关键字。
+                        start_kw["capture_only"] = capture_only
+                    out = live.start(str(b.get("title") or ""), **start_kw)
                     if room_id and rooms.get(room_id):
                         rooms.update(room_id, session_id=out["session_id"])
                         out["room_id"] = room_id
@@ -2448,6 +2539,10 @@ p{font-size:14px;line-height:1.75;margin:8px 0}
             return self._json(live.cancel(str(b.get("session_id") or "")))
         if p == "/api/analysis/start":
             sid = str(b.get("session_id") or "")
+            sess = store.get_session(conn, sid) or {}
+            if int(sess.get("capture_only") or 0):
+                return self._json({"error": "这一场是仅采集，没有逐字稿可分析",
+                                   "capture_only": True}, 400)
             try:
                 return self._json(analysis_job.start(conn, sid, str(b.get("kind") or "full")))
             except RuntimeError as e:
@@ -2456,6 +2551,10 @@ p{font-size:14px;line-height:1.75;margin:8px 0}
             return self._json(analysis_job.cancel(conn, str(b.get("session_id") or "")))
         if p == "/api/summarize/estimate":
             sid = str(b.get("session_id") or "")
+            sess = store.get_session(conn, sid) or {}
+            if int(sess.get("capture_only") or 0):
+                return self._json({"error": "这一场是仅采集，没有逐字稿可总结",
+                                   "capture_only": True}, 400)
             f = parse_filters(b.get("filters") or {})
             f["session_id"] = sid
             try:
@@ -2477,6 +2576,11 @@ p{font-size:14px;line-height:1.75;margin:8px 0}
             # 客户端没表态时按 true 兜底，别因为少传一个字段就把不可信片段算进去。
             if "exclude_overlap" not in raw_f:
                 f["exclude_overlap"] = True
+            # 仅采集场次没有逐字稿：不排队、不打模型，直接告诉用户为什么。
+            sess = store.get_session(conn, sid) or {}
+            if int(sess.get("capture_only") or 0):
+                return self._json({"error": "这一场是仅采集，没有逐字稿可总结",
+                                   "capture_only": True}, 400)
             try:
                 # 入全局队列：重复点击/下播自动总结会命中同一指纹，不产生第二次调用。
                 job = tasks.submit_summary(sid, f, str(b.get("mode") or "content"),
@@ -2799,9 +2903,50 @@ p{font-size:14px;line-height:1.75;margin:8px 0}
             except live.LiveError as e:
                 return self._json({"error": str(e)}, 400)
         if p == "/api/speakers/rename":
-            store.rename_speaker(conn, b["session_id"], b["speaker_id"], str(b["name"])[:40])
-            live.note_rename(b["session_id"], b["speaker_id"], str(b["name"])[:40])
-            return self._json({"ok": True, "meta": store.get_meta(conn, b["session_id"])})
+            sid = str(b.get("session_id") or "")
+            spk = str(b.get("speaker_id") or "")
+            nm = str(b.get("name") or "")[:40]
+            if not nm:
+                return self._json({"error": "名字不能为空"}, 400)
+            if naming.is_usable_name(nm):
+                # 主界面和桌面端还在调这个老接口：真人名不能只改显示名，
+                # 还要注册声纹、清掉旧猜测并重建观点归属；否则换个人名，
+                # 名单和观点卡仍挂着上一个身份。
+                out = naming.name_speaker(conn, sid, spk, nm)
+                if out.get("ok"):
+                    live.note_rename(sid, spk, out["name"], enroll=False)
+                return self._json({"ok": bool(out.get("ok")),
+                                   "error": out.get("error", ""),
+                                   "meta": (store.get_meta(conn, sid)
+                                            if out.get("ok") else None),
+                                   "speaker": out},
+                                  200 if out.get("ok") else 400)
+            # 角色标签（主播/嘉宾1）只改本场显示，不注册声纹。
+            store.rename_speaker(conn, sid, spk, nm)
+            row = conn.execute(
+                "SELECT person_state FROM speakers WHERE session_id=?"
+                " AND speaker_id=?", (sid, spk)).fetchone()
+            if row and str(row["person_state"] or "") == "cand":
+                # 用户明确标成角色，旧的「阿哲（疑似）」不该继续盖住它。
+                store.set_speaker_person(conn, sid, spk, None, state="")
+            live.note_rename(sid, spk, nm)
+            return self._json({"ok": True, "meta": store.get_meta(conn, sid)})
+        if p == "/api/speakers/name":
+            sid = str(b.get("session_id") or "")
+            spk = str(b.get("speaker_id") or "")
+            out = naming.name_speaker(conn, sid, spk, str(b.get("name") or ""),
+                                      str(b.get("person_id") or ""))
+            if out.get("ok"):
+                # 声纹已经由 naming 注册过；这里只同步直播内存里的字幕/标签，
+                # 不能再 enroll 一次。
+                live.note_rename(sid, spk, out["name"], enroll=False)
+                metrics.METRICS.inc("p1.speaker_name", session_id=sid)
+                if out.get("enrolled"):
+                    metrics.METRICS.inc("p1.speaker_name_enrolled", session_id=sid)
+                logs.log_event("naming.speaker_named", session_id=sid,
+                               speaker_id=spk, name=out["name"],
+                               enrolled=bool(out.get("enrolled")))
+            return self._json(out, 200 if out.get("ok") else 400)
         if p == "/api/persons/rematch":
             sid = str(b.get("session_id") or "")
             if sid:

@@ -146,7 +146,11 @@ import { openDetail, openDiag, renderDetail, renderDiag } from './detail.js';
     const meta = [];
     if(r.session){
       meta.push("已录 <b>"+fmt(r.session.elapsed)+"</b>");
-      meta.push("<b>"+num(r.session.n_utterances)+"</b> 句");
+      if(r.session.capture_only){
+        if(r.session.audible_s!=null) meta.push("有声 <b>"+fmt(r.session.audible_s)+"</b>");
+      }else{
+        meta.push("<b>"+num(r.session.n_utterances)+"</b> 句");
+      }
       if(num(r.session.dropped)) meta.push("丢 <b>"+num(r.session.dropped)+"</b> 块");
     } else if(r.state==="failed"){
       meta.push("受阻于<b>"+esc(stageLabel(r))+"</b>");
@@ -164,7 +168,8 @@ import { openDetail, openDiag, renderDetail, renderDiag } from './detail.js';
 
     const acts = [];
     if(isListening(r)){
-      acts.push('<button class="act primary" data-act="live" data-id="'+r.id+'">实时字幕</button>');
+      acts.push('<button class="act primary" data-act="live" data-id="'+r.id+'">'
+        +(r.session&&r.session.capture_only?'录音详情':'实时字幕')+'</button>');
       acts.push('<button class="act" data-act="reader" data-id="'+r.id+'">回放</button>');
     } else if(r.state==="stopped"){
       if(r.sessionId) acts.push('<button class="act primary" data-act="reader" data-id="'+r.id+'">回放</button>');
@@ -249,14 +254,17 @@ import { openDetail, openDiag, renderDetail, renderDiag } from './detail.js';
       const nm = r.name || "（未命名）";
       const eng = engineLabel(r);
       let meta = (eng?eng+" · ":"") + (r.url || "");
-      if(r.session) meta = "已录 "+fmt(r.session.elapsed)+" · "+num(r.session.n_utterances)+" 句 · "+meta;
+      if(r.session) meta = "已录 "+fmt(r.session.elapsed)+" · "+(r.session.capture_only
+        ? "仅录制"+(!r.session.audible_s?"":" · 有声 "+fmt(r.session.audible_s))
+        : num(r.session.n_utterances)+" 句")+" · "+meta;
       else if(r.state==="stopped") meta = (r.hasRecording ? "录音已保存" : "没有录到音频") + " · " + meta;
       const tr = r.traffic;
       if(tr && num(tr.platform_mb_per_hour) > 0){
         meta += " · ↓" + Math.round(num(tr.platform_mb_per_hour)) + " MB/h";
       }
       const acts = [];
-      if(isListening(r)) acts.push('<a href="/live?session='+encodeURIComponent(r.sessionId||"")+'">实时字幕</a>');
+      if(isListening(r)) acts.push('<a href="/live?session='+encodeURIComponent(r.sessionId||"")+'">'
+        +(r.session&&r.session.capture_only?'录音详情':'实时字幕')+'</a>');
       if(r.sessionId) acts.push('<a href="/reader?session='+encodeURIComponent(r.sessionId)+'">回放</a>');
       if(r.state==="failed" && r.switchReady) acts.push('<button data-lact="switch" data-id="'+r.id+'">切换浏览器</button>');
       if(r.state==="failed" || r.state==="stopped" || (r.state==="live" && !isListening(r))) acts.push('<button data-lact="retry" data-id="'+r.id+'">'+(r.state==="failed"&&r.switchReady?"重试直取":"重试")+'</button>');

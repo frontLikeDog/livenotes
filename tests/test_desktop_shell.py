@@ -78,6 +78,17 @@ def test_hud_multi_switch_back_preserves_room():
     assert "$('#hudMulti').onclick = () => backToMulti();" in js
 
 
+def test_capture_quality_and_traffic_settings_are_wired():
+    """设置页新增两项：控件在 DOM 里、渲染时会填值、改动会保存。"""
+    html = _read("shell.html")
+    js = _read("shell.js")
+    for i in ("prefDirectQuality", "prefTrafficExact"):
+        assert 'id="%s"' % i in html, i
+        assert "#%s" % i in js, i
+    assert "savePref('direct_quality'" in js
+    assert "savePref('traffic_exact'" in js
+
+
 def test_shell_js_parses():
     node = shutil.which("node")
     if not node:

@@ -34,7 +34,8 @@ sys.path.insert(0, str(ROOT))
 
 from app import (clips, feishu, lan, profile, report, share, store, timefmt,
                  watchlink)  # noqa: E402
-from app.config import BASE_URL, LIVE_STALL_WARN_S, PORT  # noqa: E402
+from app.config import (BASE_URL, CAPTURE_ONLY, LIVE_STALL_WARN_S,  # noqa: E402
+                        PORT)
 
 MAX_ROOMS = watchlink.MAX_ROOMS
 
@@ -128,6 +129,36 @@ def _hms(sec) -> str:
     sec = max(0, int(float(sec or 0)))
     h, m, s = sec // 3600, (sec % 3600) // 60, sec % 60
     return ("%d:%02d:%02d" % (h, m, s)) if h else ("%d:%02d" % (m, s))
+
+
+_LOOPBACK_RE = re.compile(
+    r"^https?://(?:127\.0\.0\.1|localhost|0\.0\.0\.0)(?::\d+)?(?:/|$)", re.I)
+
+
+def _public_base() -> str:
+    """给手机点的链接必须是非回环地址；云端节点只绑 127.0.0.1 时返回空串。"""
+    base = (lan.base_url() or "").rstrip("/")
+    return "" if not base or _LOOPBACK_RE.match(base + "/") else base
+
+
+def _play_hint(room: dict) -> str:
+    """场次结束后的回听入口：有公网页面给链接，没有就让用户发 /分享。"""
+    base = _public_base()
+    sid = str(room.get("session_id") or "")
+    if base and sid:
+        return "回放：%s/reader?session=%s" % (base, sid)
+    if CAPTURE_ONLY:
+        return "听这一段：发 /分享 %s 90秒" % _ch(room)
+    return "回放：%s/reader?session=%s" % (lan.base_url(), sid)
+
+
+def _live_hint(room: dict) -> str:
+    base = _public_base()
+    if base:
+        return "看实时：%s/live" % base
+    if CAPTURE_ONLY:
+        return "听这一段：发 /分享 %s 90秒" % _ch(room)
+    return "看实时：%s/live" % lan.base_url()
 
 
 def _span(p: dict) -> str:
@@ -480,18 +511,31 @@ def _status_one(r: dict, sess: dict | None, cap: dict | None) -> str:
         lines.append("  录音：%s" % ("已保存" if r.get("has_recording") else "没有录到"))
         sid = str(r.get("session_id") or "")
         if sid:
-            lines.append("  回放：%s/reader?session=%s" % (lan.base_url(), sid))
+            lines.append("  " + _play_hint(r))
         return "\n".join(lines)
 
     sid = str(r.get("session_id") or "")
     if sid and not sess:
         lines.append("  会话丢失：服务可能刚重启，或采集页已关闭。")
         if r.get("has_recording"):
-            lines.append("  历史录音还在：%s/reader?session=%s" % (lan.base_url(), sid))
+            lines.append("  " + _play_hint(r))
         return "\n".join(lines)
 
     if not sess:
         lines.append("  还没有会话，等采集端建会话。")
+    elif sess.get("capture_only"):
+        # 仅采集：没有逐字稿，「0 句」和「还没有字幕」都会让人以为出故障了。
+        lines.append("  已录 %s · 有声 %s · 仅录制%s" % (
+            _hms(sess.get("elapsed")), _hms(sess.get("audible_s")),
+            " · 已暂停" if sess.get("paused") else ""))
+        if chunk is None:
+            lines.append("  最近一块音频：—")
+        else:
+            broken = state == "live" and float(chunk) >= LIVE_STALL_WARN_S
+            lines.append("  最近一块音频：%s%s" % (_ago(chunk), "  ⚠️ 断流" if broken else ""))
+        eng = str(r.get("capture_engine") or "")
+        if eng:
+            lines.append("  采集：%s" % _ENGINES.get(eng, eng))
     else:
         lines.append("  已录 %s · %s 句%s" % (
             _hms(sess.get("elapsed")), int(sess.get("n_utterances") or 0),
@@ -1034,8 +1078,13 @@ def cmd_replay(rest: str, open_id: str = "", chat_id: str = "",
     minutes = str(s.get("minutes_url") or "")
     if minutes:
         return "🎧 %s 整场回听（妙记）：\n%s" % (_ch(room), minutes)
+    base = _public_base()
+    if CAPTURE_ONLY and not base:
+        return ("🎧 %s 在云端，没有公网页面，手机打不开网页回放。\n"
+                "发 /分享 %s 90秒 听最近一段，或 /分享包 %s 下载整场。"
+                % (_ch(room), _ch(room), _ch(room)))
     link = ("%s/live?session=%s" if room.get("state") in _ACTIVE
-            else "%s/reader?session=%s") % (lan.base_url(), sid)
+            else "%s/reader?session=%s") % (base or lan.base_url(), sid)
     return ("🎧 %s 回听：\n%s\n"
             "这是局域网地址，转发给别人打不开；外发请先在妙记上传 /分享包，"
             "再发 /妙记 %s <链接>。" % (_ch(room), link, _ch(room)))
@@ -1310,8 +1359,12 @@ def _console_card(data: dict) -> dict:
                                    _md_safe(r.get("name") or ""),
                                    _status_icon(r.get("room_state")))]
         if r.get("elapsed") is not None:
-            bits.append("已录 %s · %s 句" % (_hms(r.get("elapsed")),
-                                            int(r.get("n_utterances") or 0)))
+            if r.get("capture_only"):
+                bits.append("已录 %s · 有声 %s · 仅录制" % (
+                    _hms(r.get("elapsed")), _hms(r.get("audible_s"))))
+            else:
+                bits.append("已录 %s · %s 句" % (_hms(r.get("elapsed")),
+                                                int(r.get("n_utterances") or 0)))
         if r.get("last_line"):
             bits.append("最后一句 %s" % _md_safe(str(r["last_line"])[:36]))
         if r.get("capture_engine"):
@@ -1321,17 +1374,22 @@ def _console_card(data: dict) -> dict:
             bits.append("⚠️ 断流 %s" % _ago(r.get("last_chunk_ago_s")))
         elements.append({"tag": "div",
                          "text": {"tag": "lark_md", "content": "\n".join(bits)}})
-        acts = [_btn("状态", {"act": "brief_status", "room": r.get("room_id")}),
-                _btn("近10分钟", {"act": "brief_topics", "room": r.get("room_id"),
-                                "minutes": 10}),
-                _btn("总结", {"act": "brief_summary", "room": r.get("room_id"),
-                             "confirm": 1}, True)]
+        acts = [_btn("状态", {"act": "brief_status", "room": r.get("room_id")})]
+        if not r.get("capture_only"):
+            # 仅采集没有逐字稿：近聊/总结只会得到「窗口内还没有可用字幕」。
+            acts += [_btn("近10分钟", {"act": "brief_topics", "room": r.get("room_id"),
+                                      "minutes": 10}),
+                     _btn("总结", {"act": "brief_summary", "room": r.get("room_id"),
+                                  "confirm": 1}, True)]
         if r.get("session_id"):
             acts.append(_btn("分享90秒", {"act": "share_clip",
                                          "room": r.get("room_id"), "seconds": 90}))
-            acts.append({"tag": "button", "type": "default",
-                         "text": {"tag": "plain_text", "content": "回听"},
-                         "url": "%s/reader?session=%s" % (lan.base_url(), r["session_id"])})
+            base = _public_base()
+            if base or not CAPTURE_ONLY:
+                acts.append({"tag": "button", "type": "default",
+                             "text": {"tag": "plain_text", "content": "回听"},
+                             "url": "%s/reader?session=%s" % (
+                                 base or lan.base_url(), r["session_id"])})
         elements.append({"tag": "action", "actions": acts})
     if not elements:
         elements.append({"tag": "div", "text": {"tag": "lark_md",
@@ -1364,8 +1422,12 @@ def _console_text(data: dict) -> str:
         line = "%s %s  %s" % (r.get("ch") or "CH—", r.get("name") or "",
                               _status_icon(r.get("room_state")))
         if r.get("elapsed") is not None:
-            line += " · 已录 %s · %s 句" % (_hms(r.get("elapsed")),
-                                           int(r.get("n_utterances") or 0))
+            if r.get("capture_only"):
+                line += " · 已录 %s · 有声 %s · 仅录制" % (
+                    _hms(r.get("elapsed")), _hms(r.get("audible_s")))
+            else:
+                line += " · 已录 %s · %s 句" % (_hms(r.get("elapsed")),
+                                               int(r.get("n_utterances") or 0))
         if r.get("stalled"):
             line += " · ⚠️ 断流"
         lines.append(line)
@@ -1400,8 +1462,14 @@ def _room_session_bits(room: dict, sessions: dict[str, dict]) -> list[str]:
         return []
     bits: list[str] = []
     if s.get("elapsed") is not None:
-        bits.append("已录 %s · %s 句" % (_hms(s.get("elapsed")),
-                                        int(s.get("n_utterances") or 0)))
+        if s.get("capture_only"):
+            bits.append("已录 %s · 有声 %s · 仅录制" % (
+                _hms(s.get("elapsed")), _hms(s.get("audible_s"))))
+        else:
+            bits.append("已录 %s · %s 句" % (_hms(s.get("elapsed")),
+                                            int(s.get("n_utterances") or 0)))
+    if s.get("capture_only"):
+        return bits
     last = str(s.get("last_line") or "")
     if not last:
         utts = s.get("utterances") or []
@@ -1951,6 +2019,34 @@ def _brief_action(act: str, value: dict, open_id: str, chat_id: str = "",
                         refresh=True, confirmed=True)
 
 
+def cmd_retry(arg: str) -> str:
+    """把一路重新排队：下播后再开播、或采集失败时，手机上唯一的恢复入口。"""
+    rooms = _rooms()
+    if not rooms:
+        return "现在没有房间。贴一个直播间链接给我。"
+    arg = (arg or "").strip()
+    if arg:
+        room = _resolve_room(rooms, arg)
+        if not room:
+            return "没找到「%s」。\n%s" % (arg, cmd_rooms())
+        picked = [room]
+    else:
+        picked = [r for r in _ordered(rooms)
+                  if r.get("state") in ("stopped", "failed")]
+        if not picked:
+            return "现在没有停着的房间。\n" + cmd_rooms()
+        if len(picked) > 1:
+            return "停着 %d 路，用 /重试 CHxx 指定一路：\n%s" % (
+                len(picked), cmd_rooms())
+    room = picked[0]
+    if room.get("state") in ("live", "starting", "pending"):
+        return "%s 已经在跑（%s），不用重试。" % (_ch(room), _label(room))
+    _api("/api/rooms/state", {"id": room["id"], "state": "pending", "error": ""})
+    print("[重试] %s %s" % (room["id"], room.get("name") or ""), flush=True)
+    return ("已重新排队：%s %s\n采集代理会在几秒内重新取流；"
+            "好了我会发消息。" % (_ch(room), _label(room)))
+
+
 def cmd_stop(arg: str) -> str:
     rooms = _rooms()
     if not rooms:
@@ -2086,6 +2182,7 @@ def _help_text() -> str:
             "/控制台 一张卡片看所有房间和按钮\n"
             "/订阅 [分钟] /退订 定时把近聊摘要发给你\n"
             "/rooms 房间列表（带 CH 编号）\n"
+            "/重试 [CH] 重新拉起一路（下播后再开播用）\n"
             "/stop 1 或 /stop CH02 停掉一路\n"
             "/白名单 看过哪些站点被放行\n"
             "关注 FDE、OPC 给关键词加权\n"
@@ -2213,6 +2310,9 @@ def _route(t: str, low: str, open_id: str = "", chat_id: str = "",
 
     if t.startswith(("/rooms", "/房间", "/列表", "房间列表")):
         return cmd_rooms()
+    for verb in ("/重试", "/retry"):
+        if low.startswith(verb):
+            return cmd_retry(t[len(verb):].strip(" ：:"))
     for verb in ("/stop", "/停", "停掉"):
         if t.startswith(verb):
             return cmd_stop(t[len(verb):].strip(" ：:"))
@@ -2263,6 +2363,7 @@ def _watch_rooms() -> None:
     没有这条回执，他只能猜"到底听上了没有"。
     """
     seen: dict[str, str] = {}
+    interrupted_seen: set[str] = set()
     primed = False
     while True:
         try:
@@ -2272,25 +2373,36 @@ def _watch_rooms() -> None:
             continue
         for r in rooms:
             rid, st = str(r.get("id")), str(r.get("state"))
+            # 服务重启把在录的房间收口成「已中断」：不主动说一声，用户会以为
+            # 还在录。重试后 interrupted 清掉，下次再中断还能再报。
+            if r.get("interrupted"):
+                if rid not in interrupted_seen:
+                    interrupted_seen.add(rid)
+                    _notify("⚠️ 采集中断（服务重启）：%s\n发 /重试 %s 继续。"
+                            % (r.get("name") or "这个房间", _ch(r)))
+            else:
+                interrupted_seen.discard(rid)
             prev = seen.get(rid)
             seen[rid] = st
             if not primed or prev == st:
                 continue
             if st == "live" and prev != "live":
-                _notify("✅ 开好了：%s\n%s\n看实时：%s/live"
-                        % (r.get("name") or "这个房间", r.get("url") or "", lan.base_url()))
+                _notify("✅ 开好了：%s\n%s\n%s"
+                        % (r.get("name") or "这个房间", r.get("url") or "",
+                           _live_hint(r)))
             elif st == "failed" and prev != "failed":
                 _notify("⚠️ 没打开：%s\n原因：%s\n可能已下播，或链接不是直播间。"
-                        "把链接再发一次我就重试。"
-                        % (r.get("url") or "", r.get("error") or "采集端没给原因"))
+                        "发 /重试 %s 再拉一次。"
+                        % (r.get("url") or "", r.get("error") or "采集端没给原因",
+                           _ch(r)))
             elif (st == "stopped" and prev in ("live", "starting")
                   and r.get("auto_stopped")):
                 # 自动收尾（断流看门狗 / 采集代理判定已下播）：人已经睡了，
                 # 得说一声，不然早上只看到三个「已停止」，不知道是录完了还是断了一夜。
-                _notify("⚠️ 已自动收尾：%s\n原因：%s\n录音和逐字稿已经保存，可以回放：%s"
+                _notify("⚠️ 已自动收尾：%s\n原因：%s\n录音已保存；%s"
                         % (r.get("name") or "这个房间",
                            r.get("auto_stop_reason") or r.get("error") or "没收到音频块",
-                           lan.base_url()))
+                           _play_hint(r)))
         primed = True
         time.sleep(4)
 

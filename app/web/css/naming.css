@@ -1,0 +1,89 @@
+/* ==================================================================
+   按需补名面板：收尾页和分享前共用。
+   基础样式跟随笔记页的语义 token；收尾页固定在深色工作台里，单独覆盖。
+   ================================================================== */
+.ln-names[hidden]{display:none!important}
+
+.ln-names{
+  margin-top:14px;padding:12px 14px;border:1px solid var(--line,#2b333d);
+  border-radius:10px;background:var(--panel-2,#141920);color:var(--ink,#ece9e2);
+}
+.ln-names-loading{padding:6px 0;font-size:11.5px;color:var(--faint,#6e7885)}
+.ln-names-head{display:flex;align-items:flex-start;gap:10px}
+.ln-names-title{min-width:0;flex:1}
+.ln-names-title b{display:block;font-size:12.5px;font-weight:650;letter-spacing:.01em}
+.ln-names-title span{display:block;margin-top:2px;font-size:10.5px;color:var(--faint,#6e7885)}
+.ln-names-skip{
+  flex:none;padding:3px 8px;border:1px solid var(--line-2,#2b333d);border-radius:6px;
+  background:transparent;color:var(--faint,#6e7885);font-size:10.5px;cursor:pointer;
+}
+.ln-names-skip:hover{border-color:var(--amber-line,#5a4527);color:var(--amber,#e7b669)}
+.ln-names-list{display:grid;gap:0;margin-top:8px;max-height:300px;overflow:auto}
+.ln-name-row{padding:8px 0;border-top:1px solid var(--line,#1e242c)}
+.ln-name-row:first-child{border-top:0}
+.ln-name-main{display:flex;align-items:center;gap:9px;min-width:0}
+.ln-rank{
+  width:20px;height:20px;flex:none;display:inline-flex;align-items:center;justify-content:center;
+  border-radius:50%;border:1px solid var(--line-2,#2b333d);font:600 10px/1 var(--mono,monospace);
+  color:var(--amber,#e7b669);
+}
+.ln-name-who{min-width:0;flex:1}
+.ln-name-who b{display:block;font-size:12px;font-weight:600;line-height:1.35;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ln-name-who small{display:block;margin-top:1px;font-size:10px;color:var(--faint,#6e7885)}
+.ln-name-side{flex:none;display:flex;align-items:center;gap:6px}
+.ln-preview{
+  padding:3px 8px;border:1px solid var(--line-2,#2b333d);border-radius:99px;
+  background:transparent;color:var(--muted,#9aa4b0);font-size:10px;cursor:pointer;
+}
+.ln-preview:hover{border-color:var(--amber-line,#5a4527);color:var(--amber,#e7b669)}
+.ln-preview:disabled{opacity:.4;cursor:not-allowed}
+.ln-name-edit{display:flex;gap:6px;margin-top:6px;padding-left:29px;flex-wrap:wrap}
+.ln-name-input{
+  flex:1;min-width:110px;height:29px;padding:0 9px;border:1px solid var(--line-2,#2b333d);
+  border-radius:6px;background:var(--panel,#0f1318);color:var(--ink,#ece9e2);
+  font-size:11.5px;outline:none;
+}
+.ln-name-input:focus{border-color:var(--amber-line,#7b5c2c);box-shadow:0 0 0 2px var(--amber-soft,rgba(231,182,105,.12))}
+.ln-save{
+  height:29px;padding:0 11px;border:1px solid var(--amber-line,#7b5c2c);border-radius:6px;
+  background:var(--amber-soft,rgba(231,182,105,.12));color:var(--amber,#e7b669);
+  font-size:11px;font-weight:600;cursor:pointer;white-space:nowrap;
+}
+.ln-save:hover{background:var(--amber,#e7b669);color:var(--primary-ink,#231704)}
+.ln-save:disabled{opacity:.55;cursor:default}
+.ln-suggest{
+  height:29px;max-width:160px;padding:0 9px;border:1px dashed var(--line-2,#2b333d);
+  border-radius:6px;background:transparent;color:var(--muted,#9aa4b0);
+  font-size:10.5px;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+.ln-suggest:hover{border-color:var(--amber-line,#5a4527);color:var(--amber,#e7b669)}
+.ln-name-source{display:inline-flex;margin-top:6px;margin-left:29px;font-size:10.5px;
+  color:var(--jade,#7fd3ae)}
+.ln-names-foot{margin:9px 0 0;padding-top:9px;border-top:1px solid var(--line,#1e242c);
+  font-size:10px;line-height:1.55;color:var(--faint,#6e7885)}
+
+/* 收尾面板是固定深色，不跟随笔记页的主题 token。 */
+.wf-card .ln-names{
+  margin-top:14px;border-color:#2a3345;background:#101722;color:#e6ebf5;
+}
+.wf-card .ln-names-title span,.wf-card .ln-names-loading,.wf-card .ln-names-foot,
+.wf-card .ln-name-who small{color:#7d879b}
+.wf-card .ln-name-row{border-top-color:#232b3a}
+.wf-card .ln-name-who b{color:#e6ebf5}
+.wf-card .ln-name-input{background:#0b121c;border-color:#33405a;color:#e6ebf5}
+.wf-card .ln-preview,.wf-card .ln-names-skip{border-color:#33405a;color:#9aa4b8}
+.wf-card .ln-suggest{border-color:#33405a;color:#9aa4b8}
+.wf-card .ln-save{border-color:#3b6bff;background:rgba(59,107,255,.16);color:#9db7ff}
+.wf-card .ln-save:hover{background:#3b6bff;color:#fff}
+.wf-card .ln-rank{border-color:#33405a;color:#ffcf7a}
+
+/* 独立页面（没有 P1 toast）时的轻提示。 */
+.ln-name-toast{
+  position:fixed;left:50%;bottom:34px;transform:translate(-50%,8px);z-index:300;
+  max-width:min(440px,calc(100vw - 30px));padding:8px 14px;border-radius:8px;
+  background:#1a2028;border:1px solid #2b333d;color:#ece9e2;font-size:12px;
+  box-shadow:0 14px 40px rgba(0,0,0,.35);opacity:0;pointer-events:none;
+  transition:opacity .16s,transform .16s;
+}
+.ln-name-toast.show{opacity:1;transform:translate(-50%,0)}

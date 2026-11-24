@@ -11,7 +11,13 @@ import { showSummary } from './summary.js';
 function liveHint(d){
   var msg='', bad=false;
   if(d.running&&!d.paused){
-    if(d.dropped>0){ msg='音频积压：已丢弃 '+d.dropped+' 块，识别可能不完整'; bad=true }
+    if(d.capture_only){
+      // 仅采集没有 ASR 队列，也不谈「人声」：只报丢块和长时间无声。
+      if(d.dropped>0){ msg='音频积压：已丢弃 '+d.dropped+' 块，录音可能不完整'; bad=true }
+      else if((d.idle_s||0)>60){
+        msg='已经 '+Math.round(d.idle_s)+' 秒没有声音：确认直播还在说话、标签页没有被静音' }
+    }
+    else if(d.dropped>0){ msg='音频积压：已丢弃 '+d.dropped+' 块，识别可能不完整'; bad=true }
     else if(d.level!=null&&d.level<0.004&&(d.idle_s||0)>12){
       msg='几乎收不到声音：检查标签页是否被静音、音量是否为 0'; bad=true }
     else if((d.idle_s||0)>60){
@@ -46,9 +52,22 @@ function wfOpen(title,sub){
   $('#wfTitle').textContent=title;
   if(sub!=null)$('#wfSub').textContent=sub;
   $('#wfActions').innerHTML='';
+  clearRecapNames();
   $('#liveWs').classList.add('finishing');
 }
 function wfClose(){ $('#liveWs').classList.remove('finishing') }
+function clearRecapNames(){
+  const box=$('#wfNames');
+  if(!box)return;
+  if(window.LNNames)window.LNNames.unmount(box);
+  box.hidden=true;
+}
+function mountRecapNames(sid){
+  const box=$('#wfNames');
+  if(!box||!window.LNNames)return;
+  box.hidden=false;
+  window.LNNames.mount(box,sid,{limit:5});
+}
 let _wfTimer=null,_wfT0=0,_wfBg=null,_wfGen=0;
 function wfTimer(on){
   clearInterval(_wfTimer);
@@ -86,7 +105,7 @@ function teardownCapture(){
   clearTimeout(L.poll);
 }
 function closeFinish(){
-  wfClose();setLiveLocked(false);
+  wfClose();clearRecapNames();setLiveLocked(false);
   liveShow(false);liveWs(false);liveMini(false);
   L.phase='idle';
   const b=$('#lpStop'); if(b){b.disabled=false;b.textContent='结束并保存'}
@@ -95,7 +114,9 @@ function closeFinish(){
 async function liveStop(){
   if(L.phase==='stopping'){ toast('正在保存，别急，等它跑完'); return }
   if(!L.sid&&!L.active)return;
-  if(!confirm('结束并保存本场？\n\n录音落盘大约 1 秒就好；重聚类、起标题、生成总结会在后台继续跑，不影响你查看。\n保存是服务端做的，中途关掉页面也不会丢。'))return;
+  if(!confirm(L.captureOnly
+    ? '结束并保存本场录音？\n\n仅采集模式不会生成字幕、说话人和总结；录音落盘后可以在「回放」里听。'
+    : '结束并保存本场？\n\n录音落盘大约 1 秒就好；重聚类、起标题、生成总结会在后台继续跑，不影响你查看。\n保存是服务端做的，中途关掉页面也不会丢。'))return;
   const sid=L.sid;
   L.phase='stopping';
   teardownCapture();                       // 先断采集，避免继续写入
@@ -120,7 +141,7 @@ async function liveStop(){
     return;
   }
   L.sid='';L.active=false;
-  wfStep('save','done',(d.n_utterances||0)+' 句');
+  wfStep('save','done',d.capture_only?'录音 '+fmt(d.elapsed||0):(d.n_utterances||0)+' 句');
   await finishAfterStop(sid,d);
 }
 async function retryStop(sid){
@@ -130,7 +151,7 @@ async function retryStop(sid){
   wfTimer(true);
   try{
     const d=await post('/api/live/stop',{session_id:sid});
-    wfStep('save','done',(d.n_utterances||0)+' 句');
+    wfStep('save','done',d.capture_only?'录音 '+fmt(d.elapsed||0):(d.n_utterances||0)+' 句');
     L.sid='';L.active=false;
     await finishAfterStop(sid,d);
   }catch(e){
@@ -143,10 +164,25 @@ async function retryStop(sid){
 }
 async function finishAfterStop(sid,d){
   const saveLi=document.querySelector('#wfSteps li[data-k="save"]');
-  if(saveLi&&saveLi.className!=='done')wfStep('save','done',(d.n_utterances||0)+' 句');
   const n=d.n_utterances||0;
   const dur=Math.round((d.meta&&d.meta.session&&d.meta.session.duration_s)||d.elapsed||0);
   const seed=(d.meta&&d.meta.session&&d.meta.session.title)||'';
+  if(d.capture_only){
+    // 仅采集没有重聚类/起标题/总结：保存完就是全部，别让用户盯着两步空等。
+    wfStep('save','done','录音 '+fmt(dur));
+    wfStep('tidy','skip');wfStep('sum','skip');
+    wfTimer(false);L.phase='done';
+    $('#wfMeta').textContent='已保存 · 录音 '+fmt(dur);
+    wfOpen('录音已保存','仅采集模式：这一场只有录音，没有逐字稿和总结。可以在「回放」里听。');
+    wfActions([
+      {label:'查看这一场',primary:true,onClick:function(){ closeFinish() }},
+      {label:'关闭',onClick:function(){ closeFinish() }}
+    ]);
+    toast('录音已保存 · '+fmt(dur));
+    refreshAfterSave(sid);
+    return;
+  }
+  if(saveLi&&saveLi.className!=='done')wfStep('save','done',n+' 句');
 
   /* 落盘即完成：这一步只花 1 秒左右，没理由让用户陪着后台两步干等 30 秒。
      以前是等轮询跑满 45 次（31.5s）才说「已保存」，而且没等到就直接标「跳过」，
@@ -159,6 +195,7 @@ async function finishAfterStop(sid,d){
     {label:'查看这一场',primary:true,onClick:function(){ closeFinish() }},
     {label:'关闭',onClick:function(){ closeFinish() }}
   ]);
+  mountRecapNames(sid);
   wfStep('tidy','running','后台生成中');
   wfStep('sum','running','后台排队中');
   toast('已保存：'+n+' 句 · '+fmt(dur));

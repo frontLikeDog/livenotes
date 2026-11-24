@@ -235,6 +235,10 @@ function applyState(s){
   updateDesktopRow(s);
   var capSel=$('#prefCaptureMode');
   if(capSel) capSel.value=(s.prefs&&s.prefs.capture_mode)||'browser';
+  var qSel=$('#prefDirectQuality');
+  if(qSel) qSel.value=(s.prefs&&s.prefs.direct_quality)||'low';
+  var trSel=$('#prefTrafficExact');
+  if(trSel) trSel.value=(s.prefs&&s.prefs.traffic_exact)?'1':'0';
   var closeSel=$('#prefCloseAction');
   if(closeSel) closeSel.value=(s.prefs&&s.prefs.close_action)||'tray';
   renderProfiles();

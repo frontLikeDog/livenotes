@@ -651,6 +651,11 @@ class Agent:
             except Exception:
                 pass
             info["traffic_proxy"] = None
+        meter = info.get("traffic")
+        if meter is not None and (cm is not None or proxy is not None):
+            # 精确源停了就必须降级回估算；否则 TrafficMeter 会一直锁在
+            # exact，snapshot() 不再累计，界面还显示「计数代理实测」。
+            meter.demote_source("精确计量已停止，改按码率估算")
 
     def _page_ws_for_room(self, port: int, room: dict) -> str:
         """按房间 URL 找一个页面 target 的 CDP 地址（接管/共享模式用）。"""

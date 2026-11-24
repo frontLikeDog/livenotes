@@ -216,6 +216,23 @@ $('#btnPeople').onclick=function(){ window.open('/people','_blank') };
       toast('关闭窗口时：'+label);
     }catch(e){ toast('保存失败：'+e.message) }
   };
+  const qualitySel=$('#prefDirectQuality');
+  if(qualitySel) qualitySel.onchange=async function(){
+    const v=this.value;
+    const label=v==='high'?'最高画质':'省流（最低可用档）';
+    try{
+      await post('/api/settings/prefs',{direct_quality:v});
+      toast('直取画质：'+label+'（对下一路生效）');
+    }catch(e){ toast('保存失败：'+e.message) }
+  };
+  const trafficSel=$('#prefTrafficExact');
+  if(trafficSel) trafficSel.onchange=async function(){
+    const on=this.value==='1';
+    try{
+      await post('/api/settings/prefs',{traffic_exact:on});
+      toast(on?'流量计量：精确实测（下一次重连生效）':'流量计量：按码率估算');
+    }catch(e){ toast('保存失败：'+e.message) }
+  };
   $('#prefDirectFallback').onchange=async function(){
     const v=this.value;
     const label={ask:'直取失败后等你确认',auto:'直取失败后自动切浏览器',

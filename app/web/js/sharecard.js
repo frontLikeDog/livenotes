@@ -177,7 +177,9 @@
     }
     var point = (d.points || []).filter(function (p) { return p.quote; })[0];
     if (point) {
-      return { text: point.quote, who: (point.speakers || [])[0] || '', t: point.t_from || 0 };
+      return { text: point.quote,
+               who: point.claim_speaker || point.claim_speaker_label ||
+                    (point.speakers || [])[0] || '', t: point.t_from || 0 };
     }
     return { text: d.summary.overview || '这场直播还没有留下可引用的原话。', who: '', t: 0 };
   }
@@ -319,7 +321,7 @@
     var y = 250;
     ctx.font = font(58, 750);
     ctx.fillStyle = '#F7F5EF';
-    var who = c.who || '一位上麦者';
+    var who = c.who_label || c.who || '一位上麦者';
     y = drawText(ctx, who, 96, y, {
       font: font(58, 750), color: '#F7F5EF', width: W - 192,
       lineHeight: 74, maxLines: 2
@@ -349,7 +351,10 @@
     }
 
     var n = (d.speakers || []).length || 1;
-    var meta = '本场 ' + n + ' 人上麦 · 《' + (d.session.title || '未命名场次') + '》 · 由 LiveNotes 记录';
+    var source = c.who_source_label || '';
+    if (c.who_source === 'confirmed' || c.who_source === 'auto') source = '';
+    var meta = '本场 ' + n + ' 人上麦 · 《' + (d.session.title || '未命名场次') + '》 · 由 LiveNotes 记录' +
+      (source ? ' · ' + source : '');
     drawText(ctx, meta, 96, H - 330, {
       font: font(23), color: '#6E7885', width: W - 192,
       lineHeight: 38, maxLines: 2
@@ -461,7 +466,8 @@
     if (!on) return;
     var at = Math.min(S.claimIdx, list.length - 1);
     nav.querySelector('#shareClaimCount').textContent =
-      (at + 1) + ' / ' + list.length + ' · ' + (list[at].who || '');
+      (at + 1) + ' / ' + list.length + ' · ' +
+      (list[at].who_label || list[at].who || '');
   }
 
   function build() {
@@ -490,6 +496,7 @@
       '</div>' +
       '<div class="share-canvas-wrap"><canvas class="share-canvas" id="shareCanvas" ' +
       'width="' + W + '" height="' + H + '"></canvas></div>' +
+      '<div id="shareNamePanel"></div>' +
       '<label class="share-link"><span>本地链接</span>' +
       '<input id="shareLink" type="text" readonly value="正在读取…"></label>' +
       '<p class="share-hint" id="shareHint">二维码只在局域网分享开启时出现。</p>' +
@@ -507,6 +514,9 @@
     });
     dialog.addEventListener('click', function (e) {
       if (e.target === dialog) dialog.close();
+    });
+    dialog.addEventListener('close', function () {
+      if (window.LNNames) window.LNNames.unmount(dialog.querySelector('#shareNamePanel'));
     });
     dialog.querySelector('.share-templates').addEventListener('click', function (e) {
       var button = e.target.closest('[data-share-tpl]');
@@ -567,6 +577,49 @@
     return dialog;
   }
 
+  /* 分享前补名：只影响卡片上的「谁」，不阻塞下载、复制或二维码。 */
+  function mountNames() {
+    var box = S.dialog && S.dialog.querySelector('#shareNamePanel');
+    if (!box || !window.LNNames || !S.data || !S.data.session) return;
+    window.LNNames.mount(box, S.data.session.session_id, {
+      limit: 5,
+      onNamed: function (out) {
+        // 命名后把当前页面里同一簇的展示名一起换掉，卡片不用整页重载。
+        (S.data.claims || []).forEach(function (claim) {
+          if (claim.speaker_id === out.speaker_id) {
+            claim.who = out.name;
+            claim.who_label = out.name;
+            claim.who_source = 'confirmed';
+            claim.who_source_label = '已确认';
+          }
+        });
+        (S.data.points || []).forEach(function (point) {
+          // 只改「归属人就是这一簇」的观点。证据里提到某人，不代表观点属于他；
+          // 按证据命中会把 A 的观点改到被引用的 B 名下，还会把多人压成一人。
+          if (point.claim_speaker_speaker_id !== out.speaker_id) return;
+          point.claim_speaker = out.name;
+          point.claim_speaker_label = out.name;
+          point.claim_speaker_source = 'confirmed';
+        });
+        var oldLabel = '';
+        (S.data.speakers || []).forEach(function (speaker) {
+          if (speaker.speaker_id === out.speaker_id) {
+            oldLabel = speaker.label || '';
+            speaker.label = out.name;
+            speaker.display_name = out.name;
+          }
+        });
+        if (oldLabel) {
+          (S.data.highlights || []).forEach(function (hi) {
+            if (hi.speaker_label === oldLabel) hi.speaker_label = out.name;
+          });
+        }
+        render();
+        updateClaimNav();
+      }
+    });
+  }
+
   function open(data) {
     S.data = data;
     S.claimIdx = 0;
@@ -586,6 +639,7 @@
     render();
     updateLink();
     if (!dialog.open) dialog.showModal();
+    mountNames();
     var cid = S.tpl === 'claim' ? (currentClaim() || {}).claim_id : '';
     noteInfo(cid).then(function (info) {
       S.info = info;

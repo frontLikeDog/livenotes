@@ -103,6 +103,12 @@ footer code{font-family:var(--mono)}
 
   <section class="kpis" id="kpis"></section>
 
+  <h2>产品指标 · 近 30 天</h2>
+  <section class="kpis" id="productKpis">
+    <div class="kpi"><div class="k">加载中…</div><div class="v">—</div>
+      <div class="s">top 3 命名率 / 可分享内容</div></div>
+  </section>
+
   <h2>链路</h2>
   <div class="charts">
     <div class="panel">
@@ -180,7 +186,8 @@ const get = (o, path, def) => {
 };
 const pct = (a, b) => (!b ? "—" : (a / b * 100).toFixed(2) + "%");
 
-let timer = null, seriesTimer = null, paused = false, series = [], history = [];
+let timer = null, seriesTimer = null, productTimer = null;
+let paused = false, series = [], history = [];
 let lastGlobal = null;
 
 function ago(iso) {
@@ -196,6 +203,7 @@ function badge(s) {
   if (s.stall) return '<span class="badge stall">停滞</span>';
   if (s.state !== "running") return '<span class="badge stop">已结束</span>';
   if (s.paused) return '<span class="badge pause">暂停</span>';
+  if (s.capture_only) return '<span class="badge run">仅录制</span>';
   return '<span class="badge run">运行中</span>';
 }
 
@@ -373,6 +381,43 @@ function drawFlow(rows) {
     ? "本周期 定稿 " + finals[finals.length - 1] + " · 丢块 " + drops[drops.length - 1] : "—";
 }
 
+function renderProduct(p) {
+  if (!p || !p.ok) {
+    $("productKpis").innerHTML = '<div class="kpi"><div class="k">产品指标</div>'
+      + '<div class="v">—</div><div class="s">暂时读不到</div></div>';
+    return;
+  }
+  const naming = p.top3_naming || {};
+  const shareable = p.shareable_output || {};
+  const nRate = naming.rate;
+  const sRate = shareable.rate;
+  const cards = [
+    {k: "top 3 命名率", v: nRate == null ? "—" : pct(naming.named_slots, naming.slots),
+     s: NUM(naming.named_slots) + " / " + NUM(naming.slots) + " 个前三位麦位"
+       + " · 整场全命名 " + pct(naming.sessions_all_named, naming.sessions_with_speech),
+     cls: nRate == null ? "" : nRate >= 0.7 ? "good" : nRate >= 0.4 ? "warm" : "hot"},
+    {k: "可分享内容产出率",
+     v: sRate == null ? "—" : pct(shareable.with_content, shareable.sessions),
+     s: NUM(shareable.with_content) + " / " + NUM(shareable.sessions)
+       + " 场至少有一条观点、高光或总结要点",
+     cls: sRate == null ? "" : sRate >= 0.6 ? "good" : sRate >= 0.3 ? "warm" : "hot"},
+    {k: "统计场次", v: NUM(p.sessions || 0), s: "近 " + NUM(p.window_days || 0) + " 天",
+     cls: ""},
+  ];
+  $("productKpis").innerHTML = cards.map((c) =>
+    '<div class="kpi ' + (c.cls || "") + '"><div class="k">' + ESC(c.k)
+    + '</div><div class="v">' + ESC(c.v) + '</div><div class="s">' + ESC(c.s)
+    + '</div></div>').join("");
+}
+
+async function loadProduct() {
+  try {
+    renderProduct(await fetchJson("/api/product/health?days=30"));
+  } catch (e) {
+    renderProduct(null);
+  }
+}
+
 function renderAll(s) {
   lastGlobal = s;
   renderKpis(s); renderSessions(s); renderEvents(s); renderCounters(s);
@@ -422,10 +467,12 @@ function start() {
   if (timer) return;
   timer = setInterval(poll, 2000);
   seriesTimer = setInterval(pollSeries, 10000);
-  poll(); pollSeries();
+  productTimer = setInterval(loadProduct, 30000);
+  poll(); pollSeries(); loadProduct();
 }
 function stop() {
-  clearInterval(timer); clearInterval(seriesTimer); timer = null; seriesTimer = null;
+  clearInterval(timer); clearInterval(seriesTimer); clearInterval(productTimer);
+  timer = null; seriesTimer = null; productTimer = null;
 }
 $("toggle").onclick = () => {
   paused = !paused;

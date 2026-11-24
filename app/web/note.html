@@ -10,6 +10,7 @@ try{var _t=new URLSearchParams(location.search).get('theme');if(_t)document.docu
 </script>
 <script src="/static/js/theme.js"></script>
 <link rel="stylesheet" href="/static/css/p1.css">
+<link rel="stylesheet" href="/static/css/naming.css">
 </head>
 <body>
 <script src="/static/js/embed.js"></script>
@@ -83,6 +84,7 @@ try{var _t=new URLSearchParams(location.search).get('theme');if(_t)document.docu
 </main>
 
 <script src="/static/js/p1.js"></script>
+<script src="/static/js/naming.js"></script>
 <script src="/static/js/sharecard.js"></script>
 <script>
 (function () {
@@ -389,7 +391,8 @@ try{var _t=new URLSearchParams(location.search).get('theme');if(_t)document.docu
           if (point.quote) {
             var quote = el('p', 'point-quote');
             if (point.t_from != null) quote.appendChild(timeLink(point.t_from));
-            var speaker = point.claim_speaker || (point.speakers || [])[0] || '';
+            var speaker = point.claim_speaker || point.claim_speaker_label ||
+              (point.speakers || [])[0] || '';
             quote.appendChild(document.createTextNode(
               ' ' + (speaker ? speaker + '：' : '') + point.quote));
             body.appendChild(quote);

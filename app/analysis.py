@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 
-from . import llm, scheduler, settings, shape, store, titles
+from . import identity, llm, scheduler, settings, shape, store, titles
 from .config import LLM_SUMMARY_MAX_ROWS
 from .models import CATEGORY_META, category_label, fmt_ts
 
@@ -432,9 +432,7 @@ LLM_MIN_CHARS = 400
 
 # 有名字的人（人工改过名 / 声纹底库命中的昵称）优先归属：位置标签
 # 「主播/嘉宾2/聚类标签 09」只是这一场里的占位，不配给观点署名。
-_POSITIONAL_RE = re.compile(
-    r"^(主播|嘉宾|说话人|用户|观众|有人|未识别|连麦|路人|网友|聚类标签|簇|"
-    r"SPK[_-]?\d+)")
+# 统一用 identity.is_positional，避免这里和展示层各有一份规则、慢慢漂移。
 
 # 展示层把位置和人名拼成「主播 · 阿哲」（store.speaker_display）：
 # 真正能署名的在后半段，不能因为前缀是「主播」就把整串当占位。
@@ -448,8 +446,8 @@ def _looks_like_name(label: str) -> bool:
     m = _NAME_SUFFIX_RE.match(text)
     if m:
         text = m.group(1).strip()
-        return bool(text) and not _POSITIONAL_RE.match(text)
-    return not _POSITIONAL_RE.match(text)
+        return bool(text) and not identity.is_positional(text)
+    return not identity.is_positional(text)
 
 
 def _claim_speaker(ev: list[dict]) -> str:

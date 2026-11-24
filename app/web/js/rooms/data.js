@@ -37,6 +37,7 @@ import { render, roomById } from './render.js';
       sessionId: room.session_id || "",
       session: session ? {
         elapsed: session.elapsed, n_utterances: session.n_utterances,
+        capture_only: !!session.capture_only, audible_s: session.audible_s,
         last_line: session.last_line || "", level: session.level,
         idle_s: session.idle_s, dropped: session.dropped, queued: session.queued,
         paused: session.paused, running: session.running,
@@ -177,6 +178,7 @@ import { render, roomById } from './render.js';
       session: {
         elapsed: num(sess.duration_s) || (lastRow ? num(lastRow.t_end) : 0),
         n_utterances: num(stats.utterances),
+        capture_only: !!sess.capture_only, audible_s: null,
         last_line: lastLine, level: 0, idle_s: 0, dropped: 0, queued: 0,
         paused: false, running: false, history: true,
         last_chunk_at: null, last_chunk_ago_s: null,
@@ -203,6 +205,7 @@ import { render, roomById } from './render.js';
       if(!cur) return;
       cur.session = Object.assign({}, cur.session||{}, {
         elapsed: st.elapsed, n_utterances: st.n_utterances,
+        capture_only: !!st.capture_only, audible_s: st.audible_s,
         last_line: (st.utterances&&st.utterances.length) ? st.utterances[st.utterances.length-1].text : (cur.session&&cur.session.last_line)||"",
         level: st.level, idle_s: st.idle_s, dropped: st.dropped, queued: st.queued,
         paused: st.paused, running: st.running,

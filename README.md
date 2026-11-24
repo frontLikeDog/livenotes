@@ -16,7 +16,12 @@
   按 `B` 加书签并可在 5 秒内撤销；实时高光卡可以试听、收藏或「不用」。
 - **分享卡片**：1080×1440 竖版 PNG，金句 / 要点 / 高光 / 观点四种模板；观点卡以
   「一个人 + 一句观点 + 一句原话」为单位，二维码打开这一条观点的只读页。开启局域网
-  分享后自动带二维码，纯 Canvas 在本机生成，不产生服务端临时文件。
+  分享后自动带二维码，纯 Canvas 在本机生成，不产生服务端临时文件。没实名时按
+  「已确认 > 直播间昵称 > 角色 > 本场第 N 位上麦者」兜底，并标出来源；兜底名只用于
+  展示，不写进跨场观点档案。
+- **按需补名**：收尾页和分享前只列「这场谁值得记」的前 3–5 位，按发言时长排序，
+  每条可试听 3 秒、接受声纹建议、输入一次名字。补名同时注册声纹，下次自动认；
+  跳过不影响出卡。产品指标看 top 3 命名率与可分享内容产出率，不看全员标注率。
 - **文件中心仍在 `/files`**：录音、回收站、体检清理是一张表；`/library` 现在只回答
   「我记过什么」，两套列表不挤在一页。
 - **站内周报**：`/weekly` 按设置里的时间（周一 09:00 / 12:00 或周日 20:00）整理上一周
@@ -38,11 +43,15 @@
   则解析抖音直播流地址（优先 live 页内嵌 `stream_url`）、用 ffmpeg 直取，
   5 路并发实测 139MB；直取失败不会偷偷切浏览器，会在收听页停下来让你确认切换。
   见 [docs/02](docs/02-live-tab-capture.md#三种采集底座)
+- **仅采集模式**：`LIVENOTES_CAPTURE_ONLY=1` 让低配 VPS 只负责录音：不加载
+  ASR/声纹模型，不产生字幕、说话人和总结，录音照常落 WAV 并转 m4a；
+  场次列表和回放会标「仅录制」。依赖见 `requirements-capture.txt`，
+  说明见 [docs/43](docs/43-capture-only-mode.md)
 - **采集流量计量**：桌面壳收听页右栏「这一路」显示平台下行（Mbps、折合 MB/h）与
   音频上行，底栏给所有在听房间的合计；网页版房间详情/列表同样有。浏览器采集用
-  CDP Network 实测，直取默认按码率/分辨率估算，设 `LIVENOTES_TRAFFIC_PROXY=1`
-  可改走本机计数代理拿逐字节实测。`/api/traffic` 给出汇总。
-  见 [docs/42](docs/42-traffic-metering.md)
+  CDP Network 实测；直取默认省流画质、按码率估算，可在「⚙ 设置 → 采集」切换
+  「最高画质」和「精确流量计量」（本机计数代理，逐字节实测）。
+  `/api/traffic` 给出汇总。见 [docs/42](docs/42-traffic-metering.md)
 - **实时字幕**：主播开口约 1 秒后出现灰色「识别中」字幕，每 4 秒切句成定稿
 - **说话人分离**：基于 CAM++ 声纹在线聚类，两位说话人轮流发言会自动分成「主播 / 嘉宾」
 - **逐字稿与时间轴**：按说话人、关键词、时间筛选；点时间码直接跳到那一刻
@@ -322,8 +331,9 @@ data/               数据库、录音、日志（不提交）
 | `LIVENOTES_NO_BROWSER` | 空 | 设为 `1` 不自动开浏览器 |
 | `LIVENOTES_MAX_ROOMS` | `5` | 同时监听几路（独立浏览器约 0.9GB/路；共享模式 3 路实测浏览器 2.4GB） |
 | `LIVENOTES_CAPTURE_MODE` | `per_room` | 采集底座：`per_room` = 每个房间一个浏览器；`shared` = 一个 Edge 开多个房间标签页（省内存，实验性）；`direct` = 解析抖音直播流地址、ffmpeg 直取（最省内存；失败停下等你确认，不自动切浏览器） |
+| `LIVENOTES_CAPTURE_ONLY` | `0` | 仅采集：不加载 ASR/声纹模型，只录音；没有实时字幕、说话人和总结。逐场可用 `/api/live/start` 的 `capture_only` 覆盖。依赖见 `requirements-capture.txt`，说明见 [docs/43](docs/43-capture-only-mode.md) |
 | `LIVENOTES_DIRECT_FALLBACK` | 空（用设置页） | direct 失败后怎么办：`ask`（默认，停在收听页等你点「切换浏览器采集」）/ `auto`（旧行为，自动切 `per_room`，不可用再 `shared`）/ `per_room`、`shared`（自动切到指定引擎）/ `none`（只报失败，不提供切换）。平时在「⚙ 设置 → 采集」里选，改完立即生效；这里设了环境变量则覆盖设置页，留给脚本/临时调试 |
-| `LIVENOTES_TRAFFIC_PROXY` | 空 | `1` = 直取模式经本机回环计数代理拉流，下行按实际转发字节实测；不设则按 ffmpeg 报的码率/分辨率估算。见 [docs/42](docs/42-traffic-metering.md) |
+| `LIVENOTES_TRAFFIC_PROXY` | 空 | 临时覆盖设置页「精确流量计量」：`1` = 直取经本机回环计数代理逐字节实测，`0` = 强制估算；平时在「⚙ 设置 → 采集」里选。见 [docs/42](docs/42-traffic-metering.md) |
 | `LIVENOTES_SHARED_BROWSER` | 空 | 共享模式指定 Edge / Chrome for Testing 的 `exe` 路径；不填按 Edge → Chrome for Testing 顺序找 |
 | `LIVENOTES_CONFIRM_TTL` | `600` | 陌生站点的确认卡多久失效（秒） |
 | `LIVENOTES_ALLOW_LOCAL` | 空 | 设为 `1` 才允许本机/局域网链接（调试用） |

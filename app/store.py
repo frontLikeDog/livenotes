@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     started_at            TEXT NOT NULL,
     duration_s            REAL NOT NULL,
     source_mode           TEXT NOT NULL,      -- per_uid | mixed | demo
+    capture_only          INTEGER DEFAULT 0,  -- 1 = 仅采集：没有实时转写/说话人
     sample_rate           INTEGER DEFAULT 16000,
     audio_path            TEXT,               -- 当前可播的整场音频（WAV 或 m4a）
     audio_format          TEXT,               -- wav | m4a | opus；空 = 老数据按后缀判断
@@ -505,6 +506,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(sessions)")}
     if "deleted_at" not in cols:
         conn.execute("ALTER TABLE sessions ADD COLUMN deleted_at TEXT")
+    # 仅采集场次：老库补列后默认 0，历史场次仍按「有转写」处理。
+    if "capture_only" not in cols:
+        conn.execute("ALTER TABLE sessions ADD COLUMN capture_only INTEGER DEFAULT 0")
     # 录音归档：老库补列后 audio_format 为空，读取时按 audio_path 后缀兜底。
     for name, typ in (("audio_format", "TEXT"), ("audio_original_path", "TEXT"),
                       ("audio_bytes", "INTEGER"), ("audio_transcoded_at", "TEXT"),
@@ -677,12 +681,13 @@ def rowdict(row: sqlite3.Row | None) -> dict[str, Any] | None:
 def insert_session(conn: sqlite3.Connection, s: dict) -> None:
     conn.execute(
         "INSERT OR REPLACE INTO sessions (id,title,started_at,duration_s,source_mode,"
-        "sample_rate,audio_path,overlap_seconds,untranscribed_seconds,warnings_json,"
-        "started_utc,tz_offset_min,created_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "capture_only,sample_rate,audio_path,overlap_seconds,untranscribed_seconds,"
+        "warnings_json,started_utc,tz_offset_min,created_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (s["id"], s["title"], s["started_at"], s["duration_s"], s["source_mode"],
-         s.get("sample_rate", 16000), s.get("audio_path"),
-         s.get("overlap_seconds", 0), s.get("untranscribed_seconds", 0),
+         int(s.get("capture_only") or 0), s.get("sample_rate", 16000),
+         s.get("audio_path"), s.get("overlap_seconds", 0),
+         s.get("untranscribed_seconds", 0),
          json.dumps(s.get("warnings", []), ensure_ascii=False),
          s.get("started_utc"), s.get("tz_offset_min"), now()),
     )

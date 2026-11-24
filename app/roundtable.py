@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import sqlite3
 
-from . import claims, shape, store
+from . import claims, identity, shape, store
 
 
 def _fmt_t(seconds: object) -> str:
@@ -52,45 +52,55 @@ def build(conn: sqlite3.Connection, sid: str) -> dict:
     duration_s = float(session.get("duration_s") or 0.0)
 
     atoms = claims.rows_for(conn, session_id=sid, limit=800)
-    by_who: dict[str, int] = {}
-    for r in atoms:
+    roster = identity.roster(conn, sid)
+    refs = [(r, identity.claim_ref(r, roster)) for r in atoms]
+    by_sid: dict[str, int] = {}
+    by_label: dict[str, int] = {}
+    for r, ref in refs:
         if str(r.get("kind") or "") != "claim":
             continue
-        who = str(r.get("who") or "").strip()
-        if who:
-            by_who[who] = by_who.get(who, 0) + 1
+        sid_sp = str(ref.get("speaker_id") or "")
+        if sid_sp:
+            by_sid[sid_sp] = by_sid.get(sid_sp, 0) + 1
+        elif ref.get("who"):
+            by_label[str(ref["who"])] = by_label.get(str(ref["who"]), 0) + 1
 
     participants = []
-    for sp in store.speaker_totals(conn, sid):
+    for sp in roster["entries"]:
         sid_sp = str(sp.get("speaker_id") or "")
         role = roles.get(sid_sp) or {}
-        name = str(sp.get("person_name") or sp.get("speaker_label") or sid_sp)
         participants.append({
             "speaker_id": sid_sp,
-            "name": name,
+            "name": str(sp.get("who") or "一位上麦者"),
+            "who_source": str(sp.get("source") or ""),
+            "who_source_label": str(sp.get("source_label") or ""),
             "person_id": str(sp.get("person_id") or ""),
             "role": str(role.get("role") or ""),
             "role_label": str(role.get("label") or ""),
             "seconds": round(float(sp.get("seconds") or 0.0), 1),
-            "n_utterances": int(sp.get("n") or 0),
-            "n_claims": int(by_who.get(name, 0)),
+            "n_utterances": int(sp.get("n_utterances") or 0),
+            "n_claims": int(by_sid.get(sid_sp, 0) or
+                            by_label.get(str(sp.get("who") or ""), 0)),
         })
     participants.sort(key=lambda p: (-p["n_claims"], -p["seconds"], p["name"]))
 
     topics: dict[str, list[dict]] = {}
     questions: list[dict] = []
-    for r in atoms:
+    for r, ref in refs:
         topic = claims.topic_label(str(r.get("topic") or ""))
         stance = str(r.get("stance") or "").strip()
         if not stance:
             continue
-        who = str(r.get("who") or "").strip() or "本场共同讨论"
-        role = roles.get("") or {}
-        sp = next((p for p in participants if p["name"] == who), None)
-        if sp:
-            role = {"role": sp.get("role"), "label": sp.get("role_label")}
+        who = str(ref.get("who") or "").strip() or "一位上麦者"
+        sid_sp = str(ref.get("speaker_id") or "")
+        sp = next((p for p in participants if p["speaker_id"] == sid_sp), None) \
+            if sid_sp else None
+        role = {"role": sp.get("role"), "label": sp.get("role_label")} if sp else {}
         entry = {
             "who": who,
+            "who_source": str(ref.get("source") or ""),
+            "who_source_label": str(ref.get("source_label") or ""),
+            "speaker_id": sid_sp,
             "person_id": str(r.get("person_id") or ""),
             "role": str(role.get("role") or ""),
             "role_label": str(role.get("label") or ""),
@@ -179,7 +189,10 @@ def markdown(data: dict) -> str:
     if parts:
         lines.append("## 上麦的人")
         for p in parts:
-            bits = [p.get("role_label") or "",
+            src = p.get("who_source_label") or ""
+            if p.get("who_source") in ("confirmed", "auto"):
+                src = ""
+            bits = [src, p.get("role_label") or "",
                     "%d 条观点" % int(p.get("n_claims") or 0)]
             bits = [b for b in bits if b and b != "0 条观点"]
             lines.append("- %s%s" % (p.get("name") or "未识别",

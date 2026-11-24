@@ -187,6 +187,8 @@ def status(rooms: list[dict], sessions: list[dict], capture: dict) -> dict:
                               ("stopped" if s else ("missing" if sid else ""))),
             "elapsed": s.get("elapsed") if s else None,
             "n_utterances": s.get("n_utterances") if s else None,
+            "capture_only": bool(s and s.get("capture_only")),
+            "audible_s": s.get("audible_s") if s else None,
             "last_line": last_line,
             "last_final_ago_s": s.get("last_final_ago_s") if s else None,
             "last_chunk_ago_s": chunk,

@@ -107,12 +107,16 @@ function stateOf(s){
   const cls = stalled ? "dead" : (sinceChunk != null && sinceChunk > 45) ? "dead"
     : (idle > 120 ? "dead" : (idle > 45 ? "idle" : ""));
   return {idle, sinceChunk, stalled, cls,
-    text: s.paused ? "已暂停" : (s.running ? "监听中" : "已结束")};
+    text: s.paused ? "已暂停" : s.capture_only
+      ? (s.running ? "仅录制" : "已结束")
+      : (s.running ? "监听中" : "已结束")};
 }
 function cardHtml(s, focus){
   const st = stateOf(s);
-  let m = '<span>已听 '+ts(s.elapsed)+'</span><span>'+s.n_recent_utts+' 句</span>'
-    + '<span>'+(s.speakers||[]).length+' 人</span><span>已推 '+(s.pushed||0)+'</span>';
+  let m = s.capture_only
+    ? '<span>已录 '+ts(s.elapsed)+'</span><span>有声 '+ts(s.audible_s||0)+'</span>'
+    : '<span>已听 '+ts(s.elapsed)+'</span><span>'+s.n_recent_utts+' 句</span>'
+      + '<span>'+(s.speakers||[]).length+' 人</span><span>已推 '+(s.pushed||0)+'</span>';
   if(st.sinceChunk != null)
     m += '<span'+(st.stalled?' class="bad"':'')+'>最近一块 '+Math.round(st.sinceChunk)+'s</span>';
   m += '<span'+(st.idle>120?' class="bad"':'')+'>静默 '+Math.round(st.idle)+'s</span>';
@@ -197,9 +201,9 @@ async function load(){
         + '<td class="ti" title="'+esc(s.title)+'">'+esc(roomName(s.title))+'</td>'
         + '<td><span class="dot '+st.cls+'"></span>'+st.text+'</td>'
         + '<td class="mono">'+ts(s.elapsed)+'</td>'
-        + '<td class="mono">'+s.n_recent_utts+'</td>'
-        + '<td class="mono">'+spk+'</td>'
-        + '<td class="mono">'+(s.pushed||0)+'</td>'
+        + '<td class="mono">'+(s.capture_only?'—':s.n_recent_utts)+'</td>'
+        + '<td class="mono">'+(s.capture_only?'—':spk)+'</td>'
+        + '<td class="mono">'+(s.capture_only?'—':(s.pushed||0))+'</td>'
         + '<td class="mono'+(st.idle>120?' bad':'')+'">'+Math.round(st.idle)+'s</td>'
         + '<td class="mono'+(st.stalled?' bad':'')+'">'+(st.sinceChunk==null?'—':Math.round(st.sinceChunk)+'s')+'</td>'
         + '<td class="last" title="'+esc(s.last_line)+'">'+esc(s.last_line||"—")+'</td>'

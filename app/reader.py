@@ -87,6 +87,8 @@ def read(conn: sqlite3.Connection, sid: str, speakers: list[str] | None = None,
             "started_utc": session.get("started_utc"),
             "tz_offset_min": session.get("tz_offset_min"),
             "duration_s": session["duration_s"], "source_mode": session["source_mode"],
+            # 仅采集没有转写：页面据此显示「只保存了录音」，而不是「没有正文」。
+            "capture_only": int(session.get("capture_only") or 0),
             "audio_path": session["audio_path"],
         },
         "speakers": [{"speaker_id": p["speaker_id"],

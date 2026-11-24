@@ -24,6 +24,12 @@ async function showSummary(mode){
   summaryEmpty(mode);
 }
 function summaryEmpty(mode){
+  // 仅采集没有逐字稿：给「生成总结」按钮只会让用户点了再吃 400。
+  if(S.meta&&S.meta.session&&S.meta.session.capture_only){
+    $('#sumBody').innerHTML='<div class="empty">这一场是仅采集，只有录音，没有逐字稿可总结<br>'
+      +'<span style="font-size:11.5px">可在「回放」里收听，或在文件中心导出音频</span></div>';
+    return;
+  }
   $('#sumBody').innerHTML='<div class="empty">还没有生成过「'+(SUM_TAB_NAME[mode]||'')+'」的总结<br>'
     +'<span style="font-size:11.5px">不会自动调用模型，点下面的按钮才会生成</span><br>'
     +'<button class="primary" id="genNow" style="margin-top:14px">生成总结</button></div>';

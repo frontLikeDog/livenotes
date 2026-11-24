@@ -29,7 +29,7 @@ import re
 import sqlite3
 from typing import Any
 
-from . import store
+from . import identity, store
 
 # 同一个人在同一主题下，相邻两次主张相似度低于这个值 = 改口了。
 # 0.35 是保守值：宁可漏报一次变化，也不要把「换了个说法」说成「自相矛盾」。
@@ -144,20 +144,24 @@ def _claim_id(sid: str, idx: int) -> str:
     return "clm_" + h[:12]
 
 
-def _people_by_label(conn: sqlite3.Connection, sid: str) -> dict[str, str]:
-    """本场「显示名 -> person_id」，只认已确认/自动认定的，疑似的不算。"""
-    out: dict[str, str] = {}
+def _people_maps(conn: sqlite3.Connection,
+                 sid: str) -> tuple[dict[str, str], dict[str, str]]:
+    """本场「显示名/说话人 id -> person_id」，只认已确认/自动认定的。"""
+    by_label: dict[str, str] = {}
+    by_speaker: dict[str, str] = {}
     for r in conn.execute(
-            "SELECT display_name, person_id, person_state FROM speakers "
+            "SELECT speaker_id, display_name, person_id, person_state FROM speakers "
             "WHERE session_id=? AND person_id IS NOT NULL AND person_id<>''",
             (sid,)):
         state = str(r["person_state"] or "")
         if state not in ("auto", "confirmed"):
             continue
+        pid = str(r["person_id"])
+        by_speaker[str(r["speaker_id"])] = pid
         name = str(r["display_name"] or "").strip()
         if name:
-            out.setdefault(name, str(r["person_id"]))
-    return out
+            by_label.setdefault(name, pid)
+    return by_label, by_speaker
 
 
 def extract(conn: sqlite3.Connection, sid: str) -> list[dict]:
@@ -171,7 +175,7 @@ def extract(conn: sqlite3.Connection, sid: str) -> list[dict]:
     points = payload.get("points") or []
     if not points:
         return []
-    people = _people_by_label(conn, sid)
+    people, people_by_speaker = _people_maps(conn, sid)
     out: list[dict] = []
     for i, p in enumerate(points):
         stance = str(p.get("stance") or "").strip()
@@ -179,13 +183,25 @@ def extract(conn: sqlite3.Connection, sid: str) -> list[dict]:
         # 没有主张句的要点不构成观点（只有标题的空壳不值得进档案）
         if not stance and not gist:
             continue
-        who = str(p.get("claim_speaker") or "").strip()
+        raw_who = str(p.get("claim_speaker") or "").strip()
+        # 「嘉宾1 / 聚类标签 09 / 主播」是本场占位，不配跨场署名；落库为空，
+        # 展示时再由 identity 兜底成「本场第 N 位上麦者」。
+        who, who_kind = identity.clean_name(raw_who)
+        if who_kind != "nickname":
+            who = ""
         ev = p.get("evidence") or []
         first = ev[0] if ev else {}
+        pid = people.get(who, "") if who else ""
+        if not pid:
+            # 只在证据里找到「claim_speaker 本人」那一行再取 person_id。
+            # 直接拿第一条证据会把嘉宾的观点记到先开口的主播名下。
+            owner = identity.owner_evidence(ev, raw_who)
+            if owner:
+                pid = people_by_speaker.get(str(owner.get("speaker_id") or ""), "")
         out.append({
             "claim_id": _claim_id(sid, i),
             "session_id": sid,
-            "person_id": people.get(who, "") if who else "",
+            "person_id": pid,
             "who": who,
             "topic": point_topic(p),
             "stance": (stance or gist)[:120],
@@ -194,7 +210,8 @@ def extract(conn: sqlite3.Connection, sid: str) -> list[dict]:
             "t": first.get("t_start"),
             "kind": point_kind(p),
             "evidence": [{"id": e.get("id"), "t": e.get("t_start"),
-                          "speaker": str(e.get("speaker_label") or "")}
+                          "speaker": str(e.get("speaker_label") or ""),
+                          "speaker_id": str(e.get("speaker_id") or "")}
                          for e in ev[:6]],
         })
     return out

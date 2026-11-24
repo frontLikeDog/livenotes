@@ -8,6 +8,7 @@
     # LIVENOTES_NO_BROWSER=1 可禁止自动开浏览器（守护进程重启时用它）
     # LIVENOTES_SEED_DEMO=1 空库时生成演示场（默认不生成）
     # LIVENOTES_HELPERS=1 时顺带拉起飞书机器人和采集代理（桌面壳用）
+    # LIVENOTES_CAPTURE_ONLY=1 仅采集：不加载 ASR/声纹模型，只录音（低配 VPS）
 """
 from __future__ import annotations
 
@@ -98,7 +99,8 @@ from app import (config, follows, live, logs, metrics, notes, notify, qa,  # noq
 from app import audio, lan  # noqa: E402
 from app.config import (HOST, METRICS_SAMPLE_S, PORT, RESUME_ROOMS,  # noqa: E402
                         ensure_dirs)
-from app.server import make_server, reconcile_rooms  # noqa: E402
+from app.server import (make_server, preresolve_pending_rooms,  # noqa: E402
+                        reconcile_rooms)
 
 BANNER = """
 ==========================================================================
@@ -459,6 +461,14 @@ def main() -> int:
             reconcile_rooms(conn)
         finally:
             conn.close()
+    # 老房间补解析：入库预解析是后加的，之前存的短链房间还没有房号页；
+    # 后台各补一次，重试时直接走稳定地址，不用再赌短链那一跳。
+    try:
+        pending = preresolve_pending_rooms()
+        if pending:
+            print(f"[rooms] 后台补解析 {len(pending)} 个房间的直播地址", flush=True)
+    except Exception as e:
+        print(f"[rooms] 补解析启动失败：{e}", flush=True)
     # 录音归档清理：原 WAV 按保留期删除、过期的归档/片段缓存清掉。
     # 启动时跑一次，之后每 6 小时一次；没有 ffmpeg 也不影响，只是不转码。
     audio.start_sweeper()
@@ -473,6 +483,10 @@ def main() -> int:
         lan.publish_external()
     print(BANNER.format(host=HOST, port=PORT, db=store.DB_PATH,
                         base=lan.base_url()), flush=True)
+    if config.CAPTURE_ONLY:
+        print("  [仅采集] LIVENOTES_CAPTURE_ONLY=1：只录音，不加载 ASR/声纹模型。\n"
+              "           本机不产生字幕、说话人和总结；录音结束会自动转 m4a。",
+              flush=True)
     if HOST in ("127.0.0.1", "localhost") and lan.local_only():
         print("  [提示] 当前只监听本机，手机打不开推送里的链接。"
               "打开设置 →「手机访问」开启，或启动时加 --lan", flush=True)

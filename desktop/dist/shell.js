@@ -2592,6 +2592,9 @@ function renderSettings() {
   const prefs = st.prefs || {};
   const val = (sel, v) => { const el = $(sel); if (el) el.value = v == null ? '' : String(v); };
   val('#prefFallback', prefs.direct_fallback || 'ask');
+  val('#prefDirectQuality', prefs.direct_quality || 'low');
+  const exact = $('#prefTrafficExact');
+  if (exact) exact.checked = prefs.traffic_exact === true;
   val('#prefOpenMode', prefs.open_mode || 'internal');
   val('#prefCaptureMode', prefs.capture_mode || 'browser');
   val('#prefCloseAction', prefs.close_action || 'tray');
@@ -4698,6 +4701,8 @@ function bind() {
     const t = e.target;
     if (t.name === 'themeChoice') { setTheme(t.value); return; }
     if (t.id === 'prefFallback') return savePref('direct_fallback', t.value);
+    if (t.id === 'prefDirectQuality') return savePref('direct_quality', t.value);
+    if (t.id === 'prefTrafficExact') return savePref('traffic_exact', t.checked);
     if (t.id === 'prefOpenMode') return savePref('open_mode', t.value);
     if (t.id === 'prefCaptureMode') return savePref('capture_mode', t.value);
     if (t.id === 'prefCloseAction') return savePref('close_action', t.value);

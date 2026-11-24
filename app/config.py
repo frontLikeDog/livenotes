@@ -20,6 +20,10 @@ PORT = int(os.environ.get("LIVENOTES_PORT", "8765"))
 # pending/starting/live 只是「上次进程还活着」的化石状态，自动拉起会在用户
 # 不知情时重开直播间。无人值守的机器可以显式设 1。
 RESUME_ROOMS = os.environ.get("LIVENOTES_RESUME_ROOMS", "0").lower() in ("1", "true", "yes")
+# 仅采集模式：不加载 ASR/声纹模型，不做实时字幕、说话人和总结，只把音频落盘。
+# 面向 1~2GB 的 VPS 录制节点。逐场可用 /api/live/start 的 capture_only 覆盖。
+CAPTURE_ONLY = os.environ.get("LIVENOTES_CAPTURE_ONLY", "0").lower() in (
+    "1", "true", "yes", "on")
 def _lan_ip() -> str:
     """取本机局域网 IP。手机点卡片链接时不能用 127.0.0.1，这里自动填对。
 

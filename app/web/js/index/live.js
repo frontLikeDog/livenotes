@@ -5,6 +5,7 @@ import { $, api, esc, post, toast } from './core.js';
 import { livePoll, liveStop } from './workflow.js';
 const L={sid:'',active:false,stream:null,ctx:null,node:null,src:null,poll:null,chain:Promise.resolve(),
   err:'',paused:false,pauseAt:0,pausePending:false,marks:[],font:14,phase:'idle',
+  captureOnly:false,
   hist:[],hasMore:true,total:0,loading:false,cinema:false};
 const WORKLET=`class PCM16 extends AudioWorkletProcessor{
   constructor(){super();this.buf=new Int16Array(4096);this.n=0;this.sum=0;}
@@ -45,7 +46,10 @@ async function liveOpen(){
   }
   try{
     const info=await api('/api/live/info');
-    $('#lpReady').innerHTML=info.ready
+    L.captureOnly=!!info.capture_only;
+    $('#lpReady').innerHTML=info.capture_only
+      ? `仅采集模式 · 只录音，不生成字幕、说话人和总结（${esc(info.engine)}）`
+      : info.ready
       ? `模型就绪 · ${esc(info.engine)}`
       : `未就绪：缺少 ${info.missing.map(m=>esc(m.split(/[\\/]/).pop())).join('、')}<br>先运行 <code>python tools/fetch_models.py</code>`;
     $('#lpStart').disabled=!info.ready;
@@ -59,8 +63,10 @@ async function liveStart(){
     if(!navigator.mediaDevices||!navigator.mediaDevices.getDisplayMedia)
       throw new Error('当前浏览器不支持标签页采集，请用 Chrome / Edge 打开 http://127.0.0.1:8765/');
     const info=await api('/api/live/info');
+    L.captureOnly=!!info.capture_only;
     if(!info.ready)throw new Error('模型未就绪，请先运行 python tools/fetch_models.py');
     started=await post('/api/live/start',{title:'抖音直播 '+new Date().toLocaleString('zh-CN',{hour12:false})});
+    L.captureOnly=!!started.capture_only;
     let stream;
     try{
       stream=await navigator.mediaDevices.getDisplayMedia({
@@ -108,14 +114,16 @@ async function liveStart(){
       L.chain=L.chain.then(()=>liveSend(pcm)).catch(err=>{if(!L.err)L.err=err.message});
     };
     at[0].onended=()=>{if(L.active)liveStop()};
-    $('#lpList').innerHTML='<div class="ws-empty">等待说话…<br>主播开口后约 1 秒出字</div>';
+    $('#lpList').innerHTML=L.captureOnly
+      ? '<div class="ws-empty">仅采集模式：只录音，不生成字幕。<br>结束后可在「回放」里听这段录音。</div>'
+      : '<div class="ws-empty">等待说话…<br>主播开口后约 1 秒出字</div>';
     $('#lpSpeakers').innerHTML='';$('#wsMarks').innerHTML='';$('#wsErr').textContent='';
     $('#lpStats').textContent='—';$('#lpTimer').textContent='00:00:00';$('#wsRatio').innerHTML='';
     L.paused=false;L.pauseAt=0;L.pausePending=false;L.marks=[];L.font=14;
     document.documentElement.style.setProperty('--lpfs','14px');
     paintPauseUI();
     liveShow(false);liveMini(false);liveWs(true);
-    toast('已开始监听标签页音频');
+    toast(L.captureOnly?'已开始录音（仅采集，不转写）':'已开始监听标签页音频');
     livePoll();
   }catch(e){
     $('#lpErr').textContent=e.message;

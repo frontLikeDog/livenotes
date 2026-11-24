@@ -275,12 +275,15 @@ function render(){
   var bits=[];
   if(st) bits.push('<span title="'+esc('开始于 '+wallTitle(0))+'">'+esc(st.slice(0,16))+'</span>');
   bits.push('<span>时长 '+fmt(d.session.duration_s||0)+'</span>');
+  if(d.session.capture_only) bits.push('<span>仅采集 · 无逐字稿</span>');
   bits.push('<span>'+(d.speakers||[]).length+' 位说话人</span>');
   bits.push('<span>id '+esc(d.session.id)+'</span>');
   $('#meta').innerHTML=bits.join('<span class="sep">·</span>');
   var s=d.stats||{};
-  $('#stats').textContent=[s.paragraphs+' 段', s.utterances+' 句', '约 '+s.chars+' 字',
-    s.chars_per_min?('语速 '+s.chars_per_min+' 字/分'):''].filter(Boolean).join(' · ');
+  $('#stats').textContent=d.session.capture_only
+    ? '仅保存录音 · 没有转写'
+    : [s.paragraphs+' 段', s.utterances+' 句', '约 '+s.chars+' 字',
+       s.chars_per_min?('语速 '+s.chars_per_min+' 字/分'):''].filter(Boolean).join(' · ');
 
   if(S.edit){ $('#filters').innerHTML=''; renderEdit(); return; }
 
@@ -305,7 +308,9 @@ function render(){
 
   var body=$('#body');
   if(!d.paragraphs.length){
-    body.innerHTML='<div class="empty">这一场没有可读的正文<br>试试取消说话人筛选，或关闭「隐藏闲聊/广告」</div>';
+    body.innerHTML=d.session.capture_only
+      ? '<div class="empty">仅采集模式：这一场只保存了录音，没有逐字稿。<br>用上方播放器回听，或在文件中心导出音频。</div>'
+      : '<div class="empty">这一场没有可读的正文<br>试试取消说话人筛选，或关闭「隐藏闲聊/广告」</div>';
     return;
   }
   var totalDel=0,totalIns=0,totalChars=0;

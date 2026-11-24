@@ -7,6 +7,7 @@
 <title>直播语记 LiveNotes · 多人语音直播结构化记录</title>
 <script src="/static/js/theme.js"></script>
 <link rel="stylesheet" href="/static/css/index.css">
+<link rel="stylesheet" href="/static/css/naming.css">
 <link rel="stylesheet" href="/static/css/theme-dark.css">
 </head>
 <body>
@@ -238,6 +239,7 @@
         <li data-k="sum"><i></i><span>生成总结</span><b>等待</b></li>
       </ol>
       <div class="wf-meta"><span id="wfMeta"></span><span id="wfTime">0.0s</span></div>
+      <div class="wf-names" id="wfNames" hidden></div>
       <div class="wf-actions" id="wfActions"></div>
     </div>
   </div>
@@ -270,6 +272,20 @@
         <option value="none">只报失败，不切换</option>
       </select>
       <div class="set-hint" id="prefDirectHint">直取失败时会在收听页停下来，等你点「切换到浏览器采集」；不会自己打开浏览器。</div>
+      <div class="sec-t" style="margin-top:14px">直取画质</div>
+      <div class="set-hint" style="margin:6px 0">只取声音。省流档从最低可用画质拉流，少下视频流量；语音厅通常只有一路音频，不受影响。</div>
+      <select id="prefDirectQuality">
+        <option value="low">省流（推荐）</option>
+        <option value="high">最高画质</option>
+      </select>
+      <div class="set-hint">对下一路解析生效；正在听的路重连后才会换档。</div>
+      <div class="sec-t" style="margin-top:14px">流量计量</div>
+      <div class="set-hint" style="margin:6px 0">估算按码率折算；精确实测经本机回环代理逐字节统计平台下行。</div>
+      <select id="prefTrafficExact">
+        <option value="0">估算（省资源，默认）</option>
+        <option value="1">精确实测（本机代理）</option>
+      </select>
+      <div class="set-hint">精确模式多一层本机开销；正在听的路下一次重连/启动生效。</div>
     </div>
     <div class="set-sec" id="prefOpenModeRow" style="display:none">
       <div class="sec-t">桌面版 <span style="color:var(--faint);font-weight:400;font-size:11px">（仅桌面客户端）</span></div>
@@ -373,6 +389,7 @@
 </div>
 <div class="toast" id="toast"></div>
 
+<script src="/static/js/naming.js"></script>
 <script type="module" src="/static/js/index/main.js"></script>
 </body>
 </html>

@@ -7,7 +7,8 @@
   - ``per_room`` / ``shared``：浏览器播放器下载整路视频，挂到 CDP Network
     上按 ``dataReceived`` / ``loadingFinished`` 累计，得到页面侧真实下行；
   - ``direct``：ffmpeg 拉 FLV/HLS。默认按 ffmpeg 打印的码率/分辨率估算；
-    设置 ``LIVENOTES_TRAFFIC_PROXY=1`` 时走本地计数代理，拿到精确字节数。
+    设置页打开「精确流量计量」（或 ``LIVENOTES_TRAFFIC_PROXY=1``）时走本地
+    计数代理，拿到精确字节数。
 
 计量永远不能拖垮采集：所有失败路径都只把 ``source`` 标成 ``unavailable``，
 不影响录音、识别和现有的看门狗。
@@ -43,27 +44,41 @@ def _num(value: Any, default: float = 0.0) -> float:
 class TrafficMeter:
     """一个房间的流量计数器。所有方法线程安全，读快照不会阻塞采集。"""
 
-    def __init__(self, started_at: float | None = None) -> None:
+    def __init__(self, started_at: float | None = None,
+                 clock: Callable[[], float] | None = None) -> None:
+        self._clock = clock or time.monotonic
         self._lock = threading.Lock()
-        self._start = (time.monotonic() if started_at is None
-                       else float(started_at))
+        now = self._clock()
+        self._start = now if started_at is None else float(started_at)
         self._platform = 0
         self._audio = 0
         self._source = "unavailable"
         self._note = ""
         self._estimate_kbps = 0.0
-        self._last_update = time.monotonic()
+        # 当前码率从哪一刻开始生效：估算模式下按「码率 × 持续时间」积分，
+        # 换码率时先把旧码率结算掉，不能拿最新码率重算整场（历史会跳变）。
+        self._estimate_since = self._start
+        self._last_update = now
 
     # ---------------------------------------------------------------- 写入
     def reset(self) -> None:
         with self._lock:
-            self._start = time.monotonic()
+            now = self._clock()
+            self._start = now
             self._platform = 0
             self._audio = 0
             self._source = "unavailable"
             self._note = ""
             self._estimate_kbps = 0.0
-            self._last_update = time.monotonic()
+            self._estimate_since = now
+            self._last_update = now
+
+    def _accrue_locked(self, now: float) -> None:
+        """把当前估算码率结算到 ``now``（调用方已持锁）。"""
+        dt = max(0.0, now - self._estimate_since)
+        if self._estimate_kbps > 0 and dt > 0:
+            self._platform += int(self._estimate_kbps * 1000.0 / 8.0 * dt)
+        self._estimate_since = now
 
     def add_platform(self, n: int | float) -> None:
         n = int(max(0, _num(n)))
@@ -71,7 +86,7 @@ class TrafficMeter:
             return
         with self._lock:
             self._platform += n
-            self._last_update = time.monotonic()
+            self._last_update = self._clock()
 
     def set_platform_bytes(self, total: int | float) -> None:
         """代理累计值直接覆盖；只增不减，避免重连时读数回退。"""
@@ -79,7 +94,7 @@ class TrafficMeter:
         with self._lock:
             if total > self._platform:
                 self._platform = total
-                self._last_update = time.monotonic()
+                self._last_update = self._clock()
 
     def add_audio(self, n: int | float) -> None:
         n = int(max(0, _num(n)))
@@ -87,7 +102,7 @@ class TrafficMeter:
             return
         with self._lock:
             self._audio += n
-            self._last_update = time.monotonic()
+            self._last_update = self._clock()
 
     def set_source(self, source: str, note: str = "") -> None:
         source = str(source or "").strip().lower()
@@ -97,43 +112,65 @@ class TrafficMeter:
             # 精确源（代理/CDP）一旦出现，估算不许把它覆盖回去。
             if self._source in EXACT_SOURCES and source not in EXACT_SOURCES:
                 return
+            now = self._clock()
+            if self._source not in EXACT_SOURCES and source in EXACT_SOURCES:
+                # 精确源接管的瞬间先把之前的估算结算掉，别把这段历史丢掉。
+                self._accrue_locked(now)
             self._source = source
             if note:
                 self._note = str(note)[:200]
+            self._last_update = now
 
     def set_estimate_kbps(self, kbps: int | float, note: str = "") -> None:
         kbps = _num(kbps)
         if kbps <= 0:
             return
         with self._lock:
-            self._estimate_kbps = kbps
+            now = self._clock()
+            if self._source not in EXACT_SOURCES:
+                if self._estimate_kbps > 0:
+                    self._accrue_locked(now)        # 旧码率结算到此刻
+                elif self._platform <= 0:
+                    # 第一个码率：按它回填启动至今（没有更早的估算可用）。
+                    self._estimate_since = self._start
+                else:
+                    # 已经有精确字节，估算只能从此刻往后算，不能回填。
+                    self._estimate_since = now
+                self._estimate_kbps = kbps
+                self._accrue_locked(now)
+            else:
+                self._estimate_kbps = kbps
+                self._estimate_since = now
             if self._source not in EXACT_SOURCES:
                 self._source = "estimate"
                 if note:
                     self._note = str(note)[:200]
-            self._last_update = time.monotonic()
+            self._last_update = now
 
     def demote_source(self, note: str = "") -> None:
         """精确计量断掉时降级：有估算就退回估算，没有就标不可用。"""
         with self._lock:
+            now = self._clock()
+            if self._source in EXACT_SOURCES:
+                # 精确计量的这段已经计过字节，不能再用估算补一遍。
+                self._estimate_since = now
             self._source = "estimate" if self._estimate_kbps > 0 else "unavailable"
             if note:
                 self._note = str(note)[:200]
+            self._last_update = now
 
     # ---------------------------------------------------------------- 读取
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
+            now = self._clock()
+            if self._source not in EXACT_SOURCES:
+                self._accrue_locked(now)
             start = self._start
             platform = self._platform
             audio = self._audio
             source = self._source
             note = self._note
-            estimate = self._estimate_kbps
-        elapsed = max(0.001, time.monotonic() - start)
-        if platform <= 0 and estimate > 0:
-            platform = int(estimate * 1000.0 / 8.0 * elapsed)
-            if source == "unavailable":
-                source = "estimate"
+        elapsed = max(0.001, now - start)
         platform_bps = platform * 8.0 / elapsed
         audio_bps = audio * 8.0 / elapsed
         return {
@@ -198,7 +235,8 @@ class CdpTrafficCounter:
 class CountingProxy:
     """把上游流包一层本地 HTTP 代理，按实际转发字节计数。
 
-    只在 ``LIVENOTES_TRAFFIC_PROXY=1`` 时启用。代理只监听 127.0.0.1，
+    只在设置页打开「精确流量计量」（或 ``LIVENOTES_TRAFFIC_PROXY=1``）时
+    启用。代理只监听 127.0.0.1，
     随机路径做最小隔离；上游 403/404 会原样转发，ffmpeg 的断流判断不受影响。
     """
 

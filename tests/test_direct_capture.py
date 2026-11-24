@@ -64,7 +64,7 @@ def api_calls(monkeypatch):
 def fake_media(monkeypatch):
     chunks: list[tuple[str, bytes]] = []
 
-    def fake_resolve(url, timeout=20.0):
+    def fake_resolve(url, timeout=20.0, quality="low"):
         return "http://stream.example/live.flv", "fake"
 
     def fake_spawn(stream):
@@ -138,8 +138,8 @@ def test_bring_up_does_not_report_a_fake_url_without_web_rid(api_calls, fake_med
         a.shutdown()
 
 
-def test_bring_up_stops_orphan_session_when_room_stopped_midway(monkeypatch):
-    """建会话期间用户点了停止：新会话要收掉，不能再报 starting/live。"""
+def test_bring_up_skips_session_when_room_stopped_midway(monkeypatch):
+    """解析期间用户点了停止：不再建会话、不拉 ffmpeg，也不报 live。"""
     calls: list[tuple[str, dict]] = []
 
     def fake_api(base, path, payload=None, method="GET", timeout=8.0):
@@ -158,12 +158,11 @@ def test_bring_up_stops_orphan_session_when_room_stopped_midway(monkeypatch):
     a = direct_capture.DirectAgent("http://127.0.0.1:8765")
     try:
         a.bring_up(_room())
-        stops = [b for p, b in calls if p == "/api/live/stop"]
-        assert stops and stops[-1].get("session_id") == "LIVE_orphan"
+        assert resolved               # 先解析，解析完才问房间状态
+        assert not [b for p, b in calls if p == "/api/live/start"]
+        assert not [b for p, b in calls if p == "/api/live/stop"]
         reports = [b for p, b in calls if p == "/api/rooms/state"]
-        assert not [b for b in reports
-                    if b.get("session_id") == "LIVE_orphan"]
-        assert not resolved            # 没有继续解析/拉 ffmpeg
+        assert not [b for b in reports if b.get("state") == "live"]
         assert "rm1" not in a.running
     finally:
         a.shutdown()
@@ -212,8 +211,8 @@ def test_non_douyin_ask_mode_waits_for_user(api_calls, monkeypatch):
         a.shutdown()
 
 
-def test_resolve_failure_auto_mode_falls_back_with_same_session(api_calls, monkeypatch):
-    def bad_resolve(url, timeout=20.0):
+def test_resolve_failure_auto_mode_falls_back_to_browser(api_calls, monkeypatch):
+    def bad_resolve(url, timeout=20.0, quality="low"):
         raise direct_capture.ResolveError("解析失败")
 
     monkeypatch.setattr(direct_capture, "resolve_douyin", bad_resolve)
@@ -244,7 +243,8 @@ def test_resolve_failure_auto_mode_falls_back_with_same_session(api_calls, monke
     a.fallback_engine = "shared"
     try:
         a.bring_up(_room())
-        assert fb.calls == [("rm1", "LIVE_test")]
+        # 解析失败时还没有建会话：浏览器回退自己建一场，不留空场次。
+        assert fb.calls == [("rm1", "")]
         assert "rm1" in a.fallback_rooms
         events = [b.get("capture_event", {}).get("kind") for p, b in api_calls
                   if p == "/api/rooms/state"]
@@ -254,7 +254,7 @@ def test_resolve_failure_auto_mode_falls_back_with_same_session(api_calls, monke
 
 
 def test_resolve_failure_ask_mode_waits_for_user(api_calls, monkeypatch):
-    def bad_resolve(url, timeout=20.0):
+    def bad_resolve(url, timeout=20.0, quality="low"):
         raise direct_capture.ResolveError("解析失败")
 
     monkeypatch.setattr(direct_capture, "resolve_douyin", bad_resolve)
@@ -477,6 +477,7 @@ def test_resolve_douyin_offline_page_fails_fast(monkeypatch):
             "https://webcast.amemv.com/douyin/webcast/reflow/1")
     except direct_capture.ResolveError as e:
         assert "没有开播" in str(e)
+        assert e.retryable is False
     else:
         raise AssertionError("应该报 ResolveError")
 
@@ -512,7 +513,7 @@ def test_resolve_douyin_falls_back_to_streamlink(monkeypatch):
     monkeypatch.setattr(direct_capture, "_fetch_live_page",
                         lambda live, timeout: ("<html>直播已结束</html>", 0.1))
 
-    def fake_streamlink(target, timeout):
+    def fake_streamlink(target, timeout, quality="low"):
         seen.append(target)
         return "http://stream.example/live.flv", "streamlink 0.1s"
 
@@ -520,6 +521,212 @@ def test_resolve_douyin_falls_back_to_streamlink(monkeypatch):
     url, note = direct_capture.resolve_douyin(
         "https://webcast.amemv.com/douyin/webcast/reflow/1")
     assert url == "http://stream.example/live.flv"
+    assert seen == ["https://live.douyin.com/123456789012"]
+
+
+def test_short_link_retries_redirect_and_reuses_the_reflow_landing(monkeypatch):
+    """短链第一次跳转超时、重试落到 reflow：这一次落地页必须拿来解析。
+
+    线上就是这里挂的：reflow 和 live 各跟一次跳转，第一次超时、第二次
+    落到 reflow 后被只认 live 页的分支丢掉，最后只剩一句
+    「没能解析出直播流地址」，看不出是短链没打开。
+    """
+    calls: list[str] = []
+
+    class Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def geturl(self):
+            return ("https://webcast.amemv.com/douyin/webcast/reflow/"
+                    "7700000000000000003?u_code=x")
+
+    def flaky(req, timeout=10):
+        calls.append(req.full_url)
+        if len(calls) == 1:
+            raise TimeoutError("timed out")
+        return Resp()
+
+    html = ('<webcast-reflow-player url="http://pull.example/live.flv">'
+            '</webcast-reflow-player>'
+            '<script>{"owner":{"webRid":"123456789012"}}</script>')
+    monkeypatch.setattr(direct_capture.urllib.request, "urlopen", flaky)
+    monkeypatch.setattr(direct_capture, "_fetch_reflow",
+                        lambda landing, timeout: (html, 0.2))
+    monkeypatch.setattr(direct_capture, "_fetch_live_page",
+                        lambda live, timeout: ("<html>no stream</html>", 0.1))
+    monkeypatch.setattr(direct_capture, "_resolve_streamlink",
+                        lambda *a, **kw: (_ for _ in ()).throw(
+                            AssertionError("有播放地址时不该走 streamlink")))
+    url, note = direct_capture.resolve_douyin("https://v.douyin.com/abc")
+    assert url == "http://pull.example/live.flv"
+    assert note.startswith("reflow ")
+    assert calls == ["https://v.douyin.com/abc"] * 2
+
+
+def test_resolve_network_error_is_retryable(monkeypatch):
+    """抓页面失败是网络类错误：标 retryable，交给代理补试。"""
+    monkeypatch.setattr(direct_capture, "_landing_url",
+                        lambda url, timeout=10.0: direct_capture._REFLOW_BASE + "1")
+    monkeypatch.setattr(direct_capture, "_fetch_reflow",
+                        lambda landing, timeout: (_ for _ in ()).throw(
+                            TimeoutError("timed out")))
+    with pytest.raises(direct_capture.ResolveError) as err:
+        direct_capture.resolve_douyin(
+            "https://webcast.amemv.com/douyin/webcast/reflow/1")
+    assert err.value.retryable is True
+
+
+def test_transient_resolve_failure_is_retried_not_failed(api_calls, fake_media,
+                                                         monkeypatch):
+    """网络类解析失败先补试：不建空会话、不判 failed，到点再拉一次。"""
+    attempts: list[str] = []
+
+    def flaky(url, timeout=20.0, quality="low"):
+        attempts.append(url)
+        if len(attempts) == 1:
+            raise direct_capture.ResolveError(
+                "抓取直播间页面失败：timed out", retryable=True)
+        return "http://stream.example/live.flv", "fake"
+
+    monkeypatch.setattr(direct_capture, "resolve_douyin", flaky)
+    a = direct_capture.DirectAgent("http://127.0.0.1:8765")
+    try:
+        room = _room()
+        a.bring_up(room)
+        reports = [b for p, b in api_calls if p == "/api/rooms/state"]
+        assert not [b for b in reports if b.get("state") == "failed"]
+        assert not [b for p, b in api_calls if p == "/api/live/start"]
+        assert a.resolve_retries.get("rm1") == 1
+        assert a.resolve_retry_at.get("rm1", 0.0) > time.time()
+        # 还没到点：tick 不能再撞一次解析
+        a.tick([dict(room, state="starting")])
+        assert len(attempts) == 1
+        # 到点后补试成功，补试状态清掉
+        a.resolve_retry_at["rm1"] = 0.0
+        a.tick([dict(room, state="starting")])
+        assert len(attempts) == 2
+        assert a.running.get("rm1")
+        assert "rm1" not in a.resolve_retries
+    finally:
+        a.shutdown()
+
+
+def test_tick_checks_live_rooms_before_resolving_new_ones(monkeypatch):
+    """一个坏房间解析短链时，不能让其他房间的断流检测排在它后面。"""
+    a = direct_capture.DirectAgent("http://127.0.0.1:8765")
+    order: list[str] = []
+    a.running["rm_live"] = {"sid": "S_LIVE"}
+    monkeypatch.setattr(a, "_check", lambda r, info: order.append("check"))
+    monkeypatch.setattr(a, "bring_up",
+                        lambda room, session="": order.append("start"))
+    monkeypatch.setattr(direct_capture.time, "sleep", lambda s: None)
+    try:
+        a.tick([_room(id="rm_slow", state="pending"),
+                _room(id="rm_live", state="live", session_id="S_LIVE")])
+        assert order == ["check", "start"]
+    finally:
+        a.shutdown()
+
+
+def test_definitive_resolve_failure_is_not_retried(api_calls, monkeypatch):
+    """明确下播不补试：补试只会让用户多等十几秒。"""
+    def offline(url, timeout=20.0, quality="low"):
+        raise direct_capture.ResolveError(
+            "直播间当前没有开播（页面显示「直播已结束」）")
+
+    monkeypatch.setattr(direct_capture, "resolve_douyin", offline)
+    monkeypatch.setattr(direct_capture, "find_chrome", lambda: "chrome.exe")
+    a = direct_capture.DirectAgent("http://127.0.0.1:8765")
+    try:
+        a.bring_up(_room())
+        assert a.resolve_retries == {}
+        reports = [b for p, b in api_calls if p == "/api/rooms/state"]
+        assert [b for b in reports if b.get("state") == "failed"]
+    finally:
+        a.shutdown()
+
+
+def test_short_link_redirect_failure_names_the_link(monkeypatch):
+    """跳转失败要说「打不开链接」，不能伪装成「没有流地址」。"""
+    def boom(req, timeout=10):
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr(direct_capture.urllib.request, "urlopen", boom)
+    with pytest.raises(direct_capture.ResolveError) as err:
+        direct_capture.resolve_douyin("https://v.douyin.com/abc")
+    msg = str(err.value)
+    assert "链接" in msg and "超时" in msg
+    assert "没能解析出直播流地址" not in msg
+
+
+def test_short_link_landing_elsewhere_says_so(monkeypatch):
+    """短链跳到个人页/活动页：直接说没落到直播页，别继续猜流地址。"""
+    class Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def geturl(self):
+            return "https://www.douyin.com/user/abc"
+
+    monkeypatch.setattr(direct_capture.urllib.request, "urlopen",
+                        lambda req, timeout=10: Resp())
+    with pytest.raises(direct_capture.ResolveError) as err:
+        direct_capture.resolve_douyin("https://v.douyin.com/abc")
+    assert "没有落到直播页" in str(err.value)
+
+
+def test_room_meta_uses_caller_timeout_for_short_link(monkeypatch):
+    """补名字只值几秒：不能拿默认的 10 秒跳转去堵开播。"""
+    direct_capture._META_CACHE.clear()   # 前面的用例可能缓存过同一个短链
+    seen: list[float] = []
+    monkeypatch.setattr(direct_capture, "_landing_url",
+                        lambda url, timeout=10.0: seen.append(timeout) or "")
+    assert direct_capture.room_meta("https://v.douyin.com/abc", timeout=3.0) == {}
+    assert seen == [3.0]
+
+
+def test_room_meta_uses_resolve_cache_when_short_link_flakes(monkeypatch):
+    """解析成功时已缓存原始短链；补页面地址不能再赌一次跳转。"""
+    direct_capture._META_CACHE.clear()
+    direct_capture._remember_meta("https://v.douyin.com/abc",
+                                  {"web_rid": "123456789012"})
+
+    def boom(*a, **kw):
+        raise AssertionError("缓存命中时不该再跟短链")
+
+    monkeypatch.setattr(direct_capture, "_landing_url", boom)
+    meta = direct_capture.room_meta("https://v.douyin.com/abc")
+    assert meta["web_rid"] == "123456789012"
+
+
+def test_bring_up_resolves_known_web_rid_page_not_short_link(api_calls, fake_media,
+                                                             monkeypatch):
+    """重试/自愈时用已确认的 live.douyin.com 房号页，不再跟分享短链。"""
+    seen: list[str] = []
+
+    def fake_resolve(url, timeout=20.0, quality="low"):
+        seen.append(url)
+        return "http://stream.example/live.flv", "fake"
+
+    monkeypatch.setattr(direct_capture, "resolve_douyin", fake_resolve)
+    monkeypatch.setattr(direct_capture, "room_meta", lambda *a, **kw: {})
+    a = direct_capture.DirectAgent("http://127.0.0.1:8765")
+    try:
+        room = _room(url="https://v.douyin.com/abc",
+                     resolved_url="https://live.douyin.com/123456789012")
+        a.bring_up(room)
+        assert a._resolve_target(room) == "https://live.douyin.com/123456789012"
+        assert a._resolve_target(_room(url="https://v.douyin.com/abc")) == \
+            "https://v.douyin.com/abc"
+    finally:
+        a.shutdown()
     assert seen == ["https://live.douyin.com/123456789012"]
 
 
@@ -533,10 +740,35 @@ _LIVE_HTML = (
     r'</script>')
 
 
-def test_pick_live_stream_prefers_best_quality_and_unescapes():
+def test_pick_live_stream_defaults_to_lowest_quality_and_unescapes():
+    """只要声音：默认省流档，别为了 16k 音频拉最高画质。"""
     url = direct_capture._pick_live_stream(_LIVE_HTML)
-    assert url == "http://pull.example/stream-1_or4.flv?k=1&t=2"
+    assert url == "http://pull.example/stream-1_md.flv?k=3&t=4"
     assert "\\u0026" not in url
+
+
+def test_pick_live_stream_high_quality_when_requested():
+    url = direct_capture._pick_live_stream(_LIVE_HTML, "high")
+    assert url == "http://pull.example/stream-1_or4.flv?k=1&t=2"
+
+
+def test_pick_live_stream_reads_camel_case_flv_pull_url():
+    """新版 live 页是 streamUrl.flvPullUrl；只认 snake_case 会白掉到兜底。"""
+    html = (
+        r'<script>{"streamUrl":{"flvPullUrl":{'
+        r'\"SD2\":\"http://pull.example/a_sd2.flv?k=1\\u0026t=2\",'
+        r'\"LD1\":\"http://pull.example/a_ld1.flv?k=3\\u0026t=4\"}}}</script>')
+    url = direct_capture._pick_live_stream(html)
+    assert url == "http://pull.example/a_ld1.flv?k=3&t=4"
+
+
+def test_pick_stream_url_uses_quality_map_in_reflow():
+    html = ('{"streamUrl":{"flvPullUrl":{'
+            '"FULL_HD1":"http://pull.example/or4.flv",'
+            '"SD2":"http://pull.example/md.flv"}}}')
+    assert direct_capture._pick_stream_url(html) == "http://pull.example/md.flv"
+    assert direct_capture._pick_stream_url(html, "high") == \
+        "http://pull.example/or4.flv"
 
 
 def test_resolve_douyin_prefers_live_page_over_pinned_reflow(monkeypatch):
@@ -559,7 +791,8 @@ def test_resolve_douyin_prefers_live_page_over_pinned_reflow(monkeypatch):
                         lambda landing, timeout: (stale, 0.2))
     monkeypatch.setattr(direct_capture, "_fetch_live_page", fake_live)
     url, note = direct_capture.resolve_douyin(reflow)
-    assert url == "http://pull.example/stream-1_or4.flv?k=1&t=2"
+    # 默认省流档：从 live 页取最低可用档，而不是旧代码的最高画质
+    assert url == "http://pull.example/stream-1_md.flv?k=3&t=4"
     assert note.startswith("live ")
     assert fetched == ["https://live.douyin.com/123456789012"]
 
@@ -619,7 +852,7 @@ def test_recover_stops_retrying_when_404_resolves_to_same_stream(api_calls,
         a.running["rm1"] = info
         # 重新解析只换了签名，stream id 还是那一路：这就是同一场。
         monkeypatch.setattr(direct_capture, "resolve_douyin",
-                            lambda url, timeout=20.0: (
+                            lambda url, timeout=20.0, quality="low": (
                                 "http://pull.example/radio/"
                                 "stream-696886772589133859_md.flv?wsSecret=new",
                                 "live 0.1s"))
@@ -670,6 +903,24 @@ def test_apply_config_hot_updates_fallback_mode(monkeypatch):
         monkeypatch.setenv("LIVENOTES_DIRECT_FALLBACK", "per_room")
         a.apply_config({"direct_fallback": "none"})
         assert a.fallback_mode == "per_room"
+    finally:
+        a.shutdown()
+
+
+def test_apply_config_hot_updates_quality_and_traffic(monkeypatch):
+    monkeypatch.delenv("LIVENOTES_TRAFFIC_PROXY", raising=False)
+    a = direct_capture.DirectAgent("http://127.0.0.1:8765")
+    try:
+        assert a.direct_quality == "low" and a.traffic_exact is False
+        # 没有 direct_fallback 字段也不能挡住其它配置热更新
+        a.apply_config({"direct_quality": "high", "traffic_exact": True})
+        assert a.direct_quality == "high" and a.traffic_exact is True
+        a.apply_config({"direct_quality": "bogus"})
+        assert a.direct_quality == "high"
+        # 环境变量仍优先，且能强制关掉
+        monkeypatch.setenv("LIVENOTES_TRAFFIC_PROXY", "0")
+        a.apply_config({"traffic_exact": True})
+        assert a.traffic_exact is False
     finally:
         a.shutdown()
 

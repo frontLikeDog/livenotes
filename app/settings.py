@@ -109,6 +109,11 @@ def _profile_view(pid: str, p: dict) -> dict[str, Any]:
 DEFAULT_PREFS = {
     "topics": 10,             # AI 分类归纳出的主题数
     "direct_fallback": "",    # direct 失败策略；空 = 没在设置页选过，跟随环境变量/默认
+    # 直取只取声音：画质只决定顺带下载的视频有多少，不影响音频契约。
+    # low = 最低可用档（省流，默认）；high = 最高画质（排障/特殊场次用）。
+    "direct_quality": "low",
+    # 流量计量：False = 按码率估算；True = 经本机回环代理逐字节实测（多一层开销）。
+    "traffic_exact": False,
     "open_mode": "",          # 桌面壳新窗口：external / internal；空 = 未选（桌面默认 internal）
     "capture_mode": "",       # 桌面采集：browser / direct / external；空 = 未选（桌面默认 browser）
     "close_action": "tray",   # 桌面壳关窗口：tray = 最小化到托盘 / quit = 退出程序
@@ -138,6 +143,7 @@ DEFAULT_PREFS = {
 FALLBACK_MODES = ("ask", "auto", "per_room", "shared", "none")
 OPEN_MODES = ("external", "internal")
 CAPTURE_MODES = ("browser", "direct", "external")
+DIRECT_QUALITIES = ("low", "high")
 CLOSE_ACTIONS = ("tray", "quit")
 PERF_MODES = ("auto", "full", "lite")
 WEEKLY_TIMES = ("mon-09", "mon-12", "sun-20")
@@ -157,6 +163,11 @@ def _open_mode(v: Any) -> str:
 def _capture_mode(v: Any) -> str:
     s = str(v or "").strip().lower()
     return s if s in CAPTURE_MODES else ""
+
+
+def _direct_quality(v: Any) -> str:
+    s = str(v or "").strip().lower()
+    return s if s in DIRECT_QUALITIES else ""
 
 
 def _perf_mode(v: Any) -> str:
@@ -205,12 +216,14 @@ def prefs() -> dict[str, Any]:
     except (TypeError, ValueError):
         p["topics"] = DEFAULT_PREFS["topics"]
     p["direct_fallback"] = _fallback_mode(p.get("direct_fallback"))
+    p["direct_quality"] = (_direct_quality(p.get("direct_quality"))
+                           or DEFAULT_PREFS["direct_quality"])
     p["open_mode"] = _open_mode(p.get("open_mode"))
     p["capture_mode"] = _capture_mode(p.get("capture_mode"))
     p["close_action"] = _close_action(p.get("close_action")) or "tray"
     for k in ("notify_enabled", "notify_system", "notify_sound", "notify_detail",
               "weekly_enabled", "qa_enabled", "qa_suggest_enabled",
-              "insight_enabled", "qa_followups_enabled",
+              "insight_enabled", "qa_followups_enabled", "traffic_exact",
               "auto_record_enabled", "low_power_pause"):
         b = _as_bool(p.get(k))
         p[k] = DEFAULT_PREFS[k] if b is None else b
@@ -270,6 +283,10 @@ def set_prefs(patch: dict[str, Any]) -> dict[str, Any]:
                 v = _capture_mode(v)
                 if not v:
                     continue
+            elif k == "direct_quality":
+                v = _direct_quality(v)
+                if not v:
+                    continue
             elif k == "close_action":
                 v = _close_action(v)
                 if not v:
@@ -282,7 +299,7 @@ def set_prefs(patch: dict[str, Any]) -> dict[str, Any]:
                        "notify_detail", "weekly_enabled", "qa_enabled",
                        "qa_suggest_enabled", "insight_enabled",
                        "qa_followups_enabled", "auto_record_enabled",
-                       "low_power_pause"):
+                       "low_power_pause", "traffic_exact"):
                 v = _as_bool(v)
                 if v is None:
                     continue

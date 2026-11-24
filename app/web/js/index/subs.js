@@ -125,7 +125,9 @@ function paintSubs(partial){
       +'<span class="lp-x">'+esc(partial.text)+'…</span></div>');
   }
   const keepTop=atBottom?null:el.scrollTop;
-  el.innerHTML=rows.join('')||'<div class="ws-empty">等待说话…<br>主播开口后约 1 秒出字</div>';
+  el.innerHTML=rows.join('')||(L.captureOnly
+    ?'<div class="ws-empty">仅采集模式：只录音，不生成字幕。<br>结束后可在「回放」里听这段录音。</div>'
+    :'<div class="ws-empty">等待说话…<br>主播开口后约 1 秒出字</div>');
   $$('#lpList .lp-s').forEach(function(el){
     el.onclick=function(ev){
       ev.stopPropagation();
@@ -176,20 +178,32 @@ function renderLive(d){
   }
   $('#lpTimer').textContent=fmt(d.elapsed||0);
   $('#miniTimer').textContent=fmt(d.elapsed||0);
-  const st=d.error?'出错':!d.running?'已结束':L.paused?'已暂停':d.speech?'正在说话…':'监听中';
-  $('#lpState').textContent=st;$('#wsSub').textContent=L.paused?'已暂停':'直播中';
+  L.captureOnly=!!d.capture_only;
+  const st=d.error?'出错':!d.running?'已结束':L.paused?'已暂停':d.capture_only?'仅录制':d.speech?'正在说话…':'监听中';
+  $('#lpState').textContent=st;$('#wsSub').textContent=L.paused?'已暂停':d.capture_only?'录音中':'直播中';
   paintPauseUI();
-  const silent=Math.max(0,(d.elapsed||0)-(d.speech_s??d.recognized_s??0));
-  $('#lpStats').textContent=`已转写 ${Math.round(d.recognized_s||0)}s · 人声 ${Math.round(d.speech_s||0)}s · 静音 ${Math.round(silent)}s${d.dropped?` · 丢弃 ${d.dropped}`:''}`;
+  if(d.capture_only){
+    const quiet=Math.max(0,(d.elapsed||0)-(d.audible_s||0));
+    $('#lpStats').textContent=`已录 ${Math.round(d.elapsed||0)}s · 有声 ${Math.round(d.audible_s||0)}s · 静音/空 ${Math.round(quiet)}s${d.dropped?` · 丢弃 ${d.dropped}`:''}`;
+    $('#wsMetrics').innerHTML=[
+      `<span class="ws-metric">录音 <b>${fmt(d.elapsed||0)}</b></span>`,
+      `<span class="ws-metric">有声 <b>${fmt(d.audible_s||0)}</b></span>`,
+      `<span class="ws-metric" title="输入缓冲块">队列 <b>${d.queued||0}</b></span>`,
+      `<span class="ws-metric">打点 <b>${(d.marks||L.marks||[]).length}</b></span>`,
+    ].join('');
+  }else{
+    const silent=Math.max(0,(d.elapsed||0)-(d.speech_s??d.recognized_s??0));
+    $('#lpStats').textContent=`已转写 ${Math.round(d.recognized_s||0)}s · 人声 ${Math.round(d.speech_s||0)}s · 静音 ${Math.round(silent)}s${d.dropped?` · 丢弃 ${d.dropped}`:''}`;
+    const rec=Math.max(1,d.recognized_s||0);
+    $('#wsMetrics').innerHTML=[
+      `<span class="ws-metric">语速 <b>${((d.chars||0)/rec).toFixed(1)}</b> 字/秒</span>`,
+      `<span class="ws-metric">提问 <b>${d.questions||0}</b> 次</span>`,
+      `<span class="ws-metric" title="输入缓冲块 / ASR 定稿排队">队列 <b>${d.queued||0}</b>${d.asr&&d.asr.pending_finals?`+${d.asr.pending_finals}`:''}</span>`,
+      `<span class="ws-metric">打点 <b>${(d.marks||L.marks||[]).length}</b></span>`,
+    ].join('');
+  }
   const sp=d.speakers||[];
   L.speakers=sp;
-  const rec=Math.max(1,d.recognized_s||0);
-  $('#wsMetrics').innerHTML=[
-    `<span class="ws-metric">语速 <b>${((d.chars||0)/rec).toFixed(1)}</b> 字/秒</span>`,
-    `<span class="ws-metric">提问 <b>${d.questions||0}</b> 次</span>`,
-    `<span class="ws-metric" title="输入缓冲块 / ASR 定稿排队">队列 <b>${d.queued||0}</b>${d.asr&&d.asr.pending_finals?`+${d.asr.pending_finals}`:''}</span>`,
-    `<span class="ws-metric">打点 <b>${(d.marks||L.marks||[]).length}</b></span>`,
-  ].join('');
   const tot=sp.reduce((a,p)=>a+(p.seconds||0),0)||1;
   const spName=p=>p.person_name||p.label;
   $('#wsRatio').innerHTML=sp.length

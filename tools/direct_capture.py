@@ -61,8 +61,12 @@ DIRECT_WARN_S = 10.0                  # 先提示，不重建
 DIRECT_RECOVER_AFTER_S = 15.0         # 超过这个时间没有成功送块就重建
 DIRECT_RETRY_S = 10.0                 # 解析/启动失败后的退避
 DIRECT_MAX_RESTARTS = 3
+# 网络类解析失败（超时/连接重置/临时错误页）的补试节奏；明确下播不补试。
+RESOLVE_RETRY_DELAYS = (3.0, 10.0)
 FIRST_CHUNK_WAIT_S = 8.0
 RESOLVE_TIMEOUT_S = 20.0
+# 直取只取声音，默认从最低可用画质拉流；high 留给排障/特殊场次。
+_DEFAULT_QUALITY = "low"
 # 静音探针：块照推、但内容连续全零时，定期抓一次直播间页面确认还在不在播。
 # 抖音下播后连接常常还挂着，ffmpeg 持续按实时速率吐静音帧——这时"有没有块"
 # 和 ffmpeg 退没退出都说明不了问题，只有页面状态能给答案。
@@ -71,16 +75,28 @@ DIRECT_ZERO_PROBE_AFTER_S = 120.0     # 连续全零这么久才值得去问一�
 DIRECT_ZERO_PROBE_EVERY_S = 60.0      # 两次探测的最小间隔，别把抖音页面当轮询接口
 PROBE_TIMEOUT_S = 8.0
 
-# 精确流量计量：流先经过本地计数代理再交给 ffmpeg。默认关闭，避免改变媒体
-# 路径；需要精确数字时设 LIVENOTES_TRAFFIC_PROXY=1（代理只监听 127.0.0.1）。
-TRAFFIC_PROXY = os.environ.get("LIVENOTES_TRAFFIC_PROXY", "").strip().lower() in (
-    "1", "true", "yes", "on")
+# 精确流量计量：流先经过本地计数代理再交给 ffmpeg。默认跟随设置页；
+# LIVENOTES_TRAFFIC_PROXY=1/0 仅作为脚本的临时覆盖（代理只监听 127.0.0.1）。
+def _env_traffic_proxy() -> bool | None:
+    raw = os.environ.get("LIVENOTES_TRAFFIC_PROXY", "").strip().lower()
+    if not raw:
+        return None
+    return raw in ("1", "true", "yes", "on")
 
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
 class ResolveError(RuntimeError):
-    """解析不出可播放的流地址。"""
+    """解析不出可播放的流地址。
+
+    ``retryable`` 表示这次失败像网络抖动（超时、连接重置、临时错误页），
+    值得隔几秒再试；明确下播 / 链接不是直播间 / 未安装 streamlink 不重试，
+    免得让用户白等十几秒。
+    """
+
+    def __init__(self, msg: str = "", retryable: bool = False) -> None:
+        super().__init__(msg)
+        self.retryable = bool(retryable)
 
 
 class SessionGone(RuntimeError):
@@ -123,14 +139,33 @@ _OFFLINE_MARKS = ("直播已结束", "主播已下播", "主播暂未开播", "�
 _PAGE_ERROR_MARKS = ("服务器开小差了", "直播间不存在", "页面不存在")
 
 
+_REDIRECT_ATTEMPTS = 2
+_REDIRECT_TIMEOUT_CAP_S = 10.0
+
+
+def _redirect_target(url: str, timeout: float = 10.0) -> tuple[str, str]:
+    """跟一次跳转，返回 (落地地址, 失败原因)。短链（v.douyin.com）靠它落地。
+
+    抖音的跳转偶尔会超过十秒。以前单次超时就返回空串，而且 reflow 和 live
+    各跟一次：第一次超时、第二次成功落在 reflow 时，两边都拿不到地址，最后
+    只剩一句没有信息量的「没能解析出直播流地址」。这里重试一次，并把最后
+    一次的错误带回去，调用方才能说清是「短链打不开」还是「页面没有流」。
+    """
+    per_try = max(1.0, min(float(timeout or 10.0), _REDIRECT_TIMEOUT_CAP_S))
+    err = ""
+    for _ in range(_REDIRECT_ATTEMPTS):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": _MOBILE_UA})
+            with urllib.request.urlopen(req, timeout=per_try) as resp:
+                return resp.geturl(), ""
+        except Exception as e:
+            err = str(e)[:120] or type(e).__name__
+    return "", err
+
+
 def _final_url(url: str, timeout: float = 10.0) -> str:
-    """跟一次跳转，返回落地地址；失败返回空串。短链（v.douyin.com）靠它落地。"""
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": _MOBILE_UA})
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.geturl()
-    except Exception:
-        return ""
+    """跟一次跳转，返回落地地址；失败返回空串。"""
+    return _redirect_target(url, timeout)[0]
 
 
 def _live_target(url: str, timeout: float = 10.0) -> str:
@@ -199,13 +234,16 @@ def _clean_url(u: str) -> str:
     return u.replace("\\u0026", "&").replace("\\/", "/").strip()
 
 
-def _pick_stream_url(text: str) -> str:
+def _pick_stream_url(text: str, quality: str = _DEFAULT_QUALITY) -> str:
     """reflow 页 -> 播放地址。优先 FLV，其次 HLS。"""
     m = re.search(r'<webcast-reflow-player[^>]*\burl="([^"]+)"', text, re.I)
     if m:
         return _clean_url(m.group(1))
     # 页面后半段是 RSC 内嵌 JSON，播放地址是转义过的 \"flv\":\"https:\/\/...\"。
     flat = text.replace('\\"', '"').replace("\\/", "/")
+    stream = _pick_flv_by_quality(_flatten_json(text), quality)
+    if stream:
+        return stream
     for key in ("flv", "hls"):
         m = re.search(r'"%s"\s*:\s*"(https?://[^"]+)"' % key, flat, re.I)
         if m:
@@ -257,31 +295,55 @@ def _flatten_json(text: str) -> str:
     return t
 
 
-_FLV_BLOCK_RE = re.compile(r'"flv_pull_url"\s*:\s*\{([^{}]{0,4000})\}')
+# 新版页面用 camelCase（streamUrl.flvPullUrl），老版是 flv_pull_url；
+# 两种都要认，否则会白白掉到「first flv」甚至 streamlink 兜底。
+_FLV_BLOCK_RE = re.compile(
+    r'"(?:flv_pull_url|flvPullUrl)"\s*:\s*\{([^{}]{0,4000})\}')
 _FLV_PAIR_RE = re.compile(
     r'"([A-Za-z0-9_]{1,24})"\s*:\s*"(https?://[^"]+?\.flv[^"]*)"')
-# 画质从高到低：音频只取一路，挑最高质量的流最稳。
-_QUALITY_ORDER = ("FULL_HD1", "HD1", "SD1", "SD2", "LD1", "LD2")
+# 直取只取声音，画质只决定顺带下载的视频有多少。抖音的档位从高到低：
+# ORIGION(原画) / FULL_HD1(蓝光) / HD1(超清) / SD1(高清) / SD2(标清) /
+# LD1(流畅) / LD2。省流档从最低往上找，避免为了 16k 单声道音频拉 6 Mbps 视频。
+_QUALITY_ORDERS = {
+    "low": ("LD2", "LD1", "SD2", "SD1", "HD1", "FULL_HD1", "ORIGION"),
+    "high": ("ORIGION", "FULL_HD1", "HD1", "SD1", "SD2", "LD1", "LD2"),
+}
 
 
-def _pick_live_stream(text: str) -> str:
-    """live 页 -> 当前这一场的播放地址。优先 FLV，拿不到退 HLS。"""
-    flat = _flatten_json(text)
+def _quality_order(quality: str) -> tuple[str, ...]:
+    return _QUALITY_ORDERS.get(str(quality or "").strip().lower(),
+                               _QUALITY_ORDERS[_DEFAULT_QUALITY])
+
+
+def _pick_flv_by_quality(flat: str, quality: str = _DEFAULT_QUALITY) -> str:
+    """扁平化页面 JSON -> 按画质偏好挑一路 FLV；没有就返回空。"""
     found: dict[str, str] = {}
     for block in _FLV_BLOCK_RE.finditer(flat):
         for name, url in _FLV_PAIR_RE.findall(block.group(1)):
             found.setdefault(name, _clean_url(url))
-    for q in _QUALITY_ORDER:
+    order = _quality_order(quality)
+    # 省流档倒着找时，未知档位也别抢在已知低档前面：先按偏好，再按发现顺序。
+    for q in order:
         if found.get(q):
             return found[q]
     for url in found.values():          # 画质名换了也认，只要有一路
         if url:
             return url
+    return ""
+
+
+def _pick_live_stream(text: str, quality: str = _DEFAULT_QUALITY) -> str:
+    """live 页 -> 当前这一场的播放地址。优先 FLV，拿不到退 HLS。"""
+    flat = _flatten_json(text)
+    stream = _pick_flv_by_quality(flat, quality)
+    if stream:
+        return stream
     m = re.search(r"https?://[^\"'\s<>]+\.m3u8[^\"'\s<>]*", flat)
     return _clean_url(m.group(0)) if m else ""
 
 
-def _resolve_live_page(web_rid: str, timeout: float) -> tuple[str, str]:
+def _resolve_live_page(web_rid: str, timeout: float,
+                       quality: str = _DEFAULT_QUALITY) -> tuple[str, str]:
     """web_rid -> 当前场次的播放地址；下播 / 空页面抛 ResolveError。
 
     解析的第一选择：web_rid 不随场次变，页面里的 stream_url 永远是最新一场。
@@ -291,8 +353,9 @@ def _resolve_live_page(web_rid: str, timeout: float) -> tuple[str, str]:
         text, cost = _fetch_live_page(_LIVE_PAGE + str(web_rid or ""), timeout)
     except Exception as e:
         raise ResolveError("抓取直播间页面失败：%s"
-                           % (str(e)[:120] or type(e).__name__))
-    stream = _pick_live_stream(text)
+                           % (str(e)[:120] or type(e).__name__),
+                           retryable=True)
+    stream = _pick_live_stream(text, quality)
     if stream:
         return stream, "live %.1fs" % cost
     for mark in _OFFLINE_MARKS:
@@ -435,8 +498,15 @@ def room_meta(url: str, timeout: float = 8.0) -> dict:
     开播时补名字、算「显示页面」地址都会用它；同一个房间 60 秒内只抓一次，
     所以直取失败后重试、自愈重建都不会为同一张 reflow 页反复联网。
     """
+    key = str(url or "").strip()
+    # 解析成功时会把 meta 同时记在原始短链和落地页两个键上；先查原始链接，
+    # 避免为了拿缓存又跟一次可能超时的短链跳转。
+    hit = _META_CACHE.get(key)
+    if hit and time.time() - hit[0] < _META_TTL_S:
+        return dict(hit[1])
     try:
-        landing = _landing_url(url)
+        # 用调用方的超时：补名字只是锦上添花，不能拿默认的 10 秒去堵开播。
+        landing = _landing_url(url, timeout)
     except Exception:
         return {}
     if not landing:
@@ -476,26 +546,29 @@ def display_name(meta: dict, limit: int = 60) -> str:
     return head + title[:room - 1] + "…"
 
 
-def _resolve_streamlink(target: str, timeout: float) -> tuple[str, str]:
+def _resolve_streamlink(target: str, timeout: float,
+                        quality: str = _DEFAULT_QUALITY) -> tuple[str, str]:
     """旧解析路径：streamlink 的抖音插件。reflow 页结构变化时兜底用。"""
     if not _module_available("streamlink"):
         raise ResolveError("未安装 streamlink")
+    pick = "worst" if _quality_order(quality)[0].startswith(("LD", "SD")) else "best"
     cmd = [sys.executable, "-m", "streamlink", "--loglevel", "error",
-           "--stream-url", target, "best"]
+           "--stream-url", target, pick]
     t0 = time.monotonic()
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
                            errors="replace", timeout=timeout,
                            creationflags=_NO_WINDOW)
     except subprocess.TimeoutExpired:
-        raise ResolveError("streamlink 解析超时（%.0f 秒）" % timeout)
+        raise ResolveError("streamlink 解析超时（%.0f 秒）" % timeout,
+                           retryable=True)
     except FileNotFoundError as e:
         raise ResolveError("启动 streamlink 失败：%s" % e)
     out = [ln.strip() for ln in (r.stdout or "").splitlines()
            if ln.strip().startswith("http")]
     if r.returncode != 0 or not out:
         err = ((r.stderr or "").strip().splitlines() or ["streamlink 解析失败"])[-1]
-        raise ResolveError(err[:300])
+        raise ResolveError(err[:300], retryable=True)
     return out[-1], "streamlink %.1fs" % (time.monotonic() - t0)
 
 
@@ -503,7 +576,8 @@ def _join_errors(*parts: str) -> str:
     return "；".join([p for p in parts if p]) or "没能解析出直播流地址"
 
 
-def resolve_douyin(url: str, timeout: float = RESOLVE_TIMEOUT_S) -> tuple[str, str]:
+def resolve_douyin(url: str, timeout: float = RESOLVE_TIMEOUT_S,
+                   quality: str = _DEFAULT_QUALITY) -> tuple[str, str]:
     """抖音直播页 -> 可播放的 FLV/HLS 地址。返回 (stream_url, note)。
 
     顺序按「地址保质期」排：
@@ -514,14 +588,35 @@ def resolve_douyin(url: str, timeout: float = RESOLVE_TIMEOUT_S) -> tuple[str, s
     reflow 里的 room id 一场直播一个，锚点重新开播后那张页面永远停在上一场，
     还继续吐上一场的播放地址——**必须先判「直播已结束」再取地址**，否则会
     把一个死地址交给 ffmpeg，反复 404。live 页则永远是最新一场的。
+
+    分享短链（v.douyin.com）只跟一次跳转，落地地址同时用于 reflow 和 live
+    两种推导；跳转本身失败时直接报「打不开短链」，不伪装成「没有流地址」。
     """
     u = (url or "").strip()
-    landing = _landing_url(u)
-    live_url = "" if landing else _live_target(u)
+    # 短链只跟一次跳转，reflow 和 live 共用同一个落地地址。以前两边各跟
+    # 一次：第一次超时、第二次成功落在 reflow 时，_live_target 只认 live
+    # 页会把它丢掉，最后只剩一句「没能解析出直播流地址」。跳转失败也必须
+    # 说清是短链打不开，而不是让人以为直播间没有流。
+    if is_douyin(u) and not _LIVE_RE.match(u) and not _REFLOW_RE.search(
+            urllib.parse.urlsplit(u).path):
+        final, redirect_err = _redirect_target(u, timeout)
+        if not final:
+            raise ResolveError(
+                "打不开抖音直播间链接（跳转失败/超时：%s），稍后重试"
+                % (redirect_err or "未知错误"), retryable=True)
+        u = final
+        if not _LIVE_RE.match(u) and not _REFLOW_RE.search(
+                urllib.parse.urlsplit(u).path):
+            raise ResolveError(
+                "抖音链接没有落到直播页（跳到了 %s），可能已下播或链接不是直播间"
+                % u[:160])
+    landing = _landing_url(u, timeout)
+    live_url = "" if landing else _live_target(u, timeout)
     if not landing and not live_url and not is_douyin(u):
         raise ResolveError("无法从链接里找到抖音直播间房号")
 
     reflow_err = ""
+    reflow_retryable = False
     reflow_text = ""
     reflow_cost = 0.0
     meta: dict = {}
@@ -530,22 +625,29 @@ def resolve_douyin(url: str, timeout: float = RESOLVE_TIMEOUT_S) -> tuple[str, s
             reflow_text, reflow_cost = _fetch_reflow(landing, timeout)
         except Exception as e:
             reflow_err = "抓取直播页失败：%s" % (str(e)[:120] or type(e).__name__)
+            reflow_retryable = True
         else:
             # 同一次抓取顺手把房间信息（含 web_rid）缓存下来：后面算页面地址、
             # 补房间名都不再为同一张页面多跑一次 HTTP。
             meta = parse_room_meta(reflow_text)
             _remember_meta(landing, meta)
+            # 原始短链也缓存一份：后面补名字/算显示地址时即使跳转又抖了，
+            # 也能直接命中这次已经解析出来的 web_rid。
+            _remember_meta(url, meta)
+            _remember_meta(u, meta)
 
     web_rid = (live_url.rsplit("/", 1)[-1] if live_url
                else str(meta.get("web_rid") or ""))
 
     # 第一选择：live 页。跨场次稳定的房号 + 当前场次的地址。
     live_err = ""
+    live_retryable = False
     if web_rid:
         try:
-            return _resolve_live_page(web_rid, timeout)
+            return _resolve_live_page(web_rid, timeout, quality)
         except ResolveError as e:
             live_err = str(e)
+            live_retryable = bool(getattr(e, "retryable", False))
 
     # 第二选择：reflow 页里的地址。先判下播/故障，再取地址——顺序反了就会
     # 把已结束那一场残留的播放地址当成可用的。
@@ -558,20 +660,25 @@ def resolve_douyin(url: str, timeout: float = RESOLVE_TIMEOUT_S) -> tuple[str, s
             if mark in reflow_text:
                 raise ResolveError(_join_errors(
                     live_err, "抖音页面返回「%s」（临时故障，不一定是没开播），稍后重试"
-                    % mark))
-        stream = _pick_stream_url(reflow_text)
+                    % mark), retryable=True)
+        stream = _pick_stream_url(reflow_text, quality)
         if stream:
             return stream, "reflow %.1fs" % reflow_cost
         reflow_err = "reflow 页里没有找到直播流地址"
 
     target = live_url or ("https://live.douyin.com/" + web_rid if web_rid else "")
     if not target:
-        raise ResolveError(_join_errors(live_err, reflow_err))
+        raise ResolveError(_join_errors(live_err, reflow_err),
+                           retryable=live_retryable or reflow_retryable)
     try:
-        return _resolve_streamlink(target, timeout)
+        return _resolve_streamlink(target, timeout, quality)
     except ResolveError as e:
+        # streamlink 对任何非零退出都标 retryable；不能用它覆盖前两条路径
+        # 已经给出的确定结论（例如「页面明确没有流」），否则会把「改版/
+        # 没开播」误报成网络问题并多等两轮补试。
         raise ResolveError(_join_errors(
-            live_err, "%s；streamlink 兜底也失败：%s" % (reflow_err, e)))
+            live_err, "%s；streamlink 兜底也失败：%s" % (reflow_err, e)),
+            retryable=(live_retryable or reflow_retryable))
 
 
 def spawn_ffmpeg(stream: str) -> subprocess.Popen:
@@ -688,31 +795,94 @@ class DirectAgent(Agent):
         # ask（默认）：失败后等人确认；auto：旧的无感回退；none：只报失败。
         mode = os.environ.get("LIVENOTES_DIRECT_FALLBACK", "").strip().lower()
         self.fallback_mode = mode if mode in FALLBACK_MODES else "ask"
+        # 画质与流量计量走设置页热更新；画质对下一路解析生效，精确计量对
+        # 下一次启动 ffmpeg 生效。环境变量只作临时覆盖。
+        self.direct_quality = _DEFAULT_QUALITY
+        self.traffic_exact = bool(_env_traffic_proxy())
+        # 网络类解析失败：同一房间最多补试两次。明确下播/链接不对不补试。
+        self.resolve_retries: dict[str, int] = {}
+        self.resolve_retry_at: dict[str, float] = {}
         self.auto_restarts: dict[str, int] = {}
         self.restart_at: dict[str, float] = {}
 
     def apply_config(self, cfg: dict) -> None:
-        """设置页热更新失败策略；环境变量仍优先，方便脚本临时覆盖。"""
-        mode = str((cfg or {}).get("direct_fallback") or "").strip().lower()
-        if mode not in FALLBACK_MODES:
-            return
-        env = os.environ.get("LIVENOTES_DIRECT_FALLBACK", "").strip().lower()
-        if env in FALLBACK_MODES:
-            mode = env
-        if mode != self.fallback_mode:
-            print("直取失败处理：%s -> %s" % (self.fallback_mode, mode), flush=True)
-            self.fallback_mode = mode
-            # 没在用的回退代理直接丢掉，下一次按新策略重新选引擎；
-            # 已经有房间在回退浏览器里跑时保留，避免把正在录的一路打断。
-            if not self.fallback_rooms and self.fallback is not None:
-                old, self.fallback, self.fallback_engine = (
-                    self.fallback, None, "")
-                try:
-                    old.shutdown()
-                except Exception:
-                    pass
+        """设置页热更新失败策略 / 画质 / 精确计量；环境变量仍优先。"""
+        cfg = cfg or {}
+        mode = str(cfg.get("direct_fallback") or "").strip().lower()
+        if mode in FALLBACK_MODES:
+            env = os.environ.get("LIVENOTES_DIRECT_FALLBACK", "").strip().lower()
+            if env in FALLBACK_MODES:
+                mode = env
+            if mode != self.fallback_mode:
+                print("直取失败处理：%s -> %s" % (self.fallback_mode, mode),
+                      flush=True)
+                self.fallback_mode = mode
+                # 没在用的回退代理直接丢掉，下一次按新策略重新选引擎；
+                # 已经有房间在回退浏览器里跑时保留，避免把正在录的一路打断。
+                if not self.fallback_rooms and self.fallback is not None:
+                    old, self.fallback, self.fallback_engine = (
+                        self.fallback, None, "")
+                    try:
+                        old.shutdown()
+                    except Exception:
+                        pass
+
+        quality = str(cfg.get("direct_quality") or "").strip().lower()
+        if quality in _QUALITY_ORDERS and quality != self.direct_quality:
+            print("直取画质：%s -> %s（下一路解析生效）"
+                  % (self.direct_quality, quality), flush=True)
+            self.direct_quality = quality
+
+        exact = cfg.get("traffic_exact")
+        env_proxy = _env_traffic_proxy()
+        if env_proxy is not None:
+            exact = env_proxy
+        if isinstance(exact, bool) and exact != self.traffic_exact:
+            print("直取流量计量：%s -> %s（下一次启动 ffmpeg 生效）"
+                  % ("实测" if self.traffic_exact else "估算",
+                     "实测" if exact else "估算"), flush=True)
+            self.traffic_exact = exact
 
     # ---------------------------------------------------------------- 工具
+    def _resolve_target(self, room: dict) -> str:
+        """解析用的链接：优先已经落到的 live.douyin.com/<web_rid> 房号页。
+
+        web_rid 跨场次稳定，重试/自愈时没必要再跟一次分享短链——短链跳转
+        恰恰是整条链上最容易超时的一步。resolved_url 只在页面确认过
+        owner.webRid 后才写入，可以放心当入口。
+        """
+        return str((room or {}).get("resolved_url")
+                   or (room or {}).get("url") or "").strip()
+
+    def _clear_resolve_retry(self, rid: str) -> None:
+        self.resolve_retries.pop(rid, None)
+        self.resolve_retry_at.pop(rid, None)
+
+    def _retry_resolve(self, room: dict, err: Exception) -> bool:
+        """网络类解析失败：安排一次补试，返回 True 表示这次先不判死。
+
+        明确下播 / 链接不是直播间 / 没装 streamlink 都不补试——补试只会
+        让用户多等十几秒，最后还是同一个结果。
+        """
+        rid = room["id"]
+        if not getattr(err, "retryable", False):
+            self._clear_resolve_retry(rid)
+            return False
+        n = int(self.resolve_retries.get(rid) or 0)
+        if n >= len(RESOLVE_RETRY_DELAYS):
+            self._clear_resolve_retry(rid)
+            return False
+        delay = RESOLVE_RETRY_DELAYS[n]
+        self.resolve_retries[rid] = n + 1
+        self.resolve_retry_at[rid] = time.time() + delay
+        print("[%s] 解析失败（网络类），%.0f 秒后补试（第 %d 次）：%s"
+              % (rid, delay, n + 1, str(err)[:120]), flush=True)
+        self.report(rid, "starting", stage=1,
+                    note="解析失败，%.0f 秒后自动重试（第 %d 次）：%s"
+                         % (delay, n + 1, str(err)[:80]),
+                    engine="direct", session_id=room.get("session_id") or None)
+        return True
+
     def _title(self, room: dict) -> str:
         name = str(room.get("name") or "").strip()
         if not name:
@@ -745,21 +915,18 @@ class DirectAgent(Agent):
     def _spawn_ffmpeg(self, rid: str, stream: str, info: dict):
         """流地址 ->（可选计数代理）-> ffmpeg 子进程。
 
-        proxy 只在 LIVENOTES_TRAFFIC_PROXY=1 时启用；启动失败退回直连，
-        并把计量标成不可用——绝不能因为「量流量」把录音搞停。
+        proxy 由设置页「精确流量计量」启用（环境变量可临时覆盖）；启动失败
+        退回直连，并把计量标成不可用——绝不能因为「量流量」把录音搞停。
         """
         meter = info.get("traffic") or self._meter(rid)
         info["traffic"] = meter
-        old = info.get("traffic_proxy")
-        if old is not None:
-            try:
-                old.stop()
-            except Exception:
-                pass
-            info["traffic_proxy"] = None
+        if info.get("traffic_proxy") is not None:
+            # 旧代理停掉后精确计数就结束了；_stop_traffic 负责把 meter 降级，
+            # 否则它永远锁在 exact，后面忽略所有估算。
+            self._stop_traffic(info)
         target = stream
         proxy = None
-        if TRAFFIC_PROXY:
+        if self.traffic_exact:
             def on_bytes(n: int) -> None:
                 meter.set_source("proxy", "计数代理实测")
                 meter.add_platform(n)
@@ -769,8 +936,12 @@ class DirectAgent(Agent):
             except Exception as e:
                 proxy = None
                 target = stream
-                meter.set_source("unavailable",
-                                 "计数代理启动失败：%s" % str(e)[:160])
+                meter.demote_source(
+                    "计数代理启动失败，改按码率估算：%s" % str(e)[:160])
+        else:
+            # 设置页把精确计量关掉了：之前这一路可能还是 proxy 源，必须主动
+            # 降级；set_source("unavailable") 在 exact 状态下会被拒绝。
+            meter.demote_source("精确流量计量已关闭，改按码率估算")
         info["traffic_proxy"] = proxy
         info["stream_input"] = target
         return spawn_ffmpeg(target)
@@ -820,6 +991,9 @@ class DirectAgent(Agent):
         地址，前端打开只会看到「服务器开小差了」。这里用 reflow 页 owner 的
         webRid；拿不到就不报，前端会退回打开 reflow 页。
         """
+        current = str(room.get("resolved_url") or "").strip()
+        if current:
+            return current            # 已经是真房号页，不用再跟一次短链
         try:
             meta = room_meta(room.get("url") or "", timeout=5.0)
         except Exception:
@@ -844,12 +1018,13 @@ class DirectAgent(Agent):
             self._fallback(room, {"sid": session or ""},
                            "direct 只支持抖音，改用浏览器采集")
             return
-        # 先把名字补上再建会话：会话标题（飞书推送、导出文件名都用它）拼的是
-        # 房间名，晚一步就得改名两遍。用户手动改过的名字（name_source=user）
-        # 和采集端已经写过的真名都不要动，免得改了又变回去。
-        # 名字只值一次 HTTP、拿不到就算了——再糟也不能让它挡住开播。
+        # 先把名字补上：会话标题（飞书推送、导出文件名都用它）拼的是房间名。
+        # 用户手动改过的名字（name_source=user）和采集端已经写过的真名都不要动。
+        # 补试时跳过：名字只是锦上添花，不能一轮轮拖慢解析。
         src = str(room.get("name_source") or "")
-        if src == "share" or (src == "" and not str(room.get("name") or "").strip()):
+        if (not self.resolve_retries.get(rid)
+                and (src == "share"
+                     or (src == "" and not str(room.get("name") or "").strip()))):
             try:
                 nm = display_name(room_meta(room.get("url") or "", timeout=5.0))
             except Exception:
@@ -858,6 +1033,31 @@ class DirectAgent(Agent):
                 room["name"] = nm
                 room["name_source"] = "page"
                 self.report(rid, name=nm)
+
+        # 先解析、后建会话：解析失败（尤其是短链打不开）时不留一个空会话，
+        # 看门狗也不用再跑一次「断流收尾」。网络类失败先补试，不立刻判死。
+        t0 = time.monotonic()
+        try:
+            stream, note = resolve_douyin(self._resolve_target(room),
+                                          quality=self.direct_quality)
+        except Exception as e:
+            self._capture_event(rid, "resolve_failed", error=str(e)[:200])
+            if self._retry_resolve(room, e):
+                return
+            self._fallback_or_fail(room, session or "", "解析失败：%s" % e, 1)
+            return
+        self._clear_resolve_retry(rid)
+        resolve_ms = int((time.monotonic() - t0) * 1000)
+        self._capture_event(rid, "resolve_ok", ms=resolve_ms, note=note)
+        # 解析时已经抓过 reflow 页，meta 在缓存里：顺手把真实房号报给引擎，
+        # 「显示页面」才有正确的 live.douyin.com 地址可开。
+        self._report_page_url(rid, room)
+
+        # 解析期间用户可能已经点了停止/删除：不再建会话、不再拉流。
+        st = self._room_state(rid)
+        if st in ("stopped", "failed", "__missing__"):
+            return
+
         sid = str(session or "")
         if not sid:
             try:
@@ -877,22 +1077,6 @@ class DirectAgent(Agent):
             if st in ("stopped", "failed", "__missing__"):
                 self._stop_session(sid)
                 return
-            self.report(rid, "starting", stage=1,
-                        note="已建会话，正在解析抖音流地址",
-                        engine="direct", session_id=sid)
-
-        t0 = time.monotonic()
-        try:
-            stream, note = resolve_douyin(room["url"])
-        except Exception as e:
-            self._capture_event(rid, "resolve_failed", error=str(e)[:200])
-            self._fallback_or_fail(room, sid, "解析失败：%s" % e, 1)
-            return
-        resolve_ms = int((time.monotonic() - t0) * 1000)
-        self._capture_event(rid, "resolve_ok", ms=resolve_ms, note=note)
-        # 解析时已经抓过 reflow 页，meta 在缓存里：顺手把真实房号报给引擎，
-        # 「显示页面」才有正确的 live.douyin.com 地址可开。
-        self._report_page_url(rid, room)
         self.report(rid, "starting", stage=2,
                     note="已解析流地址（%.1f 秒），正在启动 ffmpeg"
                          % (resolve_ms / 1000.0),
@@ -1050,7 +1234,10 @@ class DirectAgent(Agent):
 
     # ---------------------------------------------------------------- 守护
     def _check(self, room: dict, info: dict) -> None:
-        if info.get("fallback") or info.get("recovering") or info.get("renewing"):
+        if (info.get("fallback") or info.get("recovering")
+                or info.get("renewing") or info.get("ended")):
+            # 页面探针已经判过下播：ffmpeg 随后退出是预期动作，不能再
+            # 走进 _recover 把一路已结束的直播重新拉起来。
             return
         rid = room["id"]
         now = time.time()
@@ -1155,8 +1342,12 @@ class DirectAgent(Agent):
             _kill_proc(old)
 
             try:
-                stream, note = resolve_douyin(room["url"])
+                stream, note = resolve_douyin(self._resolve_target(room),
+                                              quality=self.direct_quality)
             except Exception as e:
+                # ffmpeg 已经杀了，计数代理也别继续挂着：它会保留监听端口，
+                # 并把已死连接上的字节继续记进这一路。
+                self._stop_traffic(info)
                 info["retry_at"] = time.time() + DIRECT_RETRY_S
                 self.report(rid, "live", stage=6,
                             note="重新解析失败，%d 秒后重试：%s"
@@ -1372,6 +1563,9 @@ class DirectAgent(Agent):
             if rid not in alive_ids:
                 self.auto_restarts.pop(rid, None)
                 self.restart_at.pop(rid, None)
+        for rid in list(self.resolve_retries):
+            if rid not in alive_ids:
+                self._clear_resolve_retry(rid)
 
         # 已经回退的房间交给浏览器代理；传空列表也要 tick 一次，让它回收
         # 已删除/已停止的房间。
@@ -1382,6 +1576,8 @@ class DirectAgent(Agent):
                 if rid not in alive_ids:
                     self.fallback_rooms.discard(rid)
 
+        to_restart: list[dict] = []
+        to_start: list[dict] = []
         for r in rooms:
             rid = r["id"]
             if rid in self.fallback_rooms:
@@ -1403,30 +1599,47 @@ class DirectAgent(Agent):
                 continue
             state = r.get("state")
             if state == "stopped":
+                self._clear_resolve_retry(rid)
                 if rid in self.running:
                     self.reap(rid, "已停止")
                 if (r.get("auto_stopped")
                         and "音频块" in str(r.get("auto_stop_reason") or "")):
-                    self._maybe_restart(r)
+                    to_restart.append(r)
                 continue
             if state == "failed":
+                self._clear_resolve_retry(rid)
                 if rid in self.running:
                     self.reap(rid, "采集失败")
                 continue
-            if state == "pending" and rid in self.running:
-                self.reap(rid, "重新排队")
+            if state == "pending":
+                # 用户点了重试：不管之前排了几次补试，都从现在重新开始。
+                self._clear_resolve_retry(rid)
+                if rid in self.running:
+                    self.reap(rid, "重新排队")
 
             info = self.running.get(rid)
             if info is not None:
                 self._check(r, info)
                 continue
             if state in ("pending", "starting", "live"):
-                try:
-                    self.bring_up(r, session=str(r.get("session_id") or ""))
-                except Exception as e:
-                    traceback.print_exc()
-                    self.fail(rid, "拉起失败：%s" % e, 1)
-                time.sleep(1.0)
+                # 网络类解析失败排了补试：到点前不重新拉，免得每 3 秒撞一次。
+                if time.time() < float(self.resolve_retry_at.get(rid) or 0.0):
+                    continue
+                to_start.append(r)
+
+        # 解析短链最长可能拖几十秒（跳转/回流/streamlink 兜底）。先把仍在
+        # 采集的房间检查完，再处理需要解析的：否则一个坏房间会让其他房间的
+        # 断流检测和自愈一起停摆，而 ffmpeg 其实还在跑。
+        for r in to_restart:
+            self._maybe_restart(r)
+        for r in to_start:
+            rid = r["id"]
+            try:
+                self.bring_up(r, session=str(r.get("session_id") or ""))
+            except Exception as e:
+                traceback.print_exc()
+                self.fail(rid, "拉起失败：%s" % e, 1)
+            time.sleep(1.0)
 
     def _maybe_restart(self, room: dict) -> None:
         """看门狗因断流收尾后，流还在就重新拉起；真下播不折腾。"""
@@ -1439,7 +1652,8 @@ class DirectAgent(Agent):
             return
         self.restart_at[rid] = now + 60.0
         try:
-            resolve_douyin(room["url"])
+            resolve_douyin(self._resolve_target(room),
+                                          quality=self.direct_quality)
         except Exception:
             return
         self.auto_restarts[rid] = n + 1
@@ -1484,7 +1698,8 @@ class DirectAgent(Agent):
         if not sid or not self.session_alive(room):
             return
         try:
-            stream, note = resolve_douyin(room["url"])
+            stream, note = resolve_douyin(self._resolve_target(room),
+                                          quality=self.direct_quality)
             self._report_page_url(rid, room)
         except Exception as e:
             print("[%s] 接管直取失败：%s" % (rid, e), flush=True)

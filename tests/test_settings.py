@@ -41,7 +41,8 @@ def test_v2_passthrough_and_active_fallback(isolated_paths):
 def test_empty_corrupt_and_non_dict_file_are_safe(isolated_paths):
     assert settings.state() == {
         "active": "", "profiles": [], "current": None, "configured": False,
-        "prefs": {"topics": 10, "direct_fallback": "", "open_mode": "",
+        "prefs": {"topics": 10, "direct_fallback": "", "direct_quality": "low",
+                  "traffic_exact": False, "open_mode": "",
                   "capture_mode": "", "close_action": "tray",
                   "notify_enabled": True, "notify_system": True,
                   "notify_sound": True, "notify_muted": [],
@@ -109,7 +110,9 @@ def test_activate_delete_duplicate(isolated_paths):
 
 
 def test_prefs_clamping_and_unknown_keys(isolated_paths):
-    assert settings.prefs() == {"topics": 10, "direct_fallback": "", "open_mode": "",
+    assert settings.prefs() == {"topics": 10, "direct_fallback": "",
+                                "direct_quality": "low", "traffic_exact": False,
+                                "open_mode": "",
                                 "capture_mode": "", "close_action": "tray",
                                 "notify_enabled": True, "notify_system": True,
                                 "notify_sound": True, "notify_muted": [],
@@ -124,7 +127,8 @@ def test_prefs_clamping_and_unknown_keys(isolated_paths):
     assert settings.set_prefs({"topics": -5})["topics"] == 3
     assert settings.set_prefs({"topics": "abc"})["topics"] == 3      # 非法值忽略
     out = settings.set_prefs({"unknown": 1, "topics": 12})
-    assert out == {"topics": 12, "direct_fallback": "", "open_mode": "",
+    assert out == {"topics": 12, "direct_fallback": "", "direct_quality": "low",
+                   "traffic_exact": False, "open_mode": "",
                    "capture_mode": "", "close_action": "tray",
                    "notify_enabled": True, "notify_system": True,
                    "notify_sound": True, "notify_muted": [],
@@ -179,6 +183,16 @@ def test_direct_fallback_pref_and_env_precedence(isolated_paths, monkeypatch):
     assert settings.direct_fallback() == {
         "mode": "none", "stored": "auto", "source": "env"}
     assert settings.prefs()["direct_fallback"] == "auto"
+
+
+def test_direct_quality_and_traffic_exact_prefs(isolated_paths):
+    p = settings.prefs()
+    assert p["direct_quality"] == "low" and p["traffic_exact"] is False
+    out = settings.set_prefs({"direct_quality": "HIGH", "traffic_exact": "1"})
+    assert out["direct_quality"] == "high" and out["traffic_exact"] is True
+    # 非法值不覆盖已有选择
+    out = settings.set_prefs({"direct_quality": "ultra", "traffic_exact": "maybe"})
+    assert out["direct_quality"] == "high" and out["traffic_exact"] is True
 
 
 def test_resolve_precedence(isolated_paths, monkeypatch):

@@ -78,6 +78,9 @@ import { syncUrl } from './view.js';
       msg = "这一路没有起来，没有字幕。"; live = false;
     } else if(r.state==="pending" || r.state==="starting"){
       msg = "启动后才会开始出字。"; live = false;
+    } else if(r.session && r.session.capture_only){
+      // 仅采集场次没有逐字稿，别让它看起来像「还没出字」。
+      msg = "仅采集模式：这一场只录音，不生成字幕。"; live = !!r.session.running;
     } else if(r.state==="stopped" || (r.session && r.session.history)){
       msg = "这一场没有留下字幕。"; live = false;
     } else if(r.state==="live" && !r.session){
@@ -118,11 +121,15 @@ import { syncUrl } from './view.js';
       const hint = r.state==="stopped" ? (r.interrupted ? "已中断" : "已停止")
         : (session && session.history) ? "历史"
         : (session && session.running===false) ? "已结束" : "实时";
-      const more = (isListening(r) && r.sessionId)
+      const co = !!(session && session.capture_only);
+      const more = co
+        ? (r.sessionId ? '<a class="sect-link" href="/reader?session='+encodeURIComponent(r.sessionId)+'">打开回放 →</a>' : '')
+        : (isListening(r) && r.sessionId)
         ? '<a class="sect-link" href="/live?session='+encodeURIComponent(r.sessionId)+'">全部字幕 →</a>'
         : '';
-      left.push('<div class="sect"><div class="sect-h">最新字幕 <span class="spacer"></span>'
-        + '<span class="hint">'+hint+' · 最近 '+SUB_ROWS+' 句</span>'+more+'</div>'+subsHtml(r)+'</div>');
+      left.push('<div class="sect"><div class="sect-h">'+(co?'录音':'最新字幕')
+        + ' <span class="spacer"></span><span class="hint">'
+        + (co?'仅采集 · 不产生字幕':hint+' · 最近 '+SUB_ROWS+' 句')+'</span>'+more+'</div>'+subsHtml(r)+'</div>');
       left.push('<div class="sect"><div class="sect-h">启动过程</div>'+stepsHtml(r)+'</div>');
     }
 
@@ -149,7 +156,11 @@ import { syncUrl } from './view.js';
     kv.push('<dt>入库</dt><dd class="'+ing.tone+'">'+ing.label+'</dd>');
     kv.push('<dt>会话</dt><dd class="'+(r.sessionId?"mono":"muted")+'">'+esc(r.sessionId||"—")+'</dd>');
     kv.push('<dt>已录</dt><dd>'+(session?fmt(session.elapsed):"—")+'</dd>');
-    kv.push('<dt>句数</dt><dd>'+(session?num(session.n_utterances):"—")+'</dd>');
+    if(session && session.capture_only){
+      kv.push('<dt>有声</dt><dd>'+(session.audible_s!=null?fmt(session.audible_s):"—")+'</dd>');
+    }else{
+      kv.push('<dt>句数</dt><dd>'+(session?num(session.n_utterances):"—")+'</dd>');
+    }
     const ca = session ? lastChunkAgo(session) : null;
     kv.push('<dt>最近一块</dt><dd class="'+(ca==null?"muted":ca<3?"ok":ca<15?"warn":"bad")+'">'
       +(ca==null?"—":esc(agoText(ca)))+'</dd>');
@@ -165,8 +176,9 @@ import { syncUrl } from './view.js';
     if(r.error && !broken) kv.push('<dt>错误</dt><dd class="err">'+esc(r.error)+'</dd>');
 
     const acts = [];
-    if(isListening(r) && r.sessionId) acts.push('<button class="btn primary" data-dact="listen" data-id="'+r.id+'">听最近</button>');
-    if(isListening(r)) acts.push('<button class="btn" data-dact="live" data-id="'+r.id+'">实时字幕</button>');
+    const coNow = !!(session && session.capture_only);
+    if(isListening(r) && r.sessionId) acts.push('<button class="btn primary" data-dact="listen" data-id="'+r.id+'">'+(coNow?'听录音':'听最近')+'</button>');
+    if(isListening(r) && !coNow) acts.push('<button class="btn" data-dact="live" data-id="'+r.id+'">实时字幕</button>');
     if(r.sessionId) acts.push('<button class="btn" data-dact="reader" data-id="'+r.id+'">回放</button>');
     if(r.state==="failed" && r.switchReady){
       acts.push('<button class="btn primary" data-dact="switch" data-id="'+r.id+'">切换到'+esc(switchEngineLabel(r.switchEngine))+'采集</button>');

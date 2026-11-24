@@ -17,7 +17,7 @@ import sqlite3
 from datetime import datetime, timedelta
 from typing import Any
 
-from . import claims, shape, store
+from . import claims, identity, shape, store
 
 
 # 分组展示顺序：主持先说、主讲其次，提问和上麦跟在后面，认不出的一起放最后。
@@ -123,6 +123,7 @@ def build_note(conn: sqlite3.Connection, sid: str) -> dict:
                          "n": int(r["n"] or 0),
                          "seconds": round(float(r["secs"] or 0), 1)})
     points = []
+    roster = identity.roster(conn, sid)
     # 笔记页的序号也按时间排：同一场先讲什么、后讲什么，读者要能顺着看下来。
     summary_points = sorted(
         summary.get("points") or [],
@@ -132,18 +133,29 @@ def build_note(conn: sqlite3.Connection, sid: str) -> dict:
         quote = ""
         if ev:
             quote = str(ev[0].get("text") or "")[:160]
+        ref = identity.point_ref(p, roster)
+        raw_who = str(p.get("claim_speaker") or "").strip()
+        clean_who, who_kind = identity.clean_name(raw_who)
+        if who_kind != "nickname":
+            clean_who = ""
         points.append({
             "i": i, "title": str(p.get("title") or ""),
             "gist": str(p.get("gist") or ""),
             "t_from": p.get("t_from"), "t_to": p.get("t_to"),
             "quote": quote, "speakers": p.get("speakers") or [],
-            "claim_speaker": str(p.get("claim_speaker") or ""),
+            # 位置标签不落成跨场署名；展示用下面的 claim_speaker_label。
+            "claim_speaker": clean_who,
+            # 零标注兜底：claim_speaker 为空时，仍然给这条要点一个本场指代。
+            "claim_speaker_label": str(ref.get("who") or ""),
+            "claim_speaker_source": str(ref.get("source") or ""),
+            "claim_speaker_speaker_id": str(ref.get("speaker_id") or ""),
             "stance": str(p.get("stance") or ""),
             # 跨场视图（「这个主题他讲过几场」）靠主题对齐，而不是靠标题文案。
             "topic": claims.point_topic(p),
             "evidence": [{"id": e.get("id"), "t": e.get("t_start"),
                           "text": str(e.get("text") or "")[:200],
                           "speaker": e.get("speaker_label") or "",
+                          "speaker_id": e.get("speaker_id") or "",
                           # 类别留着：判断「这条是提问还是主张」要用，
                           # 观点地图靠它挑出「没人回答的问题」。
                           "category": e.get("category") or ""}
@@ -215,13 +227,18 @@ def _group_points(points: list[dict], shape_info: dict,
     roles = (shape_info or {}).get("roles") or {}
     buckets: dict[str, list[dict]] = {}
     for p in points:
-        who = str(p.get("claim_speaker") or "").strip()
-        buckets.setdefault(who, []).append(p)
+        # claim_speaker 是落库署名（可能为空）；为空时用本场兜底指代分组，
+        # 这样不会把三四个没名字的人合成一坨「本场共同讨论」。
+        key = str(p.get("claim_speaker") or p.get("claim_speaker_label") or "").strip()
+        buckets.setdefault(key, []).append(p)
 
     out: list[dict] = []
     for who, items in buckets.items():
         items.sort(key=lambda p: (p.get("t_from") is None, p.get("t_from") or 0))
-        sid = names_by_label.get(who, "") if who else ""
+        sid = next((str(p.get("claim_speaker_speaker_id") or "") for p in items
+                    if p.get("claim_speaker_speaker_id")), "")
+        if not sid and who:
+            sid = names_by_label.get(who, "")
         role = (roles.get(sid) or {}) if sid else {}
         label = str(role.get("label") or "")
         out.append({
@@ -299,7 +316,8 @@ def _opinion_map(points: list[dict], shape_info: dict,
                            (p.get("evidence") or [{}])[0])
                 open_questions.append({
                     "text": str(p.get("stance") or p.get("title") or "")[:80],
-                    "who": str(p.get("claim_speaker") or ""),
+                    "who": str(p.get("claim_speaker")
+                               or p.get("claim_speaker_label") or ""),
                     "t": src.get("t"), "quote": str(src.get("text") or "")[:120]})
             continue
 
@@ -308,15 +326,21 @@ def _opinion_map(points: list[dict], shape_info: dict,
         for p, kind in zip(items, kinds):
             if kind == "question":
                 continue
-            who = str(p.get("claim_speaker") or "").strip()
+            who = str(p.get("claim_speaker")
+                      or p.get("claim_speaker_label") or "").strip()
             if who in entries:
                 entries[who]["n"] += 1
                 continue
-            sid = names_by_label.get(who, "") if who else ""
+            sid = str(p.get("claim_speaker_speaker_id") or "")
+            if not sid and who:
+                sid = names_by_label.get(who, "")
             role = (roles.get(sid) or {}) if sid else {}
             text = str(p.get("stance") or p.get("quote") or "")
+            source = str(p.get("claim_speaker_source") or "")
             entries[who] = {
                 "who": who or "本场共同讨论",
+                "who_source": source,
+                "who_source_label": identity.SOURCE_LABELS.get(source, ""),
                 "speaker_id": sid,
                 "role": str(role.get("role") or ""),
                 "role_label": str(role.get("label") or ""),
@@ -412,15 +436,18 @@ def index_session(conn: sqlite3.Connection, sid: str) -> int:
         units.append({"kind": "summary", "ref_id": "overview", "t": None,
                       "title": title, "text": str(summary["overview"])[:1000],
                       "weight": 0.7})
+    roster = identity.roster(conn, sid)
     for i, p in enumerate(summary.get("points") or []):
         text = _point_text(p)
         if not text:
             continue
+        ref = identity.point_ref(p, roster)
         units.append({"kind": "point", "ref_id": str(i),
                       "t": p.get("t_from"), "title": title, "text": text,
                       # 署名优先给归属的人，而不是「这场出现过谁」：问「阿哲怎么看 X」
                       # 要能召回他提的那条，而不是同一段里他也出过声的那条。
-                      "speaker": (str(p.get("claim_speaker") or "")
+                      # 没实名时用「本场第 N 位」兜底，而不是留空。
+                      "speaker": (str(ref.get("who") or "")
                                   or "、".join((p.get("speakers") or [])[:2])),
                       "weight": 1.0})
     for h in store.list_highlights(conn, sid, 50):

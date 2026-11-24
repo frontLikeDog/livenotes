@@ -1,0 +1,10 @@
+# 仅采集节点（LIVENOTES_CAPTURE_ONLY=1）：只录音，不转写。
+#
+# 不装 sherpa-onnx：没有 VAD / ASR / 声纹，不产生字幕、说话人和总结。
+# numpy 仍要装：应用里做重聚类/声纹的工具模块在导入期就会 import numpy；
+# 但 239MB 的 SenseVoice 模型不会被加载。
+numpy>=2.0
+
+# ffmpeg 不是 pip 包：直取直播流和 WAV -> m4a 转码要用它，必须单独安装并加入
+# PATH（Linux: apt install ffmpeg；Windows 可用 gyan.dev 的 full build）。
+# 没有 ffmpeg 也能录音（WAV 照样落盘），只是不转码、文件更大。

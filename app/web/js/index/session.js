@@ -81,8 +81,8 @@ function renderSessionMenu(){
         <span class="sr-top"><b>${esc(s.title)}</b><span class="sr-dur">${fmt(s.duration_s||0)}</span><span class="sr-edit" data-id="${esc(s.id)}" title="重命名这一场">✎</span></span>
         <span class="sr-sub">
           <span>${(dtShort(s.started_at).split(' ')[1])||''}</span><span class="sep">·</span>
-          <span>${s.n_utterances||0} 条</span><span class="sep">·</span>
-          <span>${MODE_NAME[s.source_mode]||(s.is_demo?'演示数据':'未知来源')}</span>
+          <span>${s.capture_only?'仅录制':(s.n_utterances||0)+' 条'}</span><span class="sep">·</span>
+          <span>${s.capture_only?'采集节点':(MODE_NAME[s.source_mode]||(s.is_demo?'演示数据':'未知来源'))}</span>
           <span class="sr-audio ${ast==='ready'?'':'no'}" title="${atxt}">${atxt}</span>
         </span></button>`}).join('')).join('');
   $$('#sessList .sess-row').forEach(b=>b.onclick=()=>selectSession(b.dataset.id));
@@ -134,14 +134,18 @@ async function loadMeta(){
   S.playhead=0;
   renderTimePresets();
   const badge=$('#modeBadge');
-  badge.textContent=s.source_mode==='per_uid'?'分轨录制 · 身份已确定':
+  badge.textContent=s.capture_only?'仅采集 · 只有录音':
+    s.source_mode==='per_uid'?'分轨录制 · 身份已确定':
     s.source_mode==='tab'?'标签页实时采集 · 声纹聚类':
     s.source_mode==='direct'?'直取直播流 · 声纹聚类':
     s.source_mode==='mixed'?'混音兜底 · 说话人为聚类标签':'演示数据';
-  badge.className='badge'+(s.source_mode==='mixed'?' mixed':
+  badge.className='badge'+(s.capture_only?'':
+    s.source_mode==='mixed'?' mixed':
     (s.source_mode==='tab'||s.source_mode==='direct')?' live':'');
   $('#ftsTag').textContent=m.fts_trigram?'全文索引 FTS5 trigram':'全文索引 LIKE 兜底';
-  $('#noticeText').textContent=s.source_mode==='per_uid'
+  $('#noticeText').textContent=s.capture_only
+    ? '仅采集模式：这一场只保存了录音，没有实时字幕、说话人和总结。可在回放里听，或在文件中心导出。'
+    : s.source_mode==='per_uid'
     ? '分轨模式：身份由 uid 确定，重叠与分离问题已规避。'
     : s.source_mode==='tab'
     ? '标签页实时采集：只录被选中标签页的音频；说话人由声纹在线聚类，抢话段可能归错，可在左侧改名校正。'

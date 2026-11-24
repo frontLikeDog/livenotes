@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 import urllib.error
 import urllib.request
 
 import pytest
 
-from app import live, rooms, server
+from app import live, rooms, server, settings
 from tests import helpers
 
 
@@ -139,6 +140,15 @@ def test_traffic_api_merges_room_meta(http_base):
     assert row["platform_bytes"] == 2_000_000 and row["source"] == "proxy"
     assert data["totals"]["rooms"] == 1
     assert data["totals"]["platform_bytes"] == 2_000_000
+
+
+def test_rooms_api_exposes_direct_capture_config(http_base):
+    """/api/rooms 带采集配置，代理才能热更新画质与精确计量。"""
+    settings.set_prefs({"direct_quality": "high", "traffic_exact": True})
+    with urllib.request.urlopen(http_base + "/api/rooms", timeout=5) as resp:
+        data = json.loads(resp.read().decode())
+    assert data["capture"]["direct_quality"] == "high"
+    assert data["capture"]["traffic_exact"] is True
 
 
 def test_get_by_session():
@@ -402,3 +412,78 @@ def test_agent_name_report_marks_source_page(http_base, db):
     r = rooms.get(room["id"])
     assert r["name"] == "示例主播 · 示例直播标题"
     assert r["name_source"] == "page"
+
+
+def test_preresolve_writes_web_rid_page(monkeypatch):
+    """加房间后后台预解析：短链落到房号页，写回 resolved_url。
+
+    之后启动/重试/自愈都直接用 live.douyin.com/<web_rid>，不再赌短链。
+    """
+    room, _ = rooms.add("https://v.douyin.com/abc")
+    monkeypatch.setattr(server.liveprobe, "canonical_douyin_url",
+                        lambda url, timeout=8.0:
+                        "https://live.douyin.com/123456789012")
+    server._preresolve_room(room["id"], room["url"])
+    assert rooms.get(room["id"])["resolved_url"] == \
+        "https://live.douyin.com/123456789012"
+
+
+def test_preresolve_failure_keeps_room_usable(monkeypatch):
+    """预解析失败只是没拿到房号，房间和原链接必须原样保留。"""
+    room, _ = rooms.add("https://v.douyin.com/abc")
+    monkeypatch.setattr(server.liveprobe, "canonical_douyin_url",
+                        lambda url, timeout=8.0: "")
+    server._preresolve_room(room["id"], room["url"])
+    got = rooms.get(room["id"])
+    assert got["resolved_url"] == ""
+    assert got["url"] == "https://v.douyin.com/abc"
+
+
+def test_preresolve_never_overwrites_existing_resolved_url(monkeypatch):
+    """已经有房号页的房间，不要被一次晚到的预解析改回去。"""
+    room, _ = rooms.add("https://v.douyin.com/abc")
+    rooms.update(room["id"], resolved_url="https://live.douyin.com/999")
+    monkeypatch.setattr(server.liveprobe, "canonical_douyin_url",
+                        lambda url, timeout=8.0:
+                        "https://live.douyin.com/123456789012")
+    server._preresolve_room(room["id"], room["url"])
+    assert rooms.get(room["id"])["resolved_url"] == "https://live.douyin.com/999"
+
+
+def test_startup_preresolve_only_schedules_unresolved_douyin(monkeypatch):
+    """启动补解析只挑「抖音 + 还没有房号页」的房间，其他一概不碰。"""
+    short, _ = rooms.add("https://v.douyin.com/abc")
+    done, _ = rooms.add("https://live.douyin.com/111")
+    rooms.update(done["id"], resolved_url="https://live.douyin.com/111")
+    rooms.add("https://live.bilibili.com/222")
+
+    calls = []
+    monkeypatch.setattr(server, "_preresolve_room",
+                        lambda rid, url: calls.append((rid, url)))
+    scheduled = server.preresolve_pending_rooms()
+    assert scheduled == [(short["id"], "https://v.douyin.com/abc")]
+    deadline = time.monotonic() + 2.0
+    while not calls and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert calls == scheduled
+
+
+def test_liveprobe_reads_camel_case_flv_and_direct_live_landing(monkeypatch):
+    """抖音新版页面用 flvPullUrl；短链也可能直接落到 live 页，不能只认 reflow。"""
+    from app import liveprobe
+
+    text = '{"streamUrl":{"flvPullUrl":{"FULL_HD1":"https://x.example/live.flv"}}}'
+    assert liveprobe._live_stream(text) == "https://x.example/live.flv"
+    monkeypatch.setattr(liveprobe, "_final_url",
+                        lambda url, timeout: "https://live.douyin.com/123456")
+    assert (liveprobe.canonical_douyin_url("https://v.douyin.com/abc")
+            == "https://live.douyin.com/123456")
+
+
+def test_startup_preresolve_noop_when_nothing_pending(monkeypatch):
+    """全部都有房号页（或不是抖音）时，启动补解析不该排任何任务。"""
+    room, _ = rooms.add("https://live.douyin.com/333")
+    rooms.update(room["id"], resolved_url="https://live.douyin.com/333")
+    monkeypatch.setattr(server, "_preresolve_room",
+                        lambda rid, url: pytest.fail("不该解析 %s" % url))
+    assert server.preresolve_pending_rooms() == []

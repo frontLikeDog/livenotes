@@ -443,6 +443,20 @@
                 </div>
               </div>
               <p class="set-note" id="fallbackHint">直取失败时会先问你。</p>
+              <div class="set-group">
+                <div class="set-row">
+                  <div class="set-label"><span>直取画质</span><p>只取声音。省流档从最低可用画质拉流，少下 80% 以上的视频；语音厅通常只有一路音频，不受影响。</p></div>
+                  <div class="ctrl"><select id="prefDirectQuality">
+                    <option value="low">省流（推荐）</option>
+                    <option value="high">最高画质</option>
+                  </select></div>
+                </div>
+                <div class="set-row">
+                  <div class="set-label"><span>精确流量计量</span><p>经本机回环代理逐字节统计平台下行；多一层开销，下一次启动 ffmpeg 生效。</p></div>
+                  <label class="switch"><input type="checkbox" id="prefTrafficExact" aria-label="精确流量计量"><span class="switch-track"></span></label>
+                </div>
+              </div>
+              <p class="set-note">画质对下一路解析生效；精确计量对下一次重连/启动生效。</p>
             </section>
 
             <section class="set-pane" data-pane="desktop">

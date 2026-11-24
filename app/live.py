@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import queue
 import re
+import sys
 import threading
 import time
 import traceback
@@ -31,6 +32,7 @@ from typing import Any
 from . import analysis
 from . import audio as _audio
 from . import glossary
+from . import identity
 from . import lan
 from . import logs
 from . import metrics
@@ -42,6 +44,7 @@ from . import recluster as _recluster
 from .asr_pool import AsrPool
 from .config import (
     AUDIO_DIR,
+    CAPTURE_ONLY,
     DATA_DIR,
     LIVE_ASR_LANGUAGE,
     LIVE_FORCE_SEGMENT_S,
@@ -80,9 +83,6 @@ SPK_NEW_MIN_SECONDS = 1.2     # 只有足够长的片段才允许开新簇；2.0
                               # 大量 1~2 秒的发言永远开不出新簇，只能被并到别人身上
 
 _TAG_RE = re.compile(r"<\|[^|]*\|>")
-# 位置标签不是人名：飞书兜底时不能把它当"已经认出来了"。
-_POSITIONAL_RE = re.compile(
-    r"^(主播|嘉宾|说话人|用户|观众|有人|未识别|连麦|路人|网友|SPK[_-]?\d+)")
 FINISH_LOG = DATA_DIR / "finalize.log"
 
 
@@ -103,6 +103,27 @@ def _log(msg: str, event: str = "live.finalize", level: str = "info",
 
 class LiveError(RuntimeError):
     """模型缺失、会话不存在等可展示给用户的错误。"""
+
+
+def _pcm_rms(pcm: bytes) -> float:
+    """仅采集模式用的轻量 RMS：纯 stdlib，不把 numpy 拖进「只录不转」的链路。
+
+    一块 4096 采样、每秒约 4 块，循环开销可以忽略；它只用于「连续全零 =
+    流已经空了」的看门狗，不需要高精度。
+    """
+    if len(pcm) < 2:
+        return 0.0
+    import array
+    a = array.array("h")
+    a.frombytes(pcm[: len(pcm) // 2 * 2])
+    if sys.byteorder == "big":
+        a.byteswap()
+    if not a:
+        return 0.0
+    total = 0
+    for v in a:
+        total += v * v
+    return (total / len(a)) ** 0.5 / 32768.0
 
 
 # ------------------------------------------------------------------ 模型
@@ -390,7 +411,8 @@ def _push_label(ev: dict) -> str:
 
 
 class LiveSession:
-    def __init__(self, title: str, source_mode: str = "tab") -> None:
+    def __init__(self, title: str, source_mode: str = "tab",
+                 capture_only: bool = False) -> None:
         # 时区在"开始这一刻"定死：started_at 保留 naive 本地时间（前端和历史代码都按它
         # 显示），另外存 UTC 与偏移。飞书文案要同时给北京和 UTC，而机器搬到别的时区
         # 之后，只有录制当时的偏移能还原真相。
@@ -401,6 +423,9 @@ class LiveSession:
         # 采集来源：tab=浏览器页面，direct=解析流地址后 ffmpeg 直取。
         # 只影响元数据、提示文案和导出展示，不改变 VAD/ASR 管线。
         self.source_mode = (source_mode or "tab").strip().lower()
+        # 仅采集：只写 spool/WAV，不加载 ASR/声纹模型，不产生字幕、说话人和总结。
+        # 面向低配 VPS 录制节点；逐场可由 /api/live/start 的 capture_only 覆盖。
+        self.capture_only = bool(capture_only)
         self.started_at = now.replace(tzinfo=None).isoformat(timespec="seconds")
         self.started_utc = now.astimezone(timezone.utc).isoformat(timespec="seconds")
         self.tz_offset_min = int((now.utcoffset() or timedelta(0)).total_seconds() // 60)
@@ -413,6 +438,8 @@ class LiveSession:
         self.total_samples = 0
         self.recognized_s = 0.0
         self.speech_s = 0.0            # VAD 判定为人声的时长（用于区分"没识别"和"本来就没人说话"）
+        # 仅采集没有 VAD：用「非全零音频」的累计时长代替，运维据此判断这段录音有没有内容。
+        self.audible_s = 0.0
         # 连续「数字静音」的时长：波形恰好全零，不是"主播安静"。抖音下播后
         # CDN 还挂着连接照推静音帧时，块一直在到、断流看门狗永远不响，只有它
         # 能看出这一场其实已经没声音了。有声（RMS ≥ LIVE_ZERO_RMS）就清零。
@@ -486,69 +513,87 @@ class LiveSession:
 
     # -------------------------------------------------- 生命周期
     def start(self) -> None:
-        ENGINE.load()
-        import numpy as np
-        from sherpa_onnx import VadModelConfig, VoiceActivityDetector
-
         AUDIO_DIR.mkdir(parents=True, exist_ok=True)
-        self.clusters = Clusters(np, LIVE_MAX_SPEAKERS)
-        cfg = VadModelConfig()
-        cfg.silero_vad.model = str(VAD_MODEL)
-        cfg.silero_vad.threshold = 0.5
-        cfg.silero_vad.min_silence_duration = 0.55
-        cfg.silero_vad.min_speech_duration = LIVE_MIN_SPEECH_S
-        cfg.silero_vad.max_speech_duration = LIVE_MAX_SEGMENT_S
-        cfg.silero_vad.window_size = WINDOW
-        cfg.sample_rate = SAMPLE_RATE
-        cfg.num_threads = 1
-        cfg.debug = False
-        self._vad_cfg = cfg
-        self._vad_cls = VoiceActivityDetector
+        if not self.capture_only:
+            ENGINE.load()
+            import numpy as np
+            from sherpa_onnx import VadModelConfig, VoiceActivityDetector
+
+            self.clusters = Clusters(np, LIVE_MAX_SPEAKERS)
+            cfg = VadModelConfig()
+            cfg.silero_vad.model = str(VAD_MODEL)
+            cfg.silero_vad.threshold = 0.5
+            cfg.silero_vad.min_silence_duration = 0.55
+            cfg.silero_vad.min_speech_duration = LIVE_MIN_SPEECH_S
+            cfg.silero_vad.max_speech_duration = LIVE_MAX_SEGMENT_S
+            cfg.silero_vad.window_size = WINDOW
+            cfg.sample_rate = SAMPLE_RATE
+            cfg.num_threads = 1
+            cfg.debug = False
+            self._vad_cfg = cfg
+            self._vad_cls = VoiceActivityDetector
+
+        warnings = [
+            ("直取直播流：解析流地址后由 ffmpeg 直接拉音频，不加载播放器页面。"
+             if self.source_mode == "direct" else
+             "标签页实时采集：只包含被选中标签页的音频，不含其他系统声音。"),
+        ]
+        if self.capture_only:
+            warnings.extend([
+                "仅采集模式：只保存录音，不加载 ASR/声纹模型，不生成实时字幕、"
+                "说话人和总结。",
+                "录音结束后会自动转成 m4a，可在文件中心回放；这一场不会产生笔记。",
+            ])
+        else:
+            warnings.extend([
+                "说话人由 CAM++ 声纹在线聚类得到（实时上限 %d 人）；结束后会用全场声纹重聚类，"
+                "抢话/重叠段仍可能归错，可改名或点「重新分人」校正。" % LIVE_MAX_SPEAKERS,
+                "直播间背景音乐会影响断句和转写，摘要以逐字稿为准。",
+            ])
 
         conn = store.connect()
         try:
             store.insert_session(conn, {
                 "id": self.id, "title": self.title, "started_at": self.started_at,
                 "duration_s": 0.0, "source_mode": self.source_mode,
-                "sample_rate": SAMPLE_RATE,
+                "capture_only": self.capture_only, "sample_rate": SAMPLE_RATE,
                 "started_utc": self.started_utc, "tz_offset_min": self.tz_offset_min,
-                "audio_path": None, "warnings": [
-                    ("直取直播流：解析流地址后由 ffmpeg 直接拉音频，不加载播放器页面。"
-                     if self.source_mode == "direct" else
-                     "标签页实时采集：只包含被选中标签页的音频，不含其他系统声音。"),
-                    "说话人由 CAM++ 声纹在线聚类得到（实时上限 %d 人）；结束后会用全场声纹重聚类，"
-                    "抢话/重叠段仍可能归错，可改名或点「重新分人」校正。" % LIVE_MAX_SPEAKERS,
-                    "直播间背景音乐会影响断句和转写，摘要以逐字稿为准。",
-                ], "speakers": [],
+                "audio_path": None, "warnings": warnings, "speakers": [],
             })
             # 反馈闭环：本场用上一场为止学到的偏好，定下就不再改口。
-            try:
-                from . import feedback
-                self.push_bias = feedback.deltas(conn)
-                if self.push_bias:
-                    _log("推送偏好 %s" % ", ".join(
-                        "%s%+.2f" % (k, v) for k, v in sorted(self.push_bias.items())))
-            except Exception:
-                traceback.print_exc()
+            # 仅采集没有推送，不需要加载偏好。
+            if not self.capture_only:
+                try:
+                    from . import feedback
+                    self.push_bias = feedback.deltas(conn)
+                    if self.push_bias:
+                        _log("推送偏好 %s" % ", ".join(
+                            "%s%+.2f" % (k, v) for k, v in sorted(self.push_bias.items())))
+                except Exception:
+                    traceback.print_exc()
         finally:
             conn.close()
         # 不缓冲：采集中回听直接读这个文件，写进去的字节要马上能被读到。
         self._spool_fh = open(self.spool, "wb", buffering=0)
         self.running = True
         self._started_mono = time.monotonic()
-        POOL.register(self)          # 登记 + 按需启动共享 ASR 工作池
-        POOL.start()
+        if not self.capture_only:
+            POOL.register(self)          # 登记 + 按需启动共享 ASR 工作池
+            POOL.start()
         self._thread = threading.Thread(target=self._worker, name="live-" + self.id, daemon=True)
         self._thread.start()
-        # 没有新句子时也要能刷新疑似：常客说 25 秒就停，不能永远停在 cand。
-        self._hint_thread = threading.Thread(target=self._hint_loop,
-                                             name="hint-" + self.id, daemon=True)
-        self._hint_thread.start()
+        if not self.capture_only:
+            # 没有新句子时也要能刷新疑似：常客说 25 秒就停，不能永远停在 cand。
+            self._hint_thread = threading.Thread(target=self._hint_loop,
+                                                 name="hint-" + self.id, daemon=True)
+            self._hint_thread.start()
         self.last_final_at = time.monotonic()
         metrics.METRICS.inc("live.sessions_started")
         logs.log_event("live.session_start", session_id=self.id,
-                       title=self.title, asr_workers=asr_threads(),
-                       workers=POOL.workers, source=self.source_mode)
+                       title=self.title, source=self.source_mode,
+                       capture_only=self.capture_only,
+                       asr_workers=(0 if self.capture_only else asr_threads()),
+                       workers=(0 if self.capture_only else POOL.workers))
 
     def feed(self, pcm: bytes) -> None:
         if not self.running:
@@ -617,7 +662,10 @@ class LiveSession:
             self.error = (self.error or "") + " 结束处理超时（仍在收尾）。"
         # 采集线程退出前已把 VAD 里剩余的句子全部提交；等它们解码、落库完再收尾，
         # 否则重聚类会漏掉最后几句。超时说明有异常长的解码，记下来但不无限挂住。
-        drained = POOL.drain_session(self.id, timeout=60)
+        # 仅采集没有 ASR 队列，直接跳过。
+        drained: dict = {}
+        if not self.capture_only:
+            drained = POOL.drain_session(self.id, timeout=60)
         self._closed = True
         # _discard 只由 cancel() 显式置位；finalize=False 仍要把已切出的定稿落库，
         # 只是跳过总结/重聚类（进程退出时不该丢最后几句）。
@@ -630,10 +678,13 @@ class LiveSession:
             abytes = self.audio_path.stat().st_size if self.audio_path else None
         except OSError:
             abytes = None
+        # 仅采集没有转写，「未转写时长」没有意义；写 0，别让回放页显示
+        # 「未转写 42 分」误导成转写失败。
+        untranscribed = (0.0 if self.capture_only
+                         else max(0.0, duration - self.recognized_s))
         conn = store.connect()
         try:
-            store.finish_session(conn, self.id, duration, ap,
-                                 max(0.0, duration - self.recognized_s),
+            store.finish_session(conn, self.id, duration, ap, untranscribed,
                                  audio_format=("wav" if ap else None),
                                  audio_bytes=abytes, audio_original_path=ap)
         finally:
@@ -643,6 +694,12 @@ class LiveSession:
         # 这里的 finish_session 又覆盖回 WAV。
         if ap:
             _audio.schedule_transcode(self.id, ap)
+        elif self._thread and self._thread.is_alive():
+            # 长录音在慢盘上收 WAV 可能超过 30 秒 join：finish_session 已经把
+            # audio_path 写成 NULL，等 worker 落完盘再补一次元数据和转码，
+            # 否则 WAV 会变成没有任何记录指向的孤儿文件。
+            threading.Thread(target=self._rescue_audio_after_stop,
+                             name="live-rescue-" + self.id, daemon=True).start()
 
         out = self.status()
         asr_snapshot = out.get("asr") or {}
@@ -662,8 +719,9 @@ class LiveSession:
                     pushed=self.pushed, error=self.error or "")
             except Exception:
                 traceback.print_exc()
-        POOL.unregister(self.id)
-        if finalize:
+        if not self.capture_only:
+            POOL.unregister(self.id)
+        if finalize and not self.capture_only:
             # 重聚类 / 起标题 / 总结全部丢到后台：stop 只负责把音频和逐字稿落盘。
             # 以前重聚类是同步跑的（就在这个请求线程里），场次一长「录音落盘」那一格
             # 就得干等；而它本来也不影响数据完整性。
@@ -682,6 +740,8 @@ class LiveSession:
         保证总结用的是整场声纹重分后的说话人。
         """
         if self.cancelled:      # 取消 = 用户不要这场，别在聊天里留下一条回顾
+            return
+        if self.capture_only:   # 仅采集没有逐字稿，总结/回顾都无从谈起
             return
         sid = self.id
         try:
@@ -703,6 +763,9 @@ class LiveSession:
 
     # -------------------------------------------------- 工作线程
     def _worker(self) -> None:
+        if self.capture_only:
+            self._capture_only_worker()
+            return
         conn = store.connect()
         np = self.clusters.np
         # 30 秒缓冲足够：max_speech_duration 是 20 秒，留 10 秒余量。
@@ -812,6 +875,59 @@ class LiveSession:
                 self._poll_scorer(force=True)
             # 采集线程只负责把音频落盘；定稿的落库在 ASR worker 里，
             # 由 LiveSession.stop() 等 drain_session 完成后再更新场次摘要。
+            self._spool_fh.close()
+            self._finalize_wav()
+            conn.close()
+            self.running = False
+            self.finished_at = store.now()
+            self.speech = False
+
+    def _capture_only_worker(self) -> None:
+        """仅采集：只把 PCM 写进 spool，不 import numpy/sherpa。
+
+        低配 VPS 上这条路径每路常驻只有几十 MB：没有 VAD、ASR、声纹，
+        也不产生定稿、说话人和总结。音量只用来发现「流还在、内容全是静音」。
+        """
+        conn = store.connect()
+        last_touch = 0.0
+        try:
+            while True:
+                try:
+                    item = self.q.get(timeout=0.25)
+                except queue.Empty:
+                    if self.flush_req.is_set():
+                        self.flush_req.clear()
+                    if self.stop_evt.is_set():
+                        break
+                    continue
+                if item is None:
+                    break
+                self._spool_fh.write(item)
+                now_mono = time.monotonic()
+                self._last_feed_mono = now_mono
+                self._last_audio_at = now_mono
+                self.last_feed_at = datetime.now().isoformat(timespec="seconds")
+                samples = len(item) // 2
+                self.total_samples += samples
+                # 和转写路径同一套音量判断：全零才算「没声音」，有底噪不算。
+                self.level = _pcm_rms(item)
+                self._note_level(self.level, samples)
+                if self.level >= LIVE_ZERO_RMS:
+                    self.audible_s += samples / SAMPLE_RATE
+                    self.last_speech_s = self.total_samples / SAMPLE_RATE
+                if self.flush_req.is_set():
+                    self.flush_req.clear()
+                if time.time() - last_touch >= 5:
+                    store.touch_session(conn, self.id, round(
+                        self.total_samples / SAMPLE_RATE, 2))
+                    last_touch = time.time()
+        except Exception as e:  # 单个会话出错不能拖垮服务
+            self.error = "%s: %s" % (type(e).__name__, e)
+            metrics.METRICS.inc("live.errors", 1, session_id=self.id)
+            logs.log_event("live.worker_error", level="error", session_id=self.id,
+                           error=self.error)
+            traceback.print_exc()
+        finally:
             self._spool_fh.close()
             self._finalize_wav()
             conn.close()
@@ -1104,7 +1220,7 @@ class LiveSession:
         if fallback:
             ev["speaker_label"] = fallback
             ev["speaker_state"] = "unknown"
-        elif old and not _POSITIONAL_RE.match(old):
+        elif old and not identity.is_positional(old):
             ev["speaker_label"] = old          # 旧事件没有 speaker_id 时只能信标签
             ev["speaker_state"] = "manual"
         else:
@@ -1270,6 +1386,34 @@ class LiveSession:
         self.labels = auto
         return changed, self.labels.get(new_spk or "", "说话人")
 
+    def _rescue_audio_after_stop(self) -> None:
+        """stop 等不及 WAV 收尾时的补救：worker 落盘后补元数据并转码。"""
+        try:
+            if self._thread:
+                self._thread.join(timeout=1800)
+        except Exception:
+            pass
+        if not self.audio_path:
+            return
+        try:
+            ap = Path(self.audio_path)
+            if not ap.is_file() or ap.stat().st_size <= 0:
+                return
+            conn = store.connect()
+            try:
+                row = store.get_session(conn, self.id) or {}
+                if str(row.get("audio_path") or "").strip():
+                    return
+                store.set_audio_meta(
+                    conn, self.id, audio_path=str(ap), audio_format="wav",
+                    audio_bytes=ap.stat().st_size, audio_original_path=str(ap))
+            finally:
+                conn.close()
+            _audio.schedule_transcode(self.id, ap)
+            logs.log_event("live.audio_rescued", session_id=self.id, path=str(ap))
+        except Exception:
+            traceback.print_exc()
+
     def _finalize_wav(self) -> None:
         if not self.spool.exists():
             return
@@ -1297,7 +1441,7 @@ class LiveSession:
 
     # -------------------------------------------------- 查询
     def status(self) -> dict:
-        asr = POOL.session_stats(self.id)
+        asr = {} if self.capture_only else POOL.session_stats(self.id)
         with self.lock:
             rows = list(self.utts)
             c = self.clusters
@@ -1329,12 +1473,15 @@ class LiveSession:
             return {
                 "id": self.id, "title": self.title, "started_at": self.started_at,
                 "source_mode": self.source_mode,
+                "capture_only": self.capture_only,
                 "running": self.running, "finished_at": self.finished_at,
                 "elapsed": round(self.total_samples / SAMPLE_RATE, 1),
                 "speech": self.speech, "queued": self.q.qsize(), "dropped": self.dropped,
                 "paused": self.paused,
                 "recognized_s": round(self.recognized_s, 1),
                 "speech_s": round(min(self.speech_s, self.total_samples / SAMPLE_RATE), 1),
+                # 仅采集没有 VAD：「有声」= 非全零音频的累计时长。
+                "audible_s": round(min(self.audible_s, self.total_samples / SAMPLE_RATE), 1),
                 "n_utterances": self.n_utts,
                 "level": round(self.level, 5),
                 "idle_s": round(max(0.0, self.total_samples / SAMPLE_RATE - self.last_speech_s), 1),
@@ -1354,7 +1501,9 @@ class LiveSession:
                 "chars": self.chars, "questions": self.questions,
                 "marks": list(self.marks),
                 "live_highlights": list(self.live_highlights[-3:]),
-                "error": self.error, "engine": "SenseVoiceSmall-int8 + CAM++",
+                "error": self.error,
+                "engine": "仅采集（不加载转写模型）" if self.capture_only
+                else "SenseVoiceSmall-int8 + CAM++",
                 "pushed": self.pushed, "started_utc": self.started_utc,
                 "tz_offset_min": self.tz_offset_min,
                 "partial": self.partial,
@@ -1382,6 +1531,7 @@ class LiveSession:
         return {
             "id": self.id, "title": self.title,
             "state": "running" if self.running else "stopped",
+            "capture_only": self.capture_only,
             "running": bool(self.running), "started_at": self.started_at,
             "finished_at": self.finished_at,
             "elapsed": round(elapsed, 1),
@@ -1391,13 +1541,16 @@ class LiveSession:
             "n_speakers": n_speakers,
             "recognized_s": round(self.recognized_s, 1),
             "speech_s": round(min(self.speech_s, elapsed), 1),
+            "audible_s": round(min(self.audible_s, elapsed), 1),
             "last_speech_age_s": round(max(0.0, elapsed - self.last_speech_s), 1),
             "zero_s": round(min(self.zero_s, elapsed), 1),
-            "last_final_age_s": round(max(0.0, now - self.last_final_at), 1),
+            # 仅采集没有定稿，返回 None，面板显示「—」而不是一个一直涨的数字。
+            "last_final_age_s": (None if self.capture_only
+                                 else round(max(0.0, now - self.last_final_at), 1)),
             "stall": bool(self._stall_state),
             "error": self.error or "", "pushed": self.pushed,
             "last_line": last_line,
-            "asr": POOL.session_stats(self.id),
+            "asr": {} if self.capture_only else POOL.session_stats(self.id),
             "metrics": metrics.METRICS.session_snapshot(self.id),
         }
 
@@ -1408,6 +1561,9 @@ class LiveSession:
         持续停滞每 5 分钟补一条事件，避免事件表被一分钟一条刷爆。
         """
         now = time.monotonic() if now is None else now
+        if self.capture_only:
+            # 没有 ASR 就没有定稿，「有语音但不出字」这个判据不成立。
+            return False
         if not self.running or self.paused:
             return self._stall_state
         elapsed = self.total_samples / SAMPLE_RATE
@@ -2083,8 +2239,11 @@ def stop_watchdog() -> None:
         th.join(timeout=2)
 
 
-def start(title: str = "", source_mode: str = "tab") -> dict:
-    s = LiveSession(title, source_mode=source_mode)
+def start(title: str = "", source_mode: str = "tab",
+          capture_only: bool | None = None) -> dict:
+    """新建一场采集。capture_only=None 跟全局 LIVENOTES_CAPTURE_ONLY 走。"""
+    co = CAPTURE_ONLY if capture_only is None else bool(capture_only)
+    s = LiveSession(title, source_mode=source_mode, capture_only=co)
     with _LOCK:
         s.id = _new_id()
         s.spool = AUDIO_DIR / (s.id + ".pcm")
@@ -2092,13 +2251,16 @@ def start(title: str = "", source_mode: str = "tab") -> dict:
     try:
         s.start()
     except Exception:
-        POOL.unregister(s.id)
+        if not s.capture_only:
+            POOL.unregister(s.id)
         with _LOCK:
             _SESSIONS.pop(s.id, None)
         raise
     return {"session_id": s.id, "title": s.title, "sample_rate": SAMPLE_RATE,
             "chunk_samples": CHUNK_SAMPLES, "source_mode": s.source_mode,
-            "engine": "SenseVoiceSmall-int8 + CAM++ (CPU)"}
+            "capture_only": s.capture_only,
+            "engine": ("仅采集（不加载转写模型）" if s.capture_only
+                       else "SenseVoiceSmall-int8 + CAM++ (CPU)")}
 
 
 def feed(sid: str, pcm: bytes) -> dict:
@@ -2418,19 +2580,22 @@ def info() -> dict:
     active 是给 tools/dev.py 用的：改代码要重启进程，但正在采集的场次一重启就断，
     守护进程靠这个列表决定"立刻重启"还是"等这场录完"。
     """
-    missing = Engine.missing()
+    # 仅采集时模型文件缺不缺都不影响开工，别让「模型未就绪」把页面吓住。
+    missing = [] if CAPTURE_ONLY else Engine.missing()
     with _LOCK:
         active = [sid for sid, s in _SESSIONS.items() if s.running]
     return {
         "ready": not missing,
         "missing": missing,
+        "capture_only": CAPTURE_ONLY,
         "active": active,
         "models_dir": str(SENSEVOICE_MODEL.parent.parent),
         "sample_rate": SAMPLE_RATE,
         "chunk_samples": CHUNK_SAMPLES,
         "max_speakers": LIVE_MAX_SPEAKERS,
-        "engine": "SenseVoiceSmall-int8 + CAM++ (CPU)",
-        "asr": POOL.stats(),
+        "engine": ("仅采集（不加载转写模型）" if CAPTURE_ONLY
+                   else "SenseVoiceSmall-int8 + CAM++ (CPU)"),
+        "asr": {} if CAPTURE_ONLY else POOL.stats(),
         "asr_threads": asr_threads(),
         # tools/dev.py 靠这个判断「下播收尾还在跑，先别重启换代码」
         "llm_jobs": scheduler.SCHEDULER.stats_summary(),

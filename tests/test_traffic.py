@@ -53,6 +53,37 @@ def test_estimate_without_bytes_gives_rate():
     assert snap["platform_mbps"] == pytest.approx(3.0, rel=0.05)
 
 
+def test_estimate_change_accumulates_instead_of_rewriting_history():
+    """直播中途换码率：累计字节只能继续涨，不能按最新码率重算整场。"""
+    now = [1000.0]
+    m = TrafficMeter(started_at=980.0, clock=lambda: now[0])
+    m.set_estimate_kbps(6000)       # 启动至今 20s × 6 Mbps = 15 MB
+    assert m.snapshot()["platform_bytes"] == pytest.approx(15_000_000, rel=0.01)
+
+    now[0] += 10
+    m.set_estimate_kbps(450)        # 先用 6 Mbps 结算这 10s，再换档
+    assert m.snapshot()["platform_bytes"] == pytest.approx(22_500_000, rel=0.01)
+
+    now[0] += 10                    # 10s × 450 kbps = 562,500 B
+    snap = m.snapshot()
+    assert snap["platform_bytes"] == pytest.approx(23_062_500, rel=0.01)
+    assert snap["platform_bytes"] > 22_500_000
+
+
+def test_exact_takeover_keeps_estimate_prefix_and_demotion_does_not_double_count():
+    now = [1000.0]
+    m = TrafficMeter(started_at=1000.0, clock=lambda: now[0])
+    m.set_estimate_kbps(3000)
+    now[0] += 10
+    m.set_source("proxy", "计数代理实测")   # 接管前 10s 按估算结算
+    m.add_platform(1_000_000)               # 代理实测字节
+    assert m.snapshot()["platform_bytes"] == pytest.approx(4_750_000, rel=0.01)
+
+    m.demote_source("代理断了")
+    now[0] += 10                            # 降级后按估算继续，不补精确那段
+    assert m.snapshot()["platform_bytes"] == pytest.approx(8_500_000, rel=0.01)
+
+
 def test_cdp_counter_dedupes_data_received_and_loading_finished():
     m = TrafficMeter()
     c = CdpTrafficCounter(m)

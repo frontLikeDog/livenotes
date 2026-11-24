@@ -13,7 +13,7 @@ from __future__ import annotations
 import html
 import sqlite3
 
-from . import claims, store
+from . import claims, identity, store
 
 
 def _e(value: object) -> str:
@@ -36,15 +36,25 @@ def _day(at: object) -> str:
 
 
 def session_claims(conn: sqlite3.Connection, sid: str) -> list[dict]:
-    """一场里可以做成观点卡的原子（有主张句、有原话的优先）。"""
+    """一场里可以做成观点卡的原子（有主张句、有原话的优先）。
+
+    ``who`` 是落库署名（可能为空）；``who_label`` 是零标注兜底后的展示名，
+    可能是「小嘎皮」「主播」或「本场第 3 位上麦者」。
+    """
     out = []
+    roster = identity.roster(conn, sid)
     for r in claims.rows_for(conn, session_id=sid, limit=500):
         stance = str(r.get("stance") or "").strip()
         if not stance:
             continue
+        ref = identity.claim_ref(r, roster)
         out.append({
             "claim_id": str(r.get("claim_id") or ""),
             "who": str(r.get("who") or ""),
+            "who_label": str(ref.get("who") or "一位上麦者"),
+            "who_source": str(ref.get("source") or ""),
+            "who_source_label": str(ref.get("source_label") or ""),
+            "speaker_id": str(ref.get("speaker_id") or ""),
             "person_id": str(r.get("person_id") or ""),
             "topic": str(r.get("topic") or ""),
             "stance": stance,
@@ -111,9 +121,16 @@ def _page(title: str, body: str) -> str:
 </div></body></html>""" % (_e(title), _CSS, body)
 
 
-def claim_page(claim: dict) -> str:
-    """一条观点的只读页。扫码打开的是它，而不是整场笔记。"""
-    who = str(claim.get("who") or "一位上麦者")
+def claim_page(claim: dict, ref: dict | None = None) -> str:
+    """一条观点的只读页。扫码打开的是它，而不是整场笔记。
+
+    ``ref`` 是零标注兜底后的身份（``identity.claim_ref``）；不传时退回
+    落库署名，保证老调用仍能打开。
+    """
+    who = str((ref or {}).get("who") or claim.get("who") or "一位上麦者")
+    source = str((ref or {}).get("source_label") or "")
+    if source in ("已确认", "声纹识别"):
+        source = ""
     topic = str(claim.get("topic") or "")
     stance = str(claim.get("stance") or "").strip()
     quote = str(claim.get("quote") or "").strip()
@@ -122,10 +139,11 @@ def claim_page(claim: dict) -> str:
     t = _fmt_t(claim.get("t"))
     sid = str(claim.get("session_id") or "")
     matter = topic or "观点"
+    origin = (" · " + source) if source else ""
     body = (
         '<p class="eyebrow">观点 · %s</p>'
         '<h1>%s</h1>'
-        '<p class="meta">来自《%s》%s%s</p>'
+        '<p class="meta">来自《%s》%s%s%s</p>'
         '<span class="topic">%s</span>'
         '<div class="quote">%s%s</div>'
         '<div class="foot">'
@@ -133,7 +151,7 @@ def claim_page(claim: dict) -> str:
         '<a class="btn primary" href="/">记录你自己的上麦</a>'
         '</div>'
         % (_e(at), _e(who), _e(title), _e(at),
-           (" · " + t) if t else "", _e(matter), _e(stance),
+           (" · " + t) if t else "", _e(origin), _e(matter), _e(stance),
            ('<div class="src">「%s」</div>' % _e(quote)) if quote else "",
            _e(sid), ("&amp;t=%d" % int(float(claim.get("t") or 0)))
            if claim.get("t") is not None else ""))

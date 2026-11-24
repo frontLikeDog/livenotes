@@ -60,6 +60,9 @@ import { render } from './render.js';
     const ca = r.session.last_chunk_ago_s;
     if((ca != null && num(ca) >= 15) || (ca == null && num(r.session.elapsed) >= 15))
       return {key:"stalled",label:"断流",tone:"bad",dot:"failed"};
+    // 仅采集不判「安静」：没有 VAD，idle_s 只是「多久没有非全零音频」，
+    // 用「仅录制」明确告诉人这一路本来就不会出字。
+    if(r.session.capture_only) return {key:"recording",label:"仅录制",tone:"ok",dot:"live"};
     if(num(r.session.idle_s) >= 15) return {key:"quiet",label:"安静",tone:"warn",dot:"starting"};
     return {key:"live",label:"在听",tone:"ok",dot:"live"};
   }

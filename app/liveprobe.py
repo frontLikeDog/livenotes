@@ -48,7 +48,8 @@ _WEB_RID_RE = re.compile(r'"webRid"\s*:\s*"(\d{4,})"')
 _STARTED_RE = re.compile(
     r'"(?:live_started_at|liveStartedAt|create_time|createTime)"\s*:\s*"?'
     r'(\d{10,13})"?')
-_FLV_BLOCK_RE = re.compile(r'"flv_pull_url"\s*:\s*\{([^{}]{0,4000})\}')
+_FLV_BLOCK_RE = re.compile(
+    r'"(?:flv_pull_url|flvPullUrl)"\s*:\s*\{([^{}]{0,4000})\}')
 _FLV_PAIR_RE = re.compile(
     r'"([A-Za-z0-9_]{1,24})"\s*:\s*"(https?://[^"]+?\.flv[^"]*)"')
 
@@ -131,7 +132,13 @@ def canonical_douyin_url(url: str, timeout: float = 10.0) -> str:
         return _LIVE_PAGE + m.group(1)
     if not is_douyin(u):
         return ""
-    path = urllib.parse.urlsplit(_final_url(u, timeout)).path
+    final = _final_url(u, timeout)
+    # 短链也可能直接落到 live.douyin.com/<web_rid>；只认 reflow 落地会让
+    # 这种链接永远预解析失败，每次启动都重新赌短链跳转。
+    m = _LIVE_RE.match(final)
+    if m:
+        return _LIVE_PAGE + m.group(1)
+    path = urllib.parse.urlsplit(final).path
     m = _REFLOW_RE.search(path)
     landing = _REFLOW_BASE + m.group(1) if m else ""
     if not landing:
