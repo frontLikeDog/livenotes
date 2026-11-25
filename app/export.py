@@ -195,6 +195,312 @@ def to_note_md(conn: sqlite3.Connection, sid: str) -> str:
     return "\n".join(out)
 
 
+# ---------------------------------------------------------------- 发布用 Markdown
+# 场次文档的目标读者在手机上：只放「结论 + 观点 + 原话 + 人物」，不放逐字稿。
+# 没有总结就明确写「待补转写 / 待总结」，不生成规则版兜底稿（docs/47 §3.1）。
+
+_SHAPE_SHORT = {"single": "单人", "roundtable": "圆桌", "qa": "问答"}
+
+_DOC_STATUS = {
+    "ready": "已总结",
+    "pending_transcript": "待补转写",
+    "pending_summary": "待总结",
+    "failed_summary": "总结失败",
+}
+
+
+def _pub_time(seconds) -> str:
+    """场次内时间码：不足一小时写 MM:SS，超过写 HH:MM:SS。"""
+    try:
+        t = max(0.0, float(seconds))
+    except (TypeError, ValueError):
+        return ""
+    return fmt_ts(t, with_hours=t >= 3600)
+
+
+def _pub_start(s) -> tuple[str, str, int]:
+    """开始时间 -> (2026-11-25 22:30, 11-25 22:30, epoch_ms)。解析不了返回空。"""
+    raw = str(s or "").strip()
+    if not raw:
+        return "", "", 0
+    try:
+        dt = datetime.fromisoformat(raw)
+    except ValueError:
+        try:
+            dt = datetime.strptime(raw[:19], "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return "", "", 0
+    return (dt.strftime("%Y-%m-%d %H:%M"), dt.strftime("%m-%d %H:%M"),
+            int(dt.timestamp() * 1000))
+
+
+def _pub_dur(seconds) -> str:
+    try:
+        sec = max(0, int(round(float(seconds or 0))))
+    except (TypeError, ValueError):
+        sec = 0
+    h, rem = divmod(sec, 3600)
+    m = rem // 60
+    if h and m:
+        return "%d 小时 %d 分" % (h, m)
+    if h:
+        return "%d 小时" % h
+    return "%d 分钟" % max(1, m) if sec else "0 分钟"
+
+
+def _pub_clean(text, limit: int = 80) -> str:
+    """原话只留能独立成立的句子：压空白、去「他说/就是说」式起头、截断。"""
+    s = re.sub(r"\s+", " ", str(text or "")).strip()
+    s = re.sub(r"^(?:他说|她说|他说就是|就是说|然后呢|那个|其实)[，,、：:\s]*", "", s)
+    if limit and len(s) > limit:
+        s = s[:limit].rstrip("，,、；;：:… ") + "…"
+    return s
+
+
+def _pub_person(who: str, source: str = "") -> str:
+    """展示用的人名。位置标签保持「本场第 N 位上麦者」，不猜名字。"""
+    from . import identity
+    name = str(who or "").strip()
+    if not name:
+        return "一位上麦者"
+    clean, kind = identity.clean_name(name)
+    if kind == "nickname":
+        return clean
+    return name
+
+
+def _pub_room(sid: str) -> dict:
+    try:
+        from . import rooms
+        return rooms.get_by_session(sid) or {}
+    except Exception:
+        return {}
+
+
+def _pub_roster(conn: sqlite3.Connection, sid: str) -> list[dict]:
+    from . import identity
+    try:
+        entries = identity.roster(conn, sid).get("entries") or []
+    except Exception:
+        return []
+    return sorted(entries, key=lambda e: (-float(e.get("seconds") or 0),
+                                          int(e.get("ordinal") or 0)))
+
+
+def _pub_related(conn: sqlite3.Connection, note: dict) -> list[str]:
+    lines: list[str] = []
+    for r in (note.get("related") or [])[:4]:
+        when, _, _ = _pub_start(r.get("started_at"))
+        short = when[5:] if when else ""
+        title = str(r.get("title") or "未命名")
+        reason = str(r.get("reason") or "")
+        link = ""
+        pub = store.get_publish(conn, str(r.get("session_id") or ""))
+        if pub and pub.get("doc_url"):
+            link = " · [场次文档](%s)" % pub["doc_url"]
+        lines.append("- %s ·「%s」%s%s" % (
+            short or "—", title[:40], ("· " + reason) if reason else "", link))
+    return lines
+
+
+def build_publish(conn: sqlite3.Connection, sid: str) -> dict:
+    """一场的发布视图：标题、Meta、发布用 Markdown、状态。
+
+    ``state``：ready / pending_transcript / pending_summary / failed_summary。
+    没有总结时不写摘要、不写要点、不引原文；只写「已经有什么、还缺什么」。
+    """
+    from . import notes as _notes
+    note = _notes.build_note(conn, sid)
+    if not note.get("ok"):
+        return {"ok": False, "error": str(note.get("error") or "笔记不存在")}
+    s = store.get_session(conn, sid) or {}
+    session = note.get("session") or {}
+    summary = note.get("summary") or {}
+    note_row = note.get("note") or {}
+    room = _pub_room(sid)
+    roster = _pub_roster(conn, sid)
+    n_utt = int(conn.execute(
+        "SELECT COUNT(*) AS n FROM utterances WHERE session_id=?",
+        (sid,)).fetchone()["n"] or 0)
+    offline = store.get_offline_asr(conn, sid) or {}
+    shape = note.get("shape") or {}
+    shape_short = _SHAPE_SHORT.get(str(shape.get("kind") or ""), "")
+    has_summary = bool(summary.get("overview") or note.get("points"))
+    note_state = str(note_row.get("state") or "")
+    note_error = str(note_row.get("error") or "").strip()
+    if has_summary:
+        state = "ready"
+    elif n_utt <= 0:
+        state = "pending_transcript"
+    elif note_state == "failed" or note_error:
+        state = "failed_summary"
+    else:
+        state = "pending_summary"
+
+    name = str(session.get("title") or s.get("title") or sid)
+    start_full, start_short, start_ms = _pub_start(
+        session.get("started_at") or s.get("started_at"))
+    title = ("%s ·「%s」" % (start_full, name)) if start_full else name
+    room_name = str(room.get("name") or "")
+    host = str(note.get("host") or note.get("streamer") or "")
+    duration_s = float(session.get("duration_s") or 0)
+    counts = note.get("counts") or {}
+    status_label = _DOC_STATUS.get(state, state)
+    topics = [str(t) for t in (summary.get("topics") or []) if str(t).strip()]
+    audio_url = str(s.get("drive_url") or s.get("minutes_url") or "")
+    mode = _mode_name(str(s.get("source_mode") or ""))
+    if s.get("capture_only"):
+        mode = "云端仅采集" if mode in ("", "未知") else ("%s · 仅采集" % mode)
+
+    lines = ["# %s%s" % (title, (" · " + shape_short) if shape_short else ""), ""]
+    lines.append("> 房间：%s ｜ 时长：%s ｜ 上麦：%d 人 ｜ 主持：%s" % (
+        room_name or "—", _pub_dur(duration_s), len(roster),
+        _pub_person(host) if host else "—"))
+    lines.append("> 采集：%s ｜ 状态：%s ｜ 观点 %d 条 ｜ 高光 %d 条" % (
+        mode or "—", status_label, int(counts.get("points") or 0),
+        int(counts.get("highlights") or 0)))
+    lines.append("")
+
+    if state == "ready":
+        overview = str(summary.get("overview") or "").strip()
+        if overview:
+            lines += ["## 一句话", "", overview, ""]
+        om = note.get("opinion_map") or {}
+        topics_out = om.get("topics") or []
+        if topics_out:
+            lines += ["## 观点地图", ""]
+            for group in topics_out:
+                label = str(group.get("label") or group.get("topic") or "其他")
+                lines += ["### %s" % label, ""]
+                for e in group.get("entries") or []:
+                    who = _pub_person(str(e.get("who") or ""),
+                                      str(e.get("who_source") or ""))
+                    stance = _pub_clean(e.get("stance") or e.get("gist"), 120)
+                    stamp = _pub_time(e.get("t"))
+                    tail = ""
+                    if e.get("vs"):
+                        tail = "（和%s有分歧）" % _pub_person(str(e.get("vs")))
+                    elif e.get("disagree"):
+                        tail = "（明确反对）"
+                    when = "（%s）" % stamp if stamp else ""
+                    lines.append("- **%s**：%s%s%s" % (who, stance, tail, when))
+                    quote = _pub_clean(e.get("quote"), 80)
+                    if quote and quote[:20] not in stance:
+                        lines.append("  > 原话：「%s」" % quote)
+                lines.append("")
+            questions = om.get("open_questions") or []
+            if questions:
+                lines += ["### 还没答案", ""]
+                for q in questions[:3]:
+                    who = _pub_person(str(q.get("who") or ""))
+                    text = _pub_clean(q.get("text"), 100)
+                    stamp = _pub_time(q.get("t"))
+                    lines.append("- **%s** 问「%s」，到结束没人接。%s" % (
+                        who, text, ("（%s）" % stamp) if stamp else ""))
+                lines.append("")
+        elif note.get("by_speaker"):
+            # 没有主题聚合时按人分组；仍然只写总结里已有的要点。
+            lines += ["## 观点", ""]
+            for g in note["by_speaker"]:
+                who = _pub_person(str(g.get("who") or ""))
+                lines += ["### %s" % who, ""]
+                for p in g.get("points") or []:
+                    stance = _pub_clean(p.get("stance") or p.get("title"), 120)
+                    lines.append("- %s" % stance)
+                lines.append("")
+
+        highlights = [h for h in (note.get("highlights") or [])
+                      if _pub_clean(h.get("quote") or h.get("hook") or h.get("text"), 120)]
+        if highlights:
+            lines += ["## 值得回听", "",
+                      "| 时间 | 谁 | 为什么值得听 | 原话 |",
+                      "|---|---|---|---|"]
+            for h in highlights[:5]:
+                stamp = _pub_time(h.get("peak_t") or h.get("t_start"))
+                who = _pub_person(str(h.get("speaker_label") or ""))
+                why = _pub_clean(h.get("why") or h.get("hook") or "值得回听", 40)
+                quote = _pub_clean(h.get("quote") or h.get("text"), 60)
+                lines.append("| %s | %s | %s | 「%s」 |" % (
+                    stamp or "—", who, why, quote))
+            lines.append("")
+
+        if roster:
+            lines += ["## 人物", "", "| 上麦者 | 发言 | 时长 | 档案 |", "|---|---|---|---|"]
+            for e in roster[:12]:
+                who = _pub_person(str(e.get("who") or ""))
+                lines.append("| %s | %d 条 | %s | — |" % (
+                    who, int(e.get("n_utterances") or 0),
+                    _pub_dur(e.get("seconds") or 0)))
+            lines.append("")
+
+        related = _pub_related(conn, note)
+        if related:
+            lines += ["## 相关场次", ""] + related + [""]
+        lines += ["---",
+                  "由 LiveNotes 生成。逐字稿与完整时间轴在桌面端；"
+                  "本页只保留结论与可引用的原话。"]
+    elif state == "pending_transcript":
+        lines += ["## 状态", ""]
+        detail = "这场只录了音，逐字稿还没补出来。补转写完成后这一页会自动更新。"
+        off_state = str(offline.get("status") or "")
+        if off_state == "running":
+            detail = "补转写正在进行，出字后这一页会自动更新。"
+        elif off_state == "error":
+            detail = ("补转写失败了（%s）。修好后重跑补转写，这一页会自动更新。"
+                      % _pub_clean(offline.get("error"), 80))
+        lines += [detail, ""]
+        if audio_url:
+            lines += ["## 录音", "", "- 整场录音：%s" % audio_url, ""]
+        elif s.get("minutes_url"):
+            lines += ["## 录音", "", "- 妙记：%s" % s["minutes_url"], ""]
+        lines += ["---",
+                  "由 LiveNotes 生成。转写完成前不写摘要，也不生成规则版兜底稿。"]
+    else:
+        reason = note_error or ("总结还没生成" if state == "pending_summary"
+                                else "总结失败")
+        lines += ["## 状态", ""]
+        lines.append("逐字稿已就绪（%d 句 · %d 位说话人），%s。" % (
+            n_utt, len(roster), "总结还没生成" if state == "pending_summary"
+            else "总结失败：%s" % _pub_clean(reason, 120)))
+        lines += ["总结成功后这一页会自动更新；这里不写规则版兜底稿。", ""]
+        if roster:
+            lines += ["## 人物", "", "| 上麦者 | 发言 | 时长 |", "|---|---|---|"]
+            for e in roster[:12]:
+                lines.append("| %s | %d 条 | %s |" % (
+                    _pub_person(str(e.get("who") or "")),
+                    int(e.get("n_utterances") or 0),
+                    _pub_dur(e.get("seconds") or 0)))
+            lines.append("")
+        lines += ["---",
+                  "由 LiveNotes 生成。总结失败时只列事实，不生成替代摘要。"]
+
+    body = "\n".join(lines).rstrip() + "\n"
+    return {
+        "ok": True, "session_id": sid, "title": title,
+        "base_title": "%s · %s · %s" % (
+            start_short or "未定", room_name or name[:20] or "未命名",
+            shape_short or "场次"),
+        "markdown": body, "state": state, "status_label": status_label,
+        "overview": str(summary.get("overview") or ""),
+        "room_name": room_name, "host": _pub_person(host) if host else "",
+        "duration_s": duration_s, "started_at": session.get("started_at") or "",
+        "started_ms": start_ms, "shape": shape_short,
+        "topics": topics, "counts": {"points": int(counts.get("points") or 0),
+                                     "highlights": int(counts.get("highlights") or 0),
+                                     "speakers": len(roster)},
+        "audio_url": audio_url, "error": note_error,
+        "n_utterances": n_utt,
+    }
+
+
+def to_publish_md(conn: sqlite3.Connection, sid: str) -> str:
+    """发布用场次 Markdown。不存在则抛 ValueError，由调用方转成失败原因。"""
+    out = build_publish(conn, sid)
+    if not out.get("ok"):
+        raise ValueError(str(out.get("error") or "笔记不存在"))
+    return str(out["markdown"])
+
+
 def build(conn: sqlite3.Connection, sid: str, fmt: str) -> tuple[str, str, str]:
     """返回 (正文, MIME, 文件名)。"""
     fmt = (fmt or "md").lower()

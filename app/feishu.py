@@ -56,6 +56,24 @@ def load_config() -> dict:
     audio_folder = (os.environ.get("FEISHU_AUDIO_FOLDER_TOKEN")
                     or str(raw.get("audio_folder_token") or "")
                     or doc_folder)
+    # 发布器（app/feishu_publish.py）：默认关，桌面用户不配就不自动建文档。
+    # 文件里的值可能是 true/1/"1"，统一按真假字符串判断。
+    def _on(v) -> bool:
+        return str(v).strip().lower() in ("1", "true", "yes", "on")
+
+    publish_env = os.environ.get("FEISHU_PUBLISH_ENABLED")
+    publish_raw = raw.get("publish_enabled")
+    publish_enabled = _on(publish_env if publish_env is not None else publish_raw)
+    # 场次文档与 Base 可以有自己的文件夹；没单独配就复用云文档文件夹。
+    publish_folder = (os.environ.get("FEISHU_PUBLISH_FOLDER_TOKEN")
+                      or str(raw.get("publish_folder_token") or "")
+                      or doc_folder)
+    base_folder = (os.environ.get("FEISHU_BASE_FOLDER_TOKEN")
+                   or str(raw.get("base_folder_token") or "")
+                   or publish_folder)
+    base_env = os.environ.get("FEISHU_PUBLISH_BASE")
+    base_on = _on(base_env if base_env is not None
+                  else raw.get("publish_base", True))
     return {
         "app_id": os.environ.get("FEISHU_APP_ID") or str(raw.get("app_id") or ""),
         "app_secret": os.environ.get("FEISHU_APP_SECRET") or str(raw.get("app_secret") or ""),
@@ -72,6 +90,18 @@ def load_config() -> dict:
         "audio_folder_token": audio_folder,
         "drive_url_base": (os.environ.get("FEISHU_DRIVE_URL_BASE")
                            or str(raw.get("drive_url_base") or "")),
+        # 发布器：场次文档 + 场次表（Base）。app/table 留空时首次发布会自动
+        # 建一个 Base，并把 token 记进 index_meta，下次直接复用。
+        "publish_enabled": publish_enabled,
+        "publish_folder_token": publish_folder,
+        "base_folder_token": base_folder,
+        "base_enabled": base_on,
+        "base_app_token": (os.environ.get("FEISHU_BASE_APP_TOKEN")
+                           or str(raw.get("base_app_token") or "")),
+        "base_table_id": (os.environ.get("FEISHU_BASE_TABLE_ID")
+                          or str(raw.get("base_table_id") or "")),
+        "base_url_base": (os.environ.get("FEISHU_BASE_URL_BASE")
+                          or str(raw.get("base_url_base") or "")),
     }
 
 
@@ -304,11 +334,12 @@ class Bot:
         return {"ok": False, "error": err}
 
     def _grant_doc(self, document_id: str, open_id: str,
-                   perm: str = "full_access") -> dict:
-        """把文档授权给指定用户。失败不抛异常，由调用方决定怎么提示。
+                   perm: str = "full_access", doc_type: str = "docx") -> dict:
+        """把文档/多维表格授权给指定用户。失败不抛异常，由调用方决定怎么提示。
 
         应用用 tenant_access_token 建的文档归应用所有，默认不在任何人的
-        「我的空间」里；不调这一步，用户点链接只会看到无权限。
+        「我的空间」里；不调这一步，用户点链接只会看到无权限。``doc_type``
+        是飞书的资源类型：docx / bitable / file / sheet ...
         """
         if not document_id or not open_id:
             return {"ok": False, "error": "缺少 document_id 或 open_id"}
@@ -319,11 +350,12 @@ class Bot:
                     .member_type("openid").member_id(str(open_id))
                     .perm(perm or "full_access").build())
             req = (CreatePermissionMemberRequest.builder()
-                   .token(str(document_id)).type("docx")
+                   .token(str(document_id)).type(doc_type or "docx")
                    .need_notification(False).request_body(body).build())
             resp = self.client.drive.v1.permission_member.create(req)
             if resp.success():
-                logs.log_event("feishu.docx_shared", document_id=document_id)
+                logs.log_event("feishu.docx_shared", document_id=document_id,
+                               doc_type=doc_type)
                 return {"ok": True}
             err = "code=%s %s" % (resp.code, resp.msg)
         except Exception as e:
@@ -331,7 +363,7 @@ class Bot:
             err = str(e)
         self.last_error = "文档授权失败：" + err
         logs.log_event("feishu.docx_share_failed", level="warn",
-                       document_id=document_id, error=err)
+                       document_id=document_id, doc_type=doc_type, error=err)
         return {"ok": False, "error": err}
 
     def _share_doc(self, out: dict, document_id: str, share_with: str) -> dict:
@@ -345,8 +377,29 @@ class Bot:
                 out["share_error"] = grant.get("error") or ""
         return out
 
+    def _md_blocks(self, markdown: str) -> tuple[list, list, dict | None]:
+        """Markdown -> (blocks, first_level_block_ids, error)。"""
+        try:
+            from lark_oapi.api.docx.v1 import (
+                ConvertDocumentRequest, ConvertDocumentRequestBody)
+            conv = (ConvertDocumentRequestBody.builder()
+                    .content_type("markdown").content(str(markdown)).build())
+            resp = self.client.docx.v1.document.convert(
+                ConvertDocumentRequest.builder().request_body(conv).build())
+            if not resp.success():
+                return [], [], self._doc_fail("Markdown 转换失败", resp)
+            data = resp.data
+            blocks = list(getattr(data, "blocks", None) or [])
+            first = list(getattr(data, "first_level_block_ids", None) or [])
+            if not blocks or not first:
+                return [], [], self._doc_fail("Markdown 转换没返回内容", error="empty")
+            return blocks, first, None
+        except Exception as e:
+            traceback.print_exc()
+            return [], [], self._doc_fail("Markdown 转换异常", error=str(e))
+
     def create_docx(self, title: str, markdown: str,
-                    share_with: str = "") -> dict:
+                    share_with: str = "", folder_token: str | None = None) -> dict:
         """把 Markdown 建成一篇飞书云文档，可选授权给发起人。
 
         先 `documents/blocks/convert` 把 Markdown 转成块，再建文档并用
@@ -355,29 +408,23 @@ class Bot:
         调用方降级发 .md 文件——周报不能因为租户没开 docx 权限就整个失效。
         `share_with` 是用户的 open_id；应用建的文档默认只有应用能看，必须授权。
         返回里的 `share_requested` / `shared` / `share_error` 描述授权结果。
+        正文写入失败时也带回 `document_id`，发布器下次只补正文、不新建第二篇。
         """
         if not str(markdown or "").strip():
             return {"ok": False, "error": "内容为空"}
         try:
             from lark_oapi.api.docx.v1 import (
-                ConvertDocumentRequest, ConvertDocumentRequestBody,
                 CreateDocumentBlockDescendantRequest,
                 CreateDocumentBlockDescendantRequestBody,
                 CreateDocumentRequest, CreateDocumentRequestBody)
 
-            conv = (ConvertDocumentRequestBody.builder()
-                    .content_type("markdown").content(str(markdown)).build())
-            resp = self.client.docx.v1.document.convert(
-                ConvertDocumentRequest.builder().request_body(conv).build())
-            if not resp.success():
-                return self._doc_fail("Markdown 转换失败", resp)
-            data = resp.data
-            blocks = list(getattr(data, "blocks", None) or [])
-            first = list(getattr(data, "first_level_block_ids", None) or [])
-            if not blocks or not first:
-                return self._doc_fail("Markdown 转换没返回内容", error="empty")
+            blocks, first, err = self._md_blocks(markdown)
+            if err:
+                return err
 
-            folder = (self.cfg.get("doc_folder_token") or "").strip()
+            # 发布器可以指定「场次文档」文件夹；不传就沿用旧的 doc_folder_token。
+            folder = (str(folder_token) if folder_token is not None
+                      else str(self.cfg.get("doc_folder_token") or "")).strip()
             body_builder = CreateDocumentRequestBody.builder().title(str(title))
             if folder:
                 body_builder = body_builder.folder_token(folder)
@@ -400,6 +447,7 @@ class Bot:
                 # 文档已经建出来但正文没写进去：把链接带回去，至少不是"什么都没留下"。
                 # 也要授权，否则用户点开这个空文档同样会撞无权限。
                 out = self._doc_fail("写入正文失败", added)
+                out["document_id"] = doc_id
                 out["url"] = self._doc_url(doc_id)
                 return self._share_doc(out, doc_id, share_with)
             logs.log_event("feishu.docx_created", document_id=doc_id,
@@ -410,6 +458,135 @@ class Bot:
         except Exception as e:
             traceback.print_exc()
             return self._doc_fail("云文档创建异常", error=str(e))
+
+    def _doc_children(self, document_id: str) -> tuple[int, str]:
+        """数文档根块的子块数量（分页）。返回 (数量, 错误)。"""
+        from lark_oapi.api.docx.v1 import GetDocumentBlockChildrenRequest
+        total = 0
+        token = ""
+        for _ in range(50):
+            builder = (GetDocumentBlockChildrenRequest.builder()
+                       .document_id(str(document_id))
+                       .block_id(str(document_id)).page_size(500))
+            if token:
+                builder = builder.page_token(token)
+            resp = self.client.docx.v1.document_block_children.list(builder.build())
+            if not resp.success():
+                return 0, "读取文档块失败：code=%s %s" % (resp.code, resp.msg)
+            data = resp.data
+            total += len(list(getattr(data, "items", None) or []))
+            token = str(getattr(data, "page_token", "") or "")
+            if not getattr(data, "has_more", False) or not token:
+                break
+        return total, ""
+
+    def _patch_doc_title(self, document_id: str, title: str) -> None:
+        """尽力把文档标题改成最新标题；失败只记日志，不影响正文。
+
+        文档标题就是根 page 块的 text。飞书没给「改标题」的独立接口，
+        只能 patch 根块；租户/版本不支持时正文仍然是对的。
+        """
+        if not str(title or "").strip():
+            return
+        try:
+            from lark_oapi.api.docx.v1 import (
+                PatchDocumentBlockRequest, TextElement, TextRun,
+                UpdateBlockRequest, UpdateTextElementsRequest)
+            run = TextRun.builder().content(str(title)).build()
+            upd = (UpdateBlockRequest.builder().update_text_elements(
+                UpdateTextElementsRequest.builder()
+                .elements([TextElement.builder().text_run(run).build()]).build())
+                .build())
+            req = (PatchDocumentBlockRequest.builder()
+                   .document_id(str(document_id)).block_id(str(document_id))
+                   .request_body(upd).build())
+            resp = self.client.docx.v1.document_block.patch(req)
+            if not resp.success():
+                logs.log_event("feishu.docx_title_failed", level="info",
+                               document_id=document_id,
+                               code=getattr(resp, "code", ""),
+                               error=str(getattr(resp, "msg", "")))
+        except Exception as e:
+            logs.log_event("feishu.docx_title_failed", level="info",
+                           document_id=document_id, error=str(e))
+
+    def overwrite_docx(self, document_id: str, title: str, markdown: str,
+                       share_with: str = "") -> dict:
+        """覆盖写一篇已有云文档的正文（发布器幂等重发用）。
+
+        顺序：Markdown 转块 → 列出根块子块 → `batch_delete` 清空 → 以 index=0
+        写入新块。清空会丢评论锚点，所以只在版本变化/显式重发布时调用。
+        任何一步失败都返回 {"ok": False, "error"} 并保留 document_id/url，
+        调用方下次可以只补正文，不新建第二篇。
+        """
+        if not document_id:
+            return {"ok": False, "error": "缺少 document_id"}
+        if not str(markdown or "").strip():
+            return {"ok": False, "error": "内容为空"}
+        try:
+            from lark_oapi.api.docx.v1 import (
+                BatchDeleteDocumentBlockChildrenRequest,
+                BatchDeleteDocumentBlockChildrenRequestBody,
+                CreateDocumentBlockDescendantRequest,
+                CreateDocumentBlockDescendantRequestBody)
+            blocks, first, err = self._md_blocks(markdown)
+            if err:
+                err["document_id"] = str(document_id)
+                err["url"] = self._doc_url(document_id)
+                return err
+
+            count, child_err = self._doc_children(document_id)
+            if child_err:
+                self.last_error = child_err
+                logs.log_event("feishu.docx_overwrite_failed", level="warn",
+                               document_id=document_id, error=child_err)
+                return {"ok": False, "error": child_err,
+                        "document_id": str(document_id),
+                        "url": self._doc_url(document_id)}
+            if count > 0:
+                body = (BatchDeleteDocumentBlockChildrenRequestBody.builder()
+                        .start_index(0).end_index(count).build())
+                req = (BatchDeleteDocumentBlockChildrenRequest.builder()
+                       .document_id(str(document_id)).block_id(str(document_id))
+                       .request_body(body).build())
+                cleared = self.client.docx.v1.document_block_children.batch_delete(req)
+                if not cleared.success():
+                    msg = "清空旧正文失败：code=%s %s" % (cleared.code, cleared.msg)
+                    self.last_error = msg
+                    logs.log_event("feishu.docx_overwrite_failed", level="warn",
+                                   document_id=document_id, error=msg)
+                    return {"ok": False, "error": msg,
+                            "document_id": str(document_id),
+                            "url": self._doc_url(document_id)}
+
+            desc = (CreateDocumentBlockDescendantRequestBody.builder()
+                    .children_id(first).index(0).descendants(blocks).build())
+            added = self.client.docx.v1.document_block_descendant.create(
+                CreateDocumentBlockDescendantRequest.builder()
+                .document_id(str(document_id)).block_id(str(document_id))
+                .request_body(desc).build())
+            if not added.success():
+                msg = "写入正文失败：code=%s %s" % (added.code, added.msg)
+                self.last_error = msg
+                logs.log_event("feishu.docx_overwrite_failed", level="warn",
+                               document_id=document_id, error=msg)
+                return {"ok": False, "error": msg,
+                        "document_id": str(document_id),
+                        "url": self._doc_url(document_id)}
+
+            self._patch_doc_title(document_id, title)
+            logs.log_event("feishu.docx_overwritten", document_id=document_id,
+                           blocks=len(blocks), cleared=count)
+            out = {"ok": True, "document_id": str(document_id),
+                   "url": self._doc_url(document_id), "blocks": len(blocks),
+                   "cleared": count}
+            return self._share_doc(out, document_id, share_with)
+        except Exception as e:
+            traceback.print_exc()
+            out = self._doc_fail("云文档覆盖写异常", error=str(e))
+            out["document_id"] = str(document_id)
+            out["url"] = self._doc_url(document_id)
+            return out
 
 
 def _nodes_text(node, out: list[str]) -> None:
