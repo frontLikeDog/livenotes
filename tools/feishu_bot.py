@@ -9,6 +9,9 @@
     /状态 [CH]                -> 在听哪几路、有没有断流；CH02 只看一路
     /rooms                    -> 正在听哪几路，各自什么状态
     /stop 1 或 /stop CH02      -> 停掉一路（浏览器一起关）
+    /发布 [CH]                -> 场次发成飞书云文档 + 场次表一行
+    /文档 [CH]                -> 发布状态、文档链接、失败原因
+    /补名 CH01 1 阿哲           -> 给上麦的人补名字
     /白名单                   -> 已放行的站点
     关注 FDE、OPC / 关注列表 / 取消关注 X / 话题 X
 """
@@ -33,8 +36,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from app import (clips, feishu, lan, profile, report, share, store, timefmt,
-                 watchlink)  # noqa: E402
+from app import (clips, feishu, feishu_publish, lan, profile, report, share,
+                 store, timefmt, watchlink)  # noqa: E402
 from app.config import (BASE_URL, CAPTURE_ONLY, LIVE_STALL_WARN_S,  # noqa: E402
                         PORT)
 
@@ -368,6 +371,20 @@ def handle_card(value: dict, open_id: str, chat_id: str = "",
             target=_brief_action,
             args=(act, value, open_id, chat_id, chat_type), daemon=True).start()
         return ("正在处理…", None)
+    if act in ("publish_retry", "publish_name"):
+        sid = str(value.get("session_id") or "")
+        if not sid:
+            return ("这个按钮的场次信息丢了，发 /文档 重新拿。", None)
+        if act == "publish_retry":
+            threading.Thread(
+                target=_publish_worker,
+                args=(sid, "", open_id, chat_id, chat_type, True),
+                daemon=True).start()
+            return ("正在重新发布…", None)
+        threading.Thread(
+            target=_name_list_worker,
+            args=(sid, "", open_id, chat_id, chat_type), daemon=True).start()
+        return ("名单在下面", None)
 
     code = str(value.get("code") or "")
     p = watchlink.pending_get(code)
@@ -2111,6 +2128,247 @@ def cmd_stop(arg: str) -> str:
     return "已停：%s %s\n对应的浏览器也关了。" % (_ch(room), _label(room))
 
 
+# ---------------------------------------------------------------- 发布到飞书
+
+def _room_for_sid(sid: str) -> dict | None:
+    for r in _rooms():
+        if str(r.get("session_id") or "") == str(sid or ""):
+            return r
+    return None
+
+
+def _publish_worker(sid: str, title: str, open_id: str, chat_id: str = "",
+                    chat_type: str = "p2p", force: bool = True) -> None:
+    """发布放到后台：正文/表格/授权都是网络调用，别卡住长连接。"""
+    try:
+        data = _api("/api/publish", {"session_id": sid, "force": bool(force)},
+                    timeout=120)
+    except Exception as e:
+        _send_text_target("发布没成功：%s" % _short_err(str(e)),
+                          open_id, chat_id, chat_type)
+        return
+    if data.get("skipped"):
+        _send_text_target(
+            "发布器没开。让部署的人打开 FEISHU_PUBLISH_ENABLED=1 再发一次；"
+            "本地录音和总结不受影响。", open_id, chat_id, chat_type)
+        return
+    doc = {"title": data.get("title") or title,
+           "state": data.get("doc_state") or "",
+           "overview": data.get("overview") or "",
+           "counts": data.get("counts") or {}}
+    card = feishu_publish.wrapup_card(data, doc)
+    text = feishu_publish.wrapup_text(data, doc)
+    _send_card_target(card, text, open_id, chat_id, chat_type)
+
+
+def cmd_publish(rest: str, open_id: str = "", chat_id: str = "",
+                chat_type: str = "p2p") -> str:
+    room, cands, err = _pick_room_choice((rest or "").strip())
+    if not room:
+        if cands:
+            return _room_candidates_text(cands, "发：/发布 %s")
+        return err or "现在没有可发布的场次。"
+    sid = str(room.get("session_id") or "")
+    if not sid:
+        return "%s 还没有会话 id，等采集端把这场建起来再发。" % _ch(room)
+    threading.Thread(target=_publish_worker,
+                     args=(sid, _room_name(room), open_id, chat_id,
+                           chat_type, True), daemon=True).start()
+    return "正在发布 %s《%s》…好了会发一张卡片。" % (_ch(room), _room_name(room))
+
+
+_DOC_STATE_CN = {"ready": "已总结", "pending_transcript": "待补转写",
+                 "pending_summary": "待总结", "failed_summary": "总结失败"}
+_PUB_STATE_CN = {"ok": "已发布", "partial": "部分成功", "failed": "发布失败"}
+
+
+def _doc_text(data: dict, room: dict | None) -> str:
+    label = _ch(room) if room else ""
+    name = _room_name(room) if room else ""
+    title = str(data.get("title") or name or "这场")
+    if not data.get("published"):
+        return ("《%s》还没发布过。\n"
+                "发 /发布%s 生成云文档和场次表。"
+                % (title, (" " + label) if label else ""))
+    lines = ["📄《%s》%s" % (
+        title, _PUB_STATE_CN.get(str(data.get("state") or ""), "已发布"))]
+    doc_state = str(data.get("doc_state") or "")
+    if doc_state:
+        lines.append("内容：" + _DOC_STATE_CN.get(doc_state, doc_state))
+    counts = data.get("counts") or {}
+    if counts:
+        lines.append("观点 %d · 高光 %d · 上麦 %d 人" % (
+            int(counts.get("points") or 0), int(counts.get("highlights") or 0),
+            int(counts.get("speakers") or 0)))
+    if data.get("doc_url"):
+        lines.append("文档：" + str(data["doc_url"]))
+    if data.get("base_url"):
+        lines.append("场次表：" + str(data["base_url"]))
+    if data.get("error"):
+        lines.append("注意：" + str(data["error"]))
+    if doc_state == "pending_transcript":
+        lines.append("补转写出字后会自动更新；现在别当总结看。")
+    elif doc_state in ("pending_summary", "failed_summary"):
+        lines.append("逐字稿有了、总结还没成功；总结出来后会自动更新。")
+    lines.append("补名：/补名 %s（或点发布卡片上的「补名」）" % (label or "CHxx"))
+    return "\n".join(lines)
+
+
+def cmd_doc(rest: str, open_id: str = "", chat_id: str = "",
+            chat_type: str = "p2p") -> str:
+    room, cands, err = _pick_room_choice((rest or "").strip())
+    if not room:
+        if cands:
+            return _room_candidates_text(cands, "发：/文档 %s")
+        return err or "现在没有可查的场次。"
+    sid = str(room.get("session_id") or "")
+    if not sid:
+        return "%s 还没有会话 id。" % _ch(room)
+    try:
+        data = _api("/api/publish?" + urllib.parse.urlencode({"session_id": sid}))
+    except Exception as e:
+        return "读发布状态失败：%s" % _short_err(str(e))
+    return _doc_text(data, room)
+
+
+_NAME_PAIR_RE = re.compile(r"^(\d{1,2})\s*[=:：.、]\s*(.+)$")
+_CH_HEAD_RE = re.compile(r"(?i)^\s*(CH\s*0*\d{1,3})\s*(.*)$")
+
+
+def _name_pairs(body: str) -> list[tuple[int, str]]:
+    """「1 阿哲 2 小北」「1=阿哲, 2=小北」都认；不把名字里的数字当序号。"""
+    tokens = [x for x in re.split(r"[\s,，;；、]+", body or "") if x]
+    out: list[tuple[int, str]] = []
+    i = 0
+    while i < len(tokens):
+        m = _NAME_PAIR_RE.match(tokens[i])
+        if m:
+            out.append((int(m.group(1)), m.group(2).strip()))
+            i += 1
+            continue
+        if tokens[i].isdigit() and i + 1 < len(tokens):
+            out.append((int(tokens[i]), tokens[i + 1].strip()))
+            i += 2
+            continue
+        i += 1
+    return [(i, n) for i, n in out if n]
+
+
+def _top_speakers(sid: str) -> dict:
+    return _api("/api/sessions/top_speakers?"
+                + urllib.parse.urlencode({"session_id": sid, "limit": 5}))
+
+
+def _name_list_text(sid: str, room: dict | None = None) -> str:
+    try:
+        data = _top_speakers(sid)
+    except Exception as e:
+        return "读说话人失败：%s" % _short_err(str(e))
+    if not data.get("ok"):
+        return str(data.get("error") or "这场还没有说话人数据。")
+    speakers = data.get("speakers") or []
+    if not speakers:
+        return "这场还没有可命名的说话人。"
+    room = room or _room_for_sid(sid)
+    label = _ch(room) if room else ""
+    lines = ["这场上麦的人："]
+    first_unnamed = ""
+    for i, s in enumerate(speakers, 1):
+        named = bool(s.get("named"))
+        label = str(s.get("label") or "").strip()
+        tag = ("✓ %s" % label) if named else "未命名"
+        if not named and not first_unnamed:
+            first_unnamed = str(i)
+        sug = s.get("suggestion") or {}
+        sug_name = str(sug.get("name") or "") if isinstance(sug, dict) else str(sug or "")
+        bits = "%d 句 · %s" % (int(s.get("n_utterances") or 0),
+                              _hms(s.get("seconds") or 0))
+        lines.append("%d. %s · %s%s" % (
+            i, tag, bits,
+            ("（可叫 %s）" % sug_name) if (not named and sug_name) else ""))
+    if not first_unnamed:
+        lines.append("\n名字都齐了。要改名发：/补名 %s 1 新名字"
+                     % (label or "CHxx"))
+    else:
+        example = "/补名 %s %s 阿哲" % (
+            (label + " ") if label else "", first_unnamed)
+        lines.append("\n一次可以补多个：%s 2 小北" % example)
+        lines.append("已发布的场次改完名，后台会自动重写文档的人物表。")
+    return "\n".join(lines)
+
+
+def _name_list_worker(sid: str, label: str, open_id: str, chat_id: str = "",
+                      chat_type: str = "p2p") -> None:
+    _send_text_target(_name_list_text(sid), open_id, chat_id, chat_type)
+
+
+def cmd_name(rest: str, open_id: str = "", chat_id: str = "",
+             chat_type: str = "p2p") -> str:
+    body = (rest or "").strip()
+    room: dict | None = None
+    m = _CH_HEAD_RE.match(body)
+    if m:
+        target = m.group(1)
+        body = m.group(2).strip()
+        rooms = _rooms()
+        room = _resolve_room(rooms, target) if rooms else None
+        if not room:
+            return "没有找到「%s」。\n%s" % (target, cmd_rooms())
+    pairs = _name_pairs(body)
+    if not pairs:
+        if room and room.get("session_id"):
+            return _name_list_text(str(room["session_id"]), room)
+        room, cands, err = _pick_room_choice("")
+        if not room:
+            if cands:
+                return _room_candidates_text(cands, "发：/补名 %s 1 阿哲")
+            return err or "现在没有可命名的场次。"
+        return _name_list_text(str(room.get("session_id") or ""), room)
+    if not room:
+        room, cands, err = _pick_room_choice("")
+        if not room:
+            if cands:
+                return ("有 %d 路可用，写清楚哪一路：\n%s"
+                        % (len(cands), _room_candidates_text(cands,
+                                                             "发：/补名 %s 1 阿哲")))
+            return err or "现在没有可命名的场次。"
+    sid = str(room.get("session_id") or "")
+    if not sid:
+        return "%s 还没有会话 id。" % _ch(room)
+    try:
+        data = _top_speakers(sid)
+    except Exception as e:
+        return "读说话人失败：%s" % _short_err(str(e))
+    speakers = data.get("speakers") or []
+    if not data.get("ok") or not speakers:
+        return str(data.get("error") or "这场还没有说话人数据。")
+    done: list[str] = []
+    bad: list[str] = []
+    for idx, name in pairs:
+        if not (1 <= idx <= len(speakers)):
+            bad.append("第 %d 位不存在（只有 %d 位）" % (idx, len(speakers)))
+            continue
+        spk = str(speakers[idx - 1].get("speaker_id") or "")
+        try:
+            out = _api("/api/speakers/name", {
+                "session_id": sid, "speaker_id": spk, "name": name})
+        except Exception as e:
+            bad.append("%d %s：%s" % (idx, name, _short_err(str(e))))
+            continue
+        if out.get("ok"):
+            done.append("%s（原第 %d 位）" % (name, idx))
+        else:
+            bad.append("%d %s：%s" % (
+                idx, name, str(out.get("error") or "没改成")))
+    lines = []
+    if done:
+        lines.append("已补名：" + "、".join(done))
+        lines.append("已发布的场次会在后台重写文档；下次 /文档 就能看到新名字。")
+    if bad:
+        lines.append("没成功的：" + "；".join(bad))
+    return "\n".join(lines) or "没改动。"
+
+
 def cmd_trust() -> str:
     added = watchlink.trust_list()
     lines = ["已知平台（默认放行）：" + "、".join(watchlink.PRESET_SITES)]
@@ -2217,6 +2475,9 @@ def _help_text() -> str:
             "/总结 [CH] 开播至今的阶段性总结（先确认再生成）\n"
             "/分享 [CH] [90秒] 把最近一段原声发到飞书（群聊需确认）\n"
             "/分享 CH01 1:30 2分钟 从第 1:30 起截 2 分钟\n"
+            "/发布 [CH] 把这场发成云文档 + 场次表一行\n"
+            "/文档 [CH] 看发布到哪了、文档链接和状态\n"
+            "/补名 CH01 1 阿哲 2 小北 给上麦的人补名字\n"
             "/周报 [上周|7天|11-03~11-09] 汇总多场生成周报（私聊）\n"
             "/复盘 [范围] 生成可填结论/行动的复盘模板（私聊）\n"
             "/刷新 重做上一条简报（绕过缓存）\n"
@@ -2320,6 +2581,18 @@ def _route(t: str, low: str, open_id: str = "", chat_id: str = "",
         if low.startswith(verb):
             return cmd_share(t[len(verb):].strip(" ：:"), open_id,
                              chat_id, chat_type)
+    for verb in ("/发布", "/publish"):
+        if low.startswith(verb):
+            return cmd_publish(t[len(verb):].strip(" ：:"), open_id,
+                               chat_id, chat_type)
+    for verb in ("/文档", "/doc"):
+        if low.startswith(verb):
+            return cmd_doc(t[len(verb):].strip(" ：:"), open_id,
+                           chat_id, chat_type)
+    for verb in ("/补名", "/命名", "/name"):
+        if low.startswith(verb):
+            return cmd_name(t[len(verb):].strip(" ：:"), open_id,
+                            chat_id, chat_type)
     for verb in ("/总结", "/summary"):
         if low.startswith(verb):
             return cmd_summary(t[len(verb):].strip(" ：:"), open_id, chat_id, chat_type)

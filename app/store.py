@@ -459,12 +459,36 @@ CREATE TABLE IF NOT EXISTS delivery_reports (
 );
 CREATE INDEX IF NOT EXISTS idx_delivery_report ON delivery_reports(project_id, version DESC);
 
--- 索引版本：note_units / FTS 重建的幂等依据。
+-- 索引版本：note_units / FTS 重建的幂等依据。也存发布器的 Base token。
 CREATE TABLE IF NOT EXISTS index_meta (
     key        TEXT PRIMARY KEY,
     value      TEXT NOT NULL DEFAULT '',
     updated_at TEXT
 );
+
+-- 飞书发布产物：一场一篇云文档 + 一行场次表。唯一键 (session_id, kind)，
+-- version 是标题 + 正文的 hash；版本没变就不重写正文，避免评论锚点丢失。
+-- 文档建成功但正文/表格失败时保留 doc_token 与 doc_url，下次只补失败的部分。
+CREATE TABLE IF NOT EXISTS feishu_publish (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id   TEXT NOT NULL,
+    kind         TEXT NOT NULL DEFAULT 'session',  -- session|person（P1）
+    state        TEXT NOT NULL DEFAULT '',         -- ok|partial|failed
+    version      TEXT NOT NULL DEFAULT '',
+    doc_token    TEXT NOT NULL DEFAULT '',
+    doc_url      TEXT NOT NULL DEFAULT '',
+    record_id    TEXT NOT NULL DEFAULT '',
+    error        TEXT NOT NULL DEFAULT '',
+    meta_json    TEXT NOT NULL DEFAULT '{}',       -- doc_state / base_url / record_url
+    latency_ms   INTEGER NOT NULL DEFAULT 0,
+    attempts     INTEGER NOT NULL DEFAULT 0,
+    published_at TEXT,
+    created_at   TEXT,
+    updated_at   TEXT,
+    UNIQUE(session_id, kind)
+);
+CREATE INDEX IF NOT EXISTS idx_publish_state
+    ON feishu_publish(state, updated_at DESC);
 """
 
 _FTS_TRIGGERS = """
@@ -2955,4 +2979,88 @@ def report_list(conn: sqlite3.Connection, kind: str = "weekly",
 
 def report_delete(conn: sqlite3.Connection, rid: int) -> None:
     conn.execute("DELETE FROM reports WHERE id=?", (int(rid),))
+    conn.commit()
+
+
+# ---------------------------------------------------------------- 飞书发布
+
+PUBLISH_STATES = ("ok", "partial", "failed")
+
+
+def _publish_row(row: sqlite3.Row | None) -> dict | None:
+    if row is None:
+        return None
+    d = dict(row)
+    try:
+        d["meta"] = json.loads(d.pop("meta_json") or "{}")
+    except (TypeError, ValueError):
+        d["meta"] = {}
+    return d
+
+
+def get_publish(conn: sqlite3.Connection, sid: str,
+                kind: str = "session") -> dict | None:
+    return _publish_row(conn.execute(
+        "SELECT * FROM feishu_publish WHERE session_id=? AND kind=?",
+        (str(sid or ""), str(kind or "session"))).fetchone())
+
+
+def upsert_publish(conn: sqlite3.Connection, sid: str,
+                   kind: str = "session", **fields: Any) -> dict:
+    """写发布状态。唯一键是 (session_id, kind)，重试不会多出一行。"""
+    sid = str(sid or "")
+    kind = str(kind or "session")
+    allowed = ("state", "version", "doc_token", "doc_url", "record_id",
+               "error", "latency_ms", "attempts", "published_at")
+    vals: dict[str, Any] = {}
+    for k in allowed:
+        if k in fields:
+            vals[k] = fields[k]
+    if "meta" in fields:
+        vals["meta_json"] = json.dumps(fields["meta"] or {}, ensure_ascii=False)
+    row = conn.execute(
+        "SELECT id FROM feishu_publish WHERE session_id=? AND kind=?",
+        (sid, kind)).fetchone()
+    if row:
+        if vals:
+            conn.execute(
+                "UPDATE feishu_publish SET "
+                + ",".join("%s=?" % k for k in vals)
+                + ",updated_at=? WHERE id=?",
+                list(vals.values()) + [now(), int(row["id"])])
+    else:
+        vals.setdefault("state", "failed")
+        cols = ["session_id", "kind"] + list(vals) + ["created_at", "updated_at"]
+        conn.execute(
+            "INSERT INTO feishu_publish(" + ",".join(cols) + ") VALUES ("
+            + ",".join("?" for _ in cols) + ")",
+            [sid, kind] + list(vals.values()) + [now(), now()])
+    conn.commit()
+    return get_publish(conn, sid, kind) or {}
+
+
+def list_publish(conn: sqlite3.Connection, state: str = "",
+                 limit: int = 50) -> list[dict]:
+    """最近发布记录。state 为空 = 全部；给「待重试」清单用。"""
+    sql = "SELECT * FROM feishu_publish"
+    args: list[Any] = []
+    if state:
+        sql += " WHERE state=?"
+        args.append(str(state))
+    sql += " ORDER BY COALESCE(updated_at, created_at) DESC, id DESC LIMIT ?"
+    args.append(max(1, min(500, int(limit or 50))))
+    return [d for d in (_publish_row(r) for r in conn.execute(sql, args)) if d]
+
+
+def get_kv(conn: sqlite3.Connection, key: str, default: str = "") -> str:
+    """index_meta 的通用读法：FTS 版本号与发布器的 Base token 共用。"""
+    row = conn.execute("SELECT value FROM index_meta WHERE key=?",
+                       (str(key),)).fetchone()
+    return str(row["value"]) if row and row["value"] is not None else default
+
+
+def set_kv(conn: sqlite3.Connection, key: str, value: str) -> None:
+    conn.execute(
+        "INSERT OR REPLACE INTO index_meta(key,value,updated_at) VALUES (?,?,?)",
+        (str(key), str(value or ""), now()))
     conn.commit()

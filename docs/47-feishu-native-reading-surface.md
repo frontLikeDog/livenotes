@@ -168,7 +168,7 @@ P0 只建 **场次表**：
 | 文档链接 | URL | 场次文档 |
 | 录音链接 | URL | 云盘 m4a，可空 |
 | session_id | 文本（隐藏） | 幂等键，不给人看 |
-| 标签 | 多选 | 主题词，来自 `summary.topics` |
+| 标签 | 文本（顿号分隔） | 主题词，来自 `summary.topics`；P0 先不用多选，避免选项不存在导致写不进去 |
 | 逐字稿附件 | 附件 | 可选；不放正文 |
 
 视图：
@@ -373,15 +373,21 @@ SQLite（唯一真相源）
 5. **不自动建群**：把机器人拉进用户已有的房间群即可；自动建群是打扰。
 6. **应用建的 Base 也要授权**：和文档一样，应用创建的 Base 默认只有应用能看；用 `permission_member`、`type=bitable` 授权给 owner/群，否则用户点开就是无权限。
 
-**配置新增**（建议）：
+**配置新增**（已实现；环境变量优先，其次 `data/feishu.json` 同名键）：
 
 | 配置 | 用途 |
 |---|---|
 | `FEISHU_PUBLISH_ENABLED=1` | 总开关；默认关，桌面用户可不开 |
-| `FEISHU_PUBLISH_FOLDER_TOKEN` | 场次/人物文档的云空间文件夹 |
-| `FEISHU_BASE_FOLDER_TOKEN` | 多维表格存放文件夹 |
-| `FEISHU_BASE_APP_TOKEN` | 可选：预建 Base，避免每次重建 |
-| `FEISHU_PUBLISH_OWNER` | 默认授权给 owner；群场景另配 |
+| `FEISHU_PUBLISH_FOLDER_TOKEN` | 场次文档的云空间文件夹；不填复用 `doc_folder_token` |
+| `FEISHU_BASE_FOLDER_TOKEN` | 多维表格存放文件夹；不填复用文档文件夹 |
+| `FEISHU_BASE_APP_TOKEN` | 可选：预建 Base，避免每次新建 |
+| `FEISHU_BASE_TABLE_ID` | 可选：预建数据表；不填自动建 |
+| `FEISHU_PUBLISH_BASE=0` | 只发文档、不写场次表 |
+| `FEISHU_BASE_URL_BASE` | 可选：Base 链接前缀；不填用飞书返回的 `app.url` |
+
+授权对象沿用现有 `open_id` / `owner_open_id`，没有单独的发布 owner 配置：
+建文档/建 Base 后都用 `permission_member` 授权给这位用户（Base 用
+`type=bitable`）。Base token 首次建好后写进 `index_meta`，进程重启不会重建。
 
 **可观测**：
 
@@ -485,3 +491,47 @@ SQLite（唯一真相源）
 - 收尾链路：`app/live.py:729`、`:753`（finalize）；`app/tasks.py:92`（索引/观点/通知）
 - 云端仅采集：`app/config.py:25`（`CAPTURE_ONLY`）；`app/offline_asr.py:443`（补转写收尾，尚未触发 finalize）
 - 官方限制：多维表格 `batch_create` 单次 ≤1000 条、单表 ≤2 万条、50 次/秒（飞书开放平台文档，2026-11 核对）
+
+---
+
+## 11. P0 实施记录（2026-11-25）
+
+**已完成**：
+
+| 项 | 落地 |
+|---|---|
+| `feishu_publish` 表 | `(session_id, kind)` 唯一；`state=ok/partial/failed`、版本 hash、doc/record token、错误、耗时、尝试次数、`meta_json`（doc_state/base_url/record_url） |
+| `app/feishu_publish.py` | `publish()` / `publish_session_async()` / `status()` / `wrapup_card()` / `ensure_base()`；不加载模型 |
+| docx 覆盖写 | `feishu.Bot.overwrite_docx()`：列根块 → `batch_delete(start=0,end=count)` → `block_descendant.create(index=0)` → 尽力 patch 标题；正文写失败也保留 `document_id`，重试只补正文 |
+| 场次表 | 自动建 Base +「场次」表（15 字段，默认视图「最近场次」）；按 `session_id` 文本字段 search 后 update/create；老表缺字段自动补 |
+| 发布触发 | `tasks._run_summary` 的 auto finalize 成功后异步发布（`FEISHU_PUBLISH_ENABLED` 默认关）；`POST /api/publish` 显式发布（`force=true`），`GET /api/publish` 读状态 |
+| 补名回写 | `/api/speakers/name` 成功后，若这场已发布则后台重发布；文档人物表跟着更新 |
+| 收尾卡 | 看文档 / 补名 / 重试发布；文档失败红色、表格失败橙色；`/文档` 是按钮失效时的文本兜底 |
+| 机器人命令 | `/发布 [CH]`、`/文档 [CH]`、`/补名 [CH] 1 阿哲 2 小北`；卡片回调 `publish_retry`、`publish_name` |
+
+**与方案的差异（有意）**：
+
+- 场次表先只建一个默认视图「最近场次」；文档里的 5 个筛选视图没做——
+  `app_table.view` 的筛选条件 API 未在本仓库验证，先不引入未验证调用。
+- 「标签」用文本（顿号分隔）而不是多选：主题词是自由文本，多选字段写不存在的
+  选项会被飞书拒绝，整行会变成 `partial`；文本字段仍可在 Base 里用「包含」筛选。
+- 「逐字稿附件」字段没建：P0 不把逐字稿放进 Base，文档正文也只留结论和原话。
+- 补名 P0 只做「列名单 + 文本补名 + 卡片入口」，没有做表单卡和 3 秒试听
+  （那是 P1）；名单按 `top_speakers` 的前 5 位编号，顺序在总结后稳定。
+- 「发布：最近成功时间 / 待重试数」还没进 `/状态` 卡片；发布状态目前从
+  `/文档` 和 `feishu.publish_*` 日志看。
+
+**失败语义**（测试固定）：
+
+1. 文档失败 → `state=failed`，表格行仍写「发布失败」；保留 `document_id`，
+   重试走覆盖写，不建第二篇。
+2. 表格失败 → `state=partial`，文档已可读；下次发布/重试只补表格，不重写正文。
+3. 版本未变且上次成功 → 直接跳过，不产生第二条记录、不重写正文（避免丢评论锚点）；
+   `/发布` 显式带 `force`，仍会重写。
+4. 飞书没配置/开关关着 → `publish_skipped`，不写 `feishu_publish` 行，采集/总结不受影响。
+5. 没有总结 → 文章只写状态和已有事实，不生成规则版兜底稿。
+
+**测试**：`tests/test_feishu_publish.py` 19 例（幂等、版本变化覆盖写、强制重发、
+capture-only 骨架、总结失败不编稿、文档失败重试、表格失败降级、开关关闭、
+收尾卡按钮、覆盖写请求顺序、HTTP 路由、总结后自动发布接线、补名回写、
+`/补名` 解析与卡片回调）。全量 `842 passed`（原 823 + 19）。

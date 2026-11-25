@@ -109,6 +109,13 @@ def _run_summary(sid: str, payload: dict) -> dict:
                 notify.note_ready(sid, out)
             except Exception:
                 traceback.print_exc()
+            # 发布到飞书。默认关；开关关着或没配置时 publish_session_async
+            # 自己静默跳过，网络失败也只记日志，不影响本地总结结果。
+            try:
+                from . import feishu_publish
+                feishu_publish.publish_session_async(sid)
+            except Exception:
+                traceback.print_exc()
         return out
     except Exception as e:
         # 本地总结已移除：模型失败就是失败，不再落一份抽取式稿冒充总结。

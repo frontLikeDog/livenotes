@@ -21,6 +21,7 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from . import (analysis, analysis_job, audio, cards, claims, classify, coach,
                config, copy, delivery, diagnostics, export, feishu_drive,
+               feishu_publish,
                feedback, follows, glossary, highlight, identity, lan, live,
                livebrief, liveprobe, llm, logs, metrics, naming, notes, notify,
                polish, profile, qa, qr,
@@ -1329,6 +1330,11 @@ p{font-size:14px;line-height:1.75;margin:8px 0}
             out = naming.top_speakers(conn, sid,
                                       int(_num(q.get("limit"), 5) or 5))
             return self._json(out, 200 if out.get("ok") else 404)
+        if p == "/api/publish":
+            sid = str(q.get("session_id") or q.get("id") or "")
+            if not sid:
+                return self._json({"error": "缺少 session_id"}, 400)
+            return self._json(feishu_publish.status(conn, sid))
         if p == "/api/timeline":
             bucket = int(_num(q.get("bucket"), 300) or 300)
             return self._json({"bucket": bucket,
@@ -2672,6 +2678,19 @@ p{font-size:14px;line-height:1.75;margin:8px 0}
                 return self._json({"error": "这场在回收站里，先还原再上传"}, 400)
             out = feishu_drive.archive_session(conn, s)
             return self._json(out, 200 if out.get("ok") else 502)
+        if p == "/api/publish":
+            # 显式发布：默认重写正文（force），但不发收尾卡 —— 用户就在桌面上，
+            # 卡片是给手机端机器人命令用的。GET 同一路径读发布状态。
+            sid = str((b or {}).get("session_id") or "")
+            s = store.get_session(conn, sid)
+            if not s:
+                return self._json({"error": "场次不存在"}, 404)
+            if s.get("deleted_at"):
+                return self._json({"error": "这场在回收站里，先还原再发布"}, 400)
+            out = feishu_publish.publish(
+                sid, conn=conn, force=bool((b or {}).get("force", True)),
+                notify=bool((b or {}).get("notify", False)))
+            return self._json(out, 200 if out.get("ok") else 502)
         if p == "/api/library/batch":
             action = str(b.get("action") or "")
             raw_ids = b.get("session_ids")
@@ -2949,6 +2968,14 @@ p{font-size:14px;line-height:1.75;margin:8px 0}
                 logs.log_event("naming.speaker_named", session_id=sid,
                                speaker_id=spk, name=out["name"],
                                enrolled=bool(out.get("enrolled")))
+                # 已经发过文档的场次：名字改了要重写一次，人物表才不是「说话人3」。
+                # 没发过的场次不在这里创建文档（发布仍由总结/手动触发）。
+                try:
+                    if feishu_publish.has_published(conn, sid):
+                        feishu_publish.publish_session_async(
+                            sid, only_if_published=True)
+                except Exception:
+                    traceback.print_exc()
             return self._json(out, 200 if out.get("ok") else 400)
         if p == "/api/persons/rematch":
             sid = str(b.get("session_id") or "")
