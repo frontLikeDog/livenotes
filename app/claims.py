@@ -267,6 +267,7 @@ def _topic_group(items: list[dict]) -> dict:
                                          float(r.get("t") or 0)))
     revs: list[dict] = []
     prev = ""
+    prev_at = ""
     for r in items:
         s = str(r.get("stance") or "")
         if prev:
@@ -275,12 +276,15 @@ def _topic_group(items: list[dict]) -> dict:
             r["_changed"] = ratio < REVISION_RATIO
             if r["_changed"]:
                 revs.append({"at": r.get("started_at") or "",
+                             "from_at": prev_at,
+                             "to_at": r.get("started_at") or "",
                              "from": prev, "to": s,
                              "session_id": r.get("session_id") or ""})
         else:
             r["_same"] = False
             r["_changed"] = False
         prev = s
+        prev_at = str(r.get("started_at") or "")
     latest = items[-1] if items else {}
     return {
         "topic": str(latest.get("topic") or ""),
@@ -298,13 +302,8 @@ def _topic_group(items: list[dict]) -> dict:
     }
 
 
-def profile(conn: sqlite3.Connection, person_id: str = "", who: str = "",
-            limit: int = 500) -> dict:
-    """一个人的观点档案：按主题分组的全部主张 + 改口记录。
-
-    ``who`` 是没有 person_id 时的退路（聚类标签场次里没认出来的人）。
-    """
-    rows = rows_for(conn, person_id=person_id, who=who, limit=limit)
+def _profile_rows(rows: list[dict]) -> dict:
+    """把一批观点原子按主题分组；``profile`` 和 ``profile_any`` 共用。"""
     groups: dict[str, list[dict]] = {}
     for r in rows:
         key = str(r.get("topic") or "")
@@ -315,6 +314,41 @@ def profile(conn: sqlite3.Connection, person_id: str = "", who: str = "",
                                str(g["topic"])))
     return {"topics": topics, "n_claims": len(rows),
             "n_topics": len([g for g in topics if g["topic"]])}
+
+
+def profile(conn: sqlite3.Connection, person_id: str = "", who: str = "",
+            limit: int = 500) -> dict:
+    """一个人的观点档案：按主题分组的全部主张 + 改口记录。
+
+    ``who`` 是没有 person_id 时的退路（聚类标签场次里没认出来的人）。
+    """
+    return _profile_rows(rows_for(conn, person_id=person_id, who=who, limit=limit))
+
+
+def profile_any(conn: sqlite3.Connection, person_id: str = "", who: str = "",
+                limit: int = 500) -> dict:
+    """把 ``person_id`` 和昵称两条来源合起来读。
+
+    为什么需要：声纹认出来之前的场次，观点原子挂在昵称上（``person_id=''``）；
+    认出来之后新场次挂在 person_id 上。人物档案如果只读一边，看起来就像
+    「前几场的观点丢了」。两条都读、按 ``claim_id`` 去重即可；不合并行本身，
+    保留每场原子。
+    """
+    rows: list[dict] = []
+    seen: set[str] = set()
+    if person_id:
+        for r in rows_for(conn, person_id=person_id, limit=limit):
+            cid = str(r.get("claim_id") or "")
+            rows.append(r)
+            seen.add(cid)
+    if who:
+        for r in rows_for(conn, who=who, limit=limit):
+            cid = str(r.get("claim_id") or "")
+            if cid in seen:
+                continue
+            rows.append(r)
+            seen.add(cid)
+    return _profile_rows(rows)
 
 
 def history_index(conn: sqlite3.Connection, keys: set[str],

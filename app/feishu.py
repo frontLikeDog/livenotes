@@ -484,6 +484,21 @@ def _answer(toast: str, card: dict | None = None, kind: str = "info"):
     return resp
 
 
+def card_event_value(event) -> dict:
+    """卡片回调的动作值：普通按钮在 ``action.value``，表单提交在 ``form_value``。
+
+    表单卡（补名）只回 ``form_value``，如果这里不合并，机器人收到的是空 dict，
+    表现成「点了保存但什么也没发生」。表单字段放在保留键 ``_form`` 下，不和
+    按钮自己的 ``act`` / ``nonce`` 撞名。
+    """
+    action = getattr(event, "action", None)
+    value = dict(getattr(action, "value", None) or {})
+    form = getattr(action, "form_value", None)
+    if isinstance(form, dict) and form:
+        value["_form"] = dict(form)
+    return value
+
+
 def actor_open_id(obj) -> str:
     """从消息发送者 / 菜单操作者 / 卡片点击者里取 open_id。
 
@@ -586,7 +601,8 @@ def run(bot: Bot, on_text, on_card=None, on_menu=None) -> None:
                                open_id=open_id[:12], chat_id=chat_id[:12],
                                msg="卡片点击者不是 owner")
                 return _answer("没有权限", None, "error")
-            value = dict(getattr(event.action, "value", None) or {})
+            # 表单卡只有 form_value；合并成一份，on_card 不用知道回调形状。
+            value = card_event_value(event)
             try:
                 sig = inspect.signature(on_card)
                 n = len([p for p in sig.parameters.values()
