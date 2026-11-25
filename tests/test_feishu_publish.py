@@ -552,36 +552,46 @@ def test_cmd_name_maps_numbers_to_speaker_ids(monkeypatch):
     calls = []
     monkeypatch.setattr(fb, "_api", lambda path, payload=None, timeout=6.0:
                         calls.append((path, payload)) or {"ok": True})
-    msg = fb.cmd_name("CH01 1 阿哲 2 小北")
-    assert "已补名" in msg
+    texts = []
+    monkeypatch.setattr(fb, "_send_text_target",
+                        lambda text, *a, **k: texts.append(text) or True)
+    assert fb.cmd_name("CH01 1 阿哲 2 小北", "ou_1") == ""
     assert [(p, b["speaker_id"], b["name"]) for p, b in calls] == [
         ("/api/speakers/name", "SPK_00", "阿哲"),
         ("/api/speakers/name", "SPK_01", "小北")]
+    assert any("已补名" in t for t in texts)
 
 
 def test_name_pairs_accepts_common_forms_and_keeps_digit_names():
     from tools import feishu_bot as fb
-    assert fb._name_pairs("1 阿哲 2 小北") == [(1, "阿哲"), (2, "小北")]
-    assert fb._name_pairs("1=阿哲，2：小北") == [(1, "阿哲"), (2, "小北")]
-    assert fb._name_pairs("1 阿哲3号") == [(1, "阿哲3号")]
-    assert fb._name_pairs("1 阿哲 3号") == [(1, "阿哲")]
+    assert fb._name_pairs_explicit("1 阿哲 2 小北") == [(1, "阿哲"), (2, "小北")]
+    assert fb._name_pairs_explicit("1=阿哲，2：小北") == [(1, "阿哲"), (2, "小北")]
+    assert fb._name_pairs_explicit("1 阿哲3号") == [(1, "阿哲3号")]
+    assert fb._name_pairs_explicit("1 阿哲 3号") == [(1, "阿哲")]
 
 
 def test_cmd_name_lists_people_and_rejects_bad_index(monkeypatch):
     from tools import feishu_bot as fb
     monkeypatch.setattr(fb, "_rooms", _fake_rooms)
     monkeypatch.setattr(fb, "_top_speakers", lambda sid: {
-        "ok": True, "speakers": [
+        "ok": True, "title": "测试房", "speakers": [
             {"speaker_id": "SPK_00", "named": False, "name": "",
-             "suggestion": "阿哲", "preview": "第一句"}]})
-    listing = fb.cmd_name("CH01")
-    assert "未命名" in listing and "/补名" in listing
+             "letter": "A", "index": 1, "seconds": 30, "n_utterances": 3,
+             "suggestion": "阿哲", "preview": {"t_start": 1, "seconds": 3}}]})
+    texts = []
+    monkeypatch.setattr(fb, "_send_text_target",
+                        lambda text, *a, **k: texts.append(text) or True)
+    monkeypatch.setattr(fb, "_send_card_target", lambda *a, **k: True)
+    monkeypatch.setattr(fb.clips, "make_clip", lambda *a, **k: (None, "没音频"))
+    assert fb.cmd_name("CH01", "ou_1") == ""
+    joined = "\n".join(texts)
+    assert "还有 1 位没名字" in joined and "1 阿哲" in joined
 
     calls = []
     monkeypatch.setattr(fb, "_api", lambda path, payload=None, timeout=6.0:
                         calls.append(path) or {"ok": True})
-    msg = fb.cmd_name("CH01 9 阿哲")
-    assert "不存在" in msg and not calls
+    msg = fb.cmd_name("CH01 9 阿哲", "ou_1")
+    assert "超出范围" in msg and not calls
 
 
 def test_route_publish_and_doc(monkeypatch):

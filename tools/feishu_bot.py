@@ -11,9 +11,10 @@
     /stop 1 或 /stop CH02      -> 停掉一路（浏览器一起关）
     /发布 [CH]                -> 场次发成飞书云文档 + 场次表一行
     /文档 [CH]                -> 发布状态、文档链接、失败原因
-    /补名 CH01 1 阿哲           -> 给上麦的人补名字
     /白名单                   -> 已放行的站点
     关注 FDE、OPC / 关注列表 / 取消关注 X / 话题 X
+    /找人 阿哲 /搜 关键词 /问 问题
+    /补名 [CH01] [1 阿哲 2 小北] -> 发试听 + 表单卡，或直接写回名字
 """
 from __future__ import annotations
 
@@ -36,8 +37,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from app import (clips, feishu, feishu_publish, lan, profile, report, share,
-                 store, timefmt, watchlink)  # noqa: E402
+from app import (clips, feishu, feishu_publish, lan, profile, reading, report,
+                 share, store, timefmt, watchlink)  # noqa: E402
 from app.config import (BASE_URL, CAPTURE_ONLY, LIVE_STALL_WARN_S,  # noqa: E402
                         PORT)
 
@@ -358,6 +359,19 @@ def handle_card(value: dict, open_id: str, chat_id: str = "",
     真正的生成放到后台线程，结果单独发一条消息。
     """
     act = str(value.get("act") or "")
+    if act == "naming_cancel":
+        _naming_drop(str(value.get("nonce") or ""))
+        return ("好，这次不补名", None)
+    if act == "naming_submit":
+        pending, names, err = _naming_from_form(value)
+        if not pending:
+            return (err or "这张补名卡过期了", None)
+        if not names:
+            return (err or "还没填名字", None)
+        threading.Thread(target=_naming_apply,
+                         args=(pending, names, open_id, chat_id, chat_type),
+                         daemon=True).start()
+        return ("正在保存名字…", None)
     if act in ("share_confirm", "share_cancel", "share_clip"):
         threading.Thread(target=_share_action,
                          args=(act, value, open_id, chat_id, chat_type),
@@ -382,9 +396,9 @@ def handle_card(value: dict, open_id: str, chat_id: str = "",
                 daemon=True).start()
             return ("正在重新发布…", None)
         threading.Thread(
-            target=_name_list_worker,
-            args=(sid, "", open_id, chat_id, chat_type), daemon=True).start()
-        return ("名单在下面", None)
+            target=_naming_worker_for_sid,
+            args=(sid, open_id, chat_id, chat_type), daemon=True).start()
+        return ("试听和补名卡在下面", None)
 
     code = str(value.get("code") or "")
     p = watchlink.pending_get(code)
@@ -480,6 +494,777 @@ def cmd_topic(words: str, limit: int = 5) -> str:
         return "\n".join(out)
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------- 读侧：找人 / 搜 / 问
+
+def _mmdd(iso) -> str:
+    s = str(iso or "").strip()
+    m = re.match(r"^\d{4}-(\d{2})-(\d{2})", s)
+    return ("%s-%s" % (m.group(1), m.group(2))) if m else s[:10]
+
+
+def _person_list_text(conn) -> str:
+    """没有参数时的「找人」入口：底库 + 只有昵称的观点署名。"""
+    lines: list[str] = []
+    persons = store.list_persons(conn)
+    if persons:
+        lines.append("记得的人：")
+        for p in persons[:10]:
+            pid = str(p.get("person_id") or "")
+            n = conn.execute("SELECT COUNT(*) FROM claims WHERE person_id=?",
+                             (pid,)).fetchone()[0]
+            bits = []
+            if int(p.get("n_sessions") or 0):
+                bits.append("%d 场" % int(p["n_sessions"]))
+            if int(n or 0):
+                bits.append("%d 条观点" % int(n))
+            lines.append("· %s%s" % (p.get("name") or pid,
+                                     ("（%s）" % " · ".join(bits)) if bits else ""))
+    try:
+        rows = conn.execute(
+            "SELECT who, COUNT(*) AS n, COUNT(DISTINCT session_id) AS ns"
+            " FROM claims WHERE who<>'' GROUP BY who"
+            " ORDER BY ns DESC, n DESC LIMIT 10").fetchall()
+    except Exception:
+        rows = []
+    nick = [r for r in rows
+            if str(r["who"] or "") not in {str(p.get("name") or "") for p in persons}]
+    if nick:
+        lines.append("")
+        lines.append("只有昵称、还没认成跨场人物的人：")
+        for r in nick[:8]:
+            lines.append("· %s（%d 场 · %d 条观点）" % (
+                r["who"], int(r["ns"] or 0), int(r["n"] or 0)))
+    if not lines:
+        return ("底库里还没有人。先在某场用 /补名 给上麦者补个名字，"
+                "或者等总结生成观点后再试。")
+    lines.append("")
+    lines.append("看谁：/找人 阿哲")
+    return "\n".join(lines)
+
+
+def _find_person_text(data: dict) -> str:
+    """把档案数据排成手机上好读的一段文字；文档链接是主入口。"""
+    lines = ["👤 %s · 观点档案" % (data.get("name") or "这位上麦者")]
+    facts = data.get("facts") or {}
+    bits = []
+    if facts.get("n_sessions"):
+        bits.append("%d 场" % int(facts["n_sessions"]))
+    if facts.get("n_claims"):
+        bits.append("%d 条观点" % int(facts["n_claims"]))
+    if facts.get("last_at"):
+        bits.append("最近 %s" % facts["last_at"])
+    if facts.get("seconds"):
+        try:
+            bits.append("上麦 %d 分" % max(1, int(float(facts["seconds"]) // 60)))
+        except (TypeError, ValueError):
+            pass
+    if bits:
+        lines.append(" · ".join(bits))
+    latest = data.get("latest") or []
+    for i, r in enumerate(latest[:3], 1):
+        lines.append("%d. [%s] %s（%s）" % (
+            i, r.get("topic") or "其他", r.get("stance") or "", r.get("at") or ""))
+    url = str(data.get("doc_url") or "")
+    if data.get("doc_ok") and url:
+        lines.append("档案文档：" + url)
+    elif url:
+        lines.append("档案文档（这次没刷新）：" + url)
+    elif data.get("error"):
+        lines.append("档案文档这次没建成：%s" % data["error"])
+    else:
+        lines.append("档案文档这次没建成，上面是最新观点。")
+    return "\n".join(lines)
+
+
+def _share_person_doc_with_owner(bot, token: str, open_id: str) -> None:
+    """群聊里发起人不是 owner 时，把档案也授权给 owner；失败不影响返回。"""
+    owner = str(getattr(bot, "owner_open_id", "") or "")
+    fn = getattr(bot, "_grant_doc", None)
+    if not token or not owner or owner == str(open_id or "") or not callable(fn):
+        return
+    try:
+        fn(token, owner)
+    except Exception:
+        traceback.print_exc()
+
+
+def cmd_find_person(rest: str, open_id: str = "", chat_id: str = "",
+                    chat_type: str = "p2p") -> str:
+    q = str(rest or "").strip(" ：:")
+    conn = store.connect()
+    try:
+        if not q:
+            return _person_list_text(conn)
+        who = reading.resolve_person(conn, q)
+        if not who.get("ok"):
+            if who.get("kind") == "ambiguous":
+                return ("找到多个像「%s」的人：\n%s\n说得更具体一点，比如 /找人 %s"
+                        % (q, "、".join(who.get("matches") or []),
+                           (who.get("matches") or [q])[0]))
+            return str(who.get("error") or "没找到这个人。")
+        top_bot = globals().get("_BOT")
+        data = reading.publish_person_doc(
+            conn, top_bot,
+            person_id=str(who.get("person_id") or ""),
+            name=str(who.get("name") or ""),
+            share_with=str(open_id or ""))
+        if data.get("doc_ok") and data.get("doc_token"):
+            _share_person_doc_with_owner(top_bot, str(data["doc_token"]), open_id)
+        if not data.get("ok"):
+            return ("%s%s。\n总结生成观点后，这里会变成一篇观点档案。"
+                    % (who.get("name") or q, data.get("reason") or "还没有观点记录"))
+        return _find_person_text(data)
+    except Exception as e:
+        traceback.print_exc()
+        return "读人物档案失败：%s" % _short_err(str(e))
+    finally:
+        conn.close()
+
+
+_SESSION_CACHE: dict[str, dict] = {}
+
+
+def _session_info(sid: str) -> dict:
+    sid = str(sid or "")
+    if not sid:
+        return {}
+    if sid in _SESSION_CACHE:
+        return _SESSION_CACHE[sid]
+    conn = store.connect()
+    try:
+        s = store.get_session(conn, sid) or {}
+    finally:
+        conn.close()
+    _SESSION_CACHE[sid] = s
+    return s
+
+
+def _search_rows(q: str) -> tuple[list[dict], list[str]]:
+    """先走接口（带术语扩展），服务没起来再本地查；返回 (rows, expanded)。"""
+    try:
+        data = _api("/api/search?" + urllib.parse.urlencode({
+            "q": q, "types": "notes,utterances", "limit": 30}), timeout=12)
+        rows = data.get("rows") or []
+        return list(rows), list(data.get("expanded") or [])
+    except Exception:
+        conn = store.connect()
+        try:
+            return reading.local_search(conn, q, limit=20), []
+        finally:
+            conn.close()
+
+
+def _search_line_text(rows: list[dict], q: str, expanded: list[str]) -> str:
+    """Top 5：场次 + 时间码 + 原话 + 文档链接；没发布就明说「未发布」。"""
+    seen: set[tuple[str, int, str]] = set()
+    picked: list[dict] = []
+    # 笔记单元（结论/观点/高光）优先；逐字稿补足。它们来自同一次搜索，
+    # 顺序已经是接口按权重排好的，这里只去重。
+    for r in rows:
+        sid = str(r.get("session_id") or "")
+        try:
+            t = int(float(r.get("t_start") or 0))
+        except (TypeError, ValueError):
+            t = 0
+        key = (sid, t, _md_safe(str(r.get("text") or ""))[:24])
+        if key in seen:
+            continue
+        seen.add(key)
+        picked.append(r)
+        if len(picked) >= 5:
+            break
+    if not picked:
+        return ("没找到「%s」。换个词试试（中文两字以上、专有名词效果最好）。"
+                % q)
+    head = "🔎「%s」找到 %d 条（结论优先）：" % (q, len(picked))
+    if expanded:
+        head += "\n（也按 %s 找过）" % "、".join(expanded[:4])
+    lines = [head]
+    conn = store.connect()
+    try:
+        for i, r in enumerate(picked, 1):
+            sid = str(r.get("session_id") or "")
+            s = _session_info(sid)
+            when = _mmdd(s.get("started_at"))
+            try:
+                t_text = _ts(float(r.get("t_start") or 0))
+            except (TypeError, ValueError):
+                t_text = ""
+            title = str(s.get("title") or r.get("session_title") or r.get("title")
+                        or "未命名场次")
+            who = str(r.get("speaker_label") or "").strip()
+            text = str(r.get("text") or "").strip()
+            url = reading.session_doc_url(conn, sid)
+            lines.append("\n%d. 《%s》%s%s%s" % (
+                i, title[:20], (" " + when) if when else "",
+                (" " + t_text) if t_text else "",
+                (" · " + who) if who else ""))
+            lines.append("「%s」" % (text[:70] + ("…" if len(text) > 70 else "")))
+            lines.append("文档：" + (url if url else "未发布"))
+    finally:
+        conn.close()
+    return "\n".join(lines)
+
+
+def cmd_search(rest: str, open_id: str = "", chat_id: str = "",
+               chat_type: str = "p2p") -> str:
+    q = str(rest or "").strip(" ：:")
+    if not q:
+        return ("用法：/搜 OPC政策\n多个词用逗号/顿号隔开；"
+                "它找的是结论和原话，找文档请用飞书搜索。")
+    try:
+        rows, expanded = _search_rows(q)
+    except Exception as e:
+        traceback.print_exc()
+        return "搜索失败：%s" % _short_err(str(e))
+    return _search_line_text(rows, q, expanded)
+
+
+def _citation_doc_text(citations: list[dict]) -> list[str]:
+    """问答引用里的文档链接：同一场只出现一次，没发布写「未发布」。"""
+    out: list[str] = []
+    seen: set[str] = set()
+    conn = store.connect()
+    try:
+        for c in citations:
+            sid = str(c.get("session_id") or "")
+            if not sid or sid in seen:
+                continue
+            seen.add(sid)
+            s = _session_info(sid)
+            url = reading.session_doc_url(conn, sid)
+            out.append("· 《%s》%s" % (
+                str(s.get("title") or c.get("title") or "未命名场次")[:20],
+                url if url else "未发布"))
+    finally:
+        conn.close()
+    return out
+
+
+def _qa_text(data: dict) -> str:
+    state = str(data.get("state") or "")
+    if state == "no_result":
+        return "没找到相关内容。换个说法，或者先确认这场已经生成总结。"
+    if state == "failed" or (not data.get("ok") and data.get("error")):
+        return "问答没成功：%s" % (data.get("error") or "模型没有生成可用回答")
+    ans = str(data.get("answer") or "").strip()
+    if not ans:
+        return "问答还没结果。稍后再问一次。"
+    lines = ["💡 " + ans]
+    citations = data.get("citations") or []
+    if citations:
+        lines.append("")
+        lines.append("依据：")
+        for c in citations[:5]:
+            who = str(c.get("speaker") or "").strip()
+            title = str(c.get("title") or "未命名场次")
+            t_text = str(c.get("t_text") or "")
+            text = str(c.get("text") or "").strip()
+            lines.append("[%s] %s《%s》%s" % (
+                c.get("n") or "·", (who + " · ") if who else "",
+                title[:18], (" " + t_text) if t_text else ""))
+            if text:
+                lines.append("「%s」" % (text[:80] + ("…" if len(text) > 80 else "")))
+        docs = _citation_doc_text(citations)
+        if docs:
+            lines.append("文档：")
+            lines += docs
+    followups = data.get("followups") or []
+    if followups:
+        qs = [str(f.get("q") or f.get("question") or f) for f in followups[:3]
+              if str(f.get("q") or f.get("question") or f).strip()]
+        if qs:
+            lines.append("")
+            lines.append("还可以问：" + "；".join(qs))
+    return "\n".join(lines)
+
+
+def _qa_worker(question: str, sid: str, open_id: str, chat_id: str,
+               chat_type: str) -> None:
+    def say(text: str) -> None:
+        try:
+            _send_text_target(text, open_id, chat_id, chat_type)
+        except Exception:
+            traceback.print_exc()
+
+    payload = {"question": question}
+    if sid:
+        payload["session_id"] = sid
+    try:
+        data = _api("/api/qa/ask", payload, timeout=20)
+    except Exception as e:
+        traceback.print_exc()
+        say("问笔记失败：%s" % _short_err(str(e)))
+        return
+    if data.get("error"):
+        say("问笔记失败：%s" % data["error"])
+        return
+    if str(data.get("state") or "") == "ready":
+        say(_qa_text(data))
+        return
+    qid = int(data.get("id") or 0)
+    if not qid:
+        say("问笔记没拿到任务编号，稍后再试。")
+        return
+    deadline = time.time() + 150
+    last: dict = data
+    while time.time() < deadline:
+        time.sleep(1.5)
+        try:
+            last = _api("/api/qa/answer?" + urllib.parse.urlencode({"id": qid}),
+                        timeout=15)
+        except Exception:
+            continue
+        if str(last.get("state") or "") in ("ready", "no_result", "failed"):
+            break
+    say(_qa_text(last))
+
+
+def _spawn_qa(fn, err_to: str, *args) -> None:
+    """问答专用后台线程：失败提示说「问笔记」，不要复用简报的文案。"""
+    def _run():
+        try:
+            fn(*args)
+        except Exception:
+            traceback.print_exc()
+            try:
+                _send_text_target("问笔记没成功，稍后再试。", err_to)
+            except Exception:
+                pass
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def cmd_ask(rest: str, open_id: str = "", chat_id: str = "",
+            chat_type: str = "p2p") -> str:
+    body = str(rest or "").strip(" ：:")
+    if not body:
+        return ("用法：/问 阿哲对 OPC 怎么看？\n"
+                "想限定某一场：/问 CH01 这场谁反对出海？")
+    sid = ""
+    m = re.match(r"(?i)^(CH\s*0*\d{1,3})\s+(.+)$", body)
+    if m:
+        room, cands, err = _pick_room_choice(m.group(1))
+        if not room:
+            if cands:
+                return _room_candidates_text(cands, "发：/问 %s 你的问题")
+            return err or "没找到这一路。"
+        sid = str(room.get("session_id") or "")
+        body = m.group(2).strip()
+    _spawn_qa(_qa_worker, open_id, body, sid, open_id, chat_id, chat_type)
+    return "⏳ 正在查笔记…（要调模型，通常十几秒）"
+
+
+# ---------------------------------------------------------------- 读侧：补名卡
+
+_NAMING_TTL_S = 30 * 60
+_NAMING_LOCK = threading.Lock()
+_NAMING: dict[str, dict] = {}
+
+
+def _naming_prune() -> None:
+    now = time.time()
+    for nonce in list(_NAMING):
+        if now - float(_NAMING[nonce].get("at") or 0) > _NAMING_TTL_S:
+            _NAMING.pop(nonce, None)
+
+
+def _naming_put(pending: dict) -> None:
+    with _NAMING_LOCK:
+        _naming_prune()
+        _NAMING[str(pending["nonce"])] = pending
+
+
+def _naming_get(nonce: str) -> dict | None:
+    with _NAMING_LOCK:
+        _naming_prune()
+        return _NAMING.get(str(nonce or ""))
+
+
+def _naming_for_scope(open_id: str, chat_id: str) -> dict | None:
+    """文字兜底用：同一会话里最近一张还没过期的补名卡。"""
+    with _NAMING_LOCK:
+        _naming_prune()
+        best: dict | None = None
+        for p in _NAMING.values():
+            if str(p.get("open_id") or "") != str(open_id or ""):
+                continue
+            if str(p.get("chat_id") or "") and str(p.get("chat_id") or "") != str(chat_id or ""):
+                continue
+            if best is None or float(p.get("at") or 0) > float(best.get("at") or 0):
+                best = p
+        return best
+
+
+def _naming_drop(nonce: str) -> dict | None:
+    with _NAMING_LOCK:
+        return _NAMING.pop(str(nonce or ""), None)
+
+
+def _name_pairs(text: str) -> list[tuple[str, str]]:
+    """「1 阿哲 2 小北」「A 阿哲」都认；不把名字里的数字当序号。
+
+    返回 [(键, 名字)]，键是 ``"3"`` 或 ``"A"``。键的语义由调用方决定：
+    数字对应「这场上麦名单」的第几位，字母对应补名卡上的 A/B/C。
+    """
+    tokens = [x for x in re.split(r"[\s,，;；、]+", str(text or "")) if x]
+    out: list[tuple[str, str]] = []
+    i = 0
+    skipped = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        m = re.match(r"^([A-Ca-c]|\d{1,2})\s*[=:：.、-]\s*(.+)$", tok)
+        if m:
+            key = m.group(1).upper() if m.group(1).isalpha() else m.group(1)
+            out.append((key, m.group(2).strip(" ，。；;,.!?！？")))
+            i += 1
+            continue
+        key = tok.upper() if tok.isalpha() and len(tok) == 1 else tok
+        if (key.isdigit() and 1 <= int(key) <= 20) or key in ("A", "B", "C"):
+            if i + 1 < len(tokens):
+                out.append((key, tokens[i + 1].strip(" ，。；;,.!?！？")))
+                i += 2
+                continue
+        skipped += 1
+        i += 1
+    # 只有「每一段都是序号+名字」才算补名，避免把「1 个问题 怎么办」当成补名。
+    if not out or skipped or i != len(tokens):
+        return []
+    return [(k, n) for k, n in out if n]
+
+
+_NAME_PAIR_RE = re.compile(r"^(\d{1,2})\s*[=:：.、]\s*(.+)$")
+
+
+def _name_pairs_explicit(body: str) -> list[tuple[int, str]]:
+    """显式 ``/补名`` 用的宽松解析：能认出「1 阿哲 3号」里的第一位。
+
+    文字兜底（``_name_pairs``）必须严格，避免把普通聊天当成补名；用户主动
+    发 ``/补名`` 时则应尽量按他写的序号执行，别因为名字里带数字就整条不认。
+    """
+    tokens = [x for x in re.split(r"[\s,，;；、]+", str(body or "")) if x]
+    out: list[tuple[int, str]] = []
+    i = 0
+    while i < len(tokens):
+        m = _NAME_PAIR_RE.match(tokens[i])
+        if m:
+            out.append((int(m.group(1)), m.group(2).strip()))
+            i += 1
+            continue
+        if tokens[i].isdigit() and i + 1 < len(tokens):
+            out.append((int(tokens[i]), tokens[i + 1].strip()))
+            i += 2
+            continue
+        i += 1
+    return [(idx, name) for idx, name in out if name]
+
+
+def _naming_card(pending: dict) -> dict:
+    """补名表单卡。表单组件在旧客户端可能不显示，所以每张卡都带文字兜底。"""
+    elements: list[dict] = [{
+        "tag": "div",
+        "text": {"tag": "lark_md", "content":
+                 "刚才的试听按 **A / B / C** 排。听不清就按上麦顺序估着填，"
+                 "留空跳过；也可以直接回「1 阿哲 2 小北」。"},
+    }]
+    form_els: list[dict] = []
+    for sp in pending.get("speakers") or []:
+        sug = str(sp.get("suggestion") or "").strip()
+        tip = "（声纹建议：%s，不对就改）" % sug if sug else ""
+        form_els.append({
+            "tag": "div",
+            "text": {"tag": "lark_md", "content": "**%s** · 本场第 %d 位 · %s · %d 句%s"
+                     % (sp.get("letter") or "?", int(sp.get("index") or 0),
+                        _hms(sp.get("seconds") or 0),
+                        int(sp.get("n_utterances") or 0), tip)},
+        })
+        inp = {
+            "tag": "input", "name": sp.get("field") or "",
+            "placeholder": {"tag": "plain_text", "content": "填名字，留空跳过"},
+            "max_length": 40,
+        }
+        if sug:
+            inp["default_value"] = sug
+        form_els.append(inp)
+    form_els.append({
+        "tag": "button", "name": "naming_submit",
+        "text": {"tag": "plain_text", "content": "保存名字"},
+        "type": "primary", "action_type": "form_submit",
+        "value": {"act": "naming_submit", "nonce": pending.get("nonce") or ""},
+    })
+    form_els.append({
+        "tag": "button", "name": "naming_cancel",
+        "text": {"tag": "plain_text", "content": "这次不补"},
+        "type": "default",
+        "value": {"act": "naming_cancel", "nonce": pending.get("nonce") or ""},
+    })
+    elements.append({"tag": "form", "name": "naming_form", "elements": form_els})
+    return {"config": {"wide_screen_mode": True},
+            "header": {"template": "blue",
+                       "title": {"tag": "plain_text",
+                                 "content": "补名 · 《%s》"
+                                            % str(pending.get("title") or "这场")[:20]}},
+            "elements": elements}
+
+
+def _naming_pending(sid: str, title: str, data: dict, open_id: str,
+                    chat_id: str, chat_type: str) -> dict:
+    """从 top_speakers 的结果里挑前 3 位未命名的，配一张卡。"""
+    all_speakers = list(data.get("speakers") or [])
+    unnamed = [(i, s) for i, s in enumerate(all_speakers, 1) if not s.get("named")]
+    picked = unnamed[:3]
+    speakers = []
+    for slot, (idx, s) in enumerate(picked):
+        sug = (s.get("suggestion") or {}).get("name") if isinstance(
+            s.get("suggestion"), dict) else ""
+        speakers.append({
+            "field": "name_%s" % chr(ord("a") + slot),
+            "letter": chr(ord("A") + slot),
+            "index": idx,
+            "speaker_id": str(s.get("speaker_id") or ""),
+            "label": str(s.get("label") or ""),
+            "seconds": s.get("seconds") or 0,
+            "n_utterances": s.get("n_utterances") or 0,
+            "suggestion": str(sug or ""),
+            "preview": s.get("preview") or None,
+        })
+    return {
+        "nonce": secrets.token_hex(4),
+        "at": time.time(),
+        "session_id": sid,
+        "title": title,
+        "open_id": str(open_id or ""),
+        "chat_id": str(chat_id or ""),
+        "chat_type": str(chat_type or "p2p"),
+        "speakers": speakers,
+        "all": [{"index": i, "speaker_id": str(s.get("speaker_id") or ""),
+                 "label": str(s.get("label") or ""),
+                 "named": bool(s.get("named"))}
+                for i, s in enumerate(all_speakers, 1)],
+        "has_audio": bool(data.get("has_audio")),
+    }
+
+
+def _send_naming_previews(pending: dict, open_id: str, chat_id: str,
+                          chat_type: str) -> None:
+    """先发每位的 3 秒试听（有就发），再发卡片。发不出音频只影响试听，不阻塞补名。"""
+    sid = str(pending.get("session_id") or "")
+    for sp in pending.get("speakers") or []:
+        caption = "%s · 本场第 %d 位 · %s · %d 句" % (
+            sp.get("letter"), int(sp.get("index") or 0),
+            _hms(sp.get("seconds") or 0), int(sp.get("n_utterances") or 0))
+        _send_text_target(caption, open_id, chat_id, chat_type)
+        preview = sp.get("preview") or {}
+        if not (pending.get("has_audio") and preview.get("t_start") is not None):
+            continue
+        try:
+            clip, _err = clips.make_clip(sid, float(preview.get("t_start") or 0),
+                                         float(preview.get("seconds") or 3.0))
+        except Exception:
+            traceback.print_exc()
+            clip = None
+        if not clip:
+            continue
+        ms = int(clip.duration * 1000)
+        try:
+            if chat_type == "group" and chat_id:
+                _BOT.send_audio_to_chat(chat_id, clip.path, ms)
+            else:
+                _BOT.send_audio(clip.path, ms, open_id)
+        except Exception:
+            traceback.print_exc()
+
+
+def _send_naming_flow(sid: str, title: str, data: dict, open_id: str,
+                      chat_id: str, chat_type: str) -> None:
+    """发试听 + 补名表单卡。``/补名`` 和收尾卡上的「补名」共用这一条。"""
+    speakers = data.get("speakers") or []
+    unnamed = [s for s in speakers if not s.get("named")]
+    if not speakers:
+        _send_text_target("这场还没有可命名的说话人。",
+                          open_id, chat_id, chat_type)
+        return
+    if not unnamed:
+        _send_text_target(
+            "《%s》前 %d 位都有名字了。要改名发：/补名 %s 1 新名字"
+            % (title, len(speakers), _ch(_room_for_sid(sid)) or "CHxx"),
+            open_id, chat_id, chat_type)
+        return
+    pending = _naming_pending(sid, title, data, open_id, chat_id, chat_type)
+    _naming_put(pending)
+    _send_text_target(
+        "👤《%s》还有 %d 位没名字。先听 3 段 3 秒试听，听到谁就填谁；"
+        "填完点卡片保存。\n也可以直接回：1 阿哲 2 小北"
+        % (title, len(unnamed)), open_id, chat_id, chat_type)
+    _send_naming_previews(pending, open_id, chat_id, chat_type)
+    _send_card_target(_naming_card(pending),
+                      "补名卡没发出来。直接回「1 阿哲 2 小北」也行。",
+                      open_id, chat_id, chat_type)
+
+
+def _naming_worker_for_sid(sid: str, open_id: str, chat_id: str = "",
+                           chat_type: str = "p2p") -> None:
+    """收尾卡上的「补名」按钮：按 session_id 直接发试听和表单卡。"""
+    try:
+        data = _top_speakers(sid)
+    except Exception as e:
+        _send_text_target("读说话人失败：%s" % _short_err(str(e)),
+                          open_id, chat_id, chat_type)
+        return
+    if not data.get("ok"):
+        _send_text_target(str(data.get("error") or "这场还没有可命名的说话人。"),
+                          open_id, chat_id, chat_type)
+        return
+    title = str(data.get("title") or "这场")[:20]
+    _send_naming_flow(sid, title, data, open_id, chat_id, chat_type)
+
+
+def _naming_apply(pending: dict, names: dict[str, str], open_id: str,
+                  chat_id: str, chat_type: str) -> None:
+    """把名字逐个写回引擎。成功后这张卡就作废；全失败则保留，允许再试。"""
+    sid = str(pending.get("session_id") or "")
+    done: list[str] = []
+    bad: list[str] = []
+    for spk, name in names.items():
+        try:
+            out = _api("/api/speakers/name", {
+                "session_id": sid, "speaker_id": spk, "name": name})
+        except Exception as e:
+            bad.append("%s：%s" % (name, _short_err(str(e))))
+            continue
+        if not out.get("ok"):
+            bad.append("%s：%s" % (name, out.get("error") or "没改成"))
+            continue
+        tag = "声纹已入库" if out.get("enrolled") else "声纹样本不足，下次还不能自动认"
+        done.append("%s（%s）" % (name, tag))
+    lines: list[str] = []
+    if done:
+        lines.append("✅ 已补名：" + "、".join(done))
+        lines.append("已发布的场次会在后台重写文档；下次 /找人 名字 就能看到他的观点档案。")
+    if bad:
+        lines.append("没成功的：" + "；".join(bad))
+    if not lines:
+        lines = ["没有改动。"]
+    if done:
+        _naming_drop(str(pending.get("nonce") or ""))
+    try:
+        _send_text_target("\n".join(lines), open_id, chat_id, chat_type)
+    except Exception:
+        traceback.print_exc()
+
+
+def _naming_from_form(value: dict) -> tuple[dict | None, dict[str, str], str]:
+    pending = _naming_get(str(value.get("nonce") or ""))
+    if not pending:
+        return None, {}, "这张补名卡过期了，发 /补名 重新来一次。"
+    form = value.get("_form") if isinstance(value.get("_form"), dict) else {}
+    names: dict[str, str] = {}
+    for sp in pending.get("speakers") or []:
+        name = str(form.get(sp.get("field") or "") or "").strip()
+        if name:
+            names[str(sp.get("speaker_id") or "")] = name[:40]
+    if not names:
+        return pending, {}, "还没填名字。"
+    return pending, names, ""
+
+
+def _naming_from_text(text: str, open_id: str,
+                      chat_id: str) -> tuple[dict | None, dict[str, str], str]:
+    """文字兜底：「1 阿哲 2 小北」或「A 阿哲」。没有 pending 就不拦普通聊天。"""
+    pending = _naming_for_scope(open_id, chat_id)
+    if not pending:
+        return None, {}, ""
+    pairs = _name_pairs(text)
+    if not pairs:
+        return None, {}, ""
+    by_index = {int(s.get("index") or 0): s for s in pending.get("all") or []}
+    by_letter = {str(s.get("letter") or ""): s
+                 for s in pending.get("speakers") or []}
+    names: dict[str, str] = {}
+    for key, name in pairs:
+        sp = by_letter.get(key) if key in ("A", "B", "C") else by_index.get(int(key))
+        if not sp:
+            continue
+        spk = str(sp.get("speaker_id") or "")
+        if spk and name:
+            names[spk] = name[:40]
+    if not names:
+        return None, {}, ""
+    return pending, names, ""
+
+
+def cmd_name(rest: str, open_id: str = "", chat_id: str = "",
+             chat_type: str = "p2p") -> str:
+    """补名入口：有「1 阿哲」就直接写回；没有就发试听 + 表单卡。
+
+    直接写回沿用与网页相同的 ``/api/speakers/name``：改显示名、注册声纹、
+    重建本场观点归属。
+    """
+    body = str(rest or "").strip(" ：:")
+    room: dict | None = None
+    m = re.match(r"(?i)^(CH\s*0*\d{1,3})\b\s*(.*)$", body)
+    if m:
+        target, body = m.group(1), m.group(2).strip()
+        rooms = _rooms()
+        room = _resolve_room(rooms, target) if rooms else None
+        if not room:
+            return "没有找到「%s」。\n%s" % (target, cmd_rooms())
+    pairs = _name_pairs_explicit(body)
+    if pairs:
+        if not room:
+            room, cands, err = _pick_room_choice("")
+            if not room:
+                if cands:
+                    return _room_candidates_text(cands, "发：/补名 %s 1 阿哲")
+                return err or "现在没有可命名的场次。"
+        sid = str(room.get("session_id") or "")
+        if not sid:
+            return "%s 还没有会话 id。" % _ch(room)
+        try:
+            data = _top_speakers(sid)
+        except Exception as e:
+            return "读说话人失败：%s" % _short_err(str(e))
+        speakers = data.get("speakers") or []
+        if not data.get("ok") or not speakers:
+            return str(data.get("error") or "这场还没有说话人数据。")
+        pending = {"nonce": "", "session_id": sid}
+        names: dict[str, str] = {}
+        for idx, name in pairs:
+            if not (1 <= idx <= len(speakers)):
+                continue
+            spk = str(speakers[idx - 1].get("speaker_id") or "")
+            if spk:
+                names[spk] = name
+        if not names:
+            return "序号超出范围：这场只列了 %d 位。" % len(speakers)
+        _naming_apply(pending, names, open_id, chat_id, chat_type)
+        return ""
+    # 没有序号：列名单、发试听、发表单卡。
+    if not room:
+        room, cands, err = _pick_room_choice("")
+        if not room:
+            if cands:
+                return _room_candidates_text(cands, "发：/补名 %s")
+            return err or "现在没有可命名的场次。"
+    sid = str(room.get("session_id") or "")
+    if not sid:
+        return "%s 还没有会话 id。" % _ch(room)
+    try:
+        data = _top_speakers(sid)
+    except Exception as e:
+        return "读说话人失败：%s" % _short_err(str(e))
+    if not data.get("ok"):
+        return str(data.get("error") or "这场还没有可命名的说话人。")
+    title = str(data.get("title") or _room_name(room))[:20]
+    _send_naming_flow(sid, title, data, open_id, chat_id, chat_type)
+    return ""
+
+
+def _top_speakers(sid: str) -> dict:
+    return _api("/api/sessions/top_speakers?" + urllib.parse.urlencode({
+        "session_id": sid, "limit": 5}), timeout=15)
 
 
 def cmd_rooms() -> str:
@@ -2231,144 +3016,6 @@ def cmd_doc(rest: str, open_id: str = "", chat_id: str = "",
     return _doc_text(data, room)
 
 
-_NAME_PAIR_RE = re.compile(r"^(\d{1,2})\s*[=:：.、]\s*(.+)$")
-_CH_HEAD_RE = re.compile(r"(?i)^\s*(CH\s*0*\d{1,3})\s*(.*)$")
-
-
-def _name_pairs(body: str) -> list[tuple[int, str]]:
-    """「1 阿哲 2 小北」「1=阿哲, 2=小北」都认；不把名字里的数字当序号。"""
-    tokens = [x for x in re.split(r"[\s,，;；、]+", body or "") if x]
-    out: list[tuple[int, str]] = []
-    i = 0
-    while i < len(tokens):
-        m = _NAME_PAIR_RE.match(tokens[i])
-        if m:
-            out.append((int(m.group(1)), m.group(2).strip()))
-            i += 1
-            continue
-        if tokens[i].isdigit() and i + 1 < len(tokens):
-            out.append((int(tokens[i]), tokens[i + 1].strip()))
-            i += 2
-            continue
-        i += 1
-    return [(i, n) for i, n in out if n]
-
-
-def _top_speakers(sid: str) -> dict:
-    return _api("/api/sessions/top_speakers?"
-                + urllib.parse.urlencode({"session_id": sid, "limit": 5}))
-
-
-def _name_list_text(sid: str, room: dict | None = None) -> str:
-    try:
-        data = _top_speakers(sid)
-    except Exception as e:
-        return "读说话人失败：%s" % _short_err(str(e))
-    if not data.get("ok"):
-        return str(data.get("error") or "这场还没有说话人数据。")
-    speakers = data.get("speakers") or []
-    if not speakers:
-        return "这场还没有可命名的说话人。"
-    room = room or _room_for_sid(sid)
-    label = _ch(room) if room else ""
-    lines = ["这场上麦的人："]
-    first_unnamed = ""
-    for i, s in enumerate(speakers, 1):
-        named = bool(s.get("named"))
-        label = str(s.get("label") or "").strip()
-        tag = ("✓ %s" % label) if named else "未命名"
-        if not named and not first_unnamed:
-            first_unnamed = str(i)
-        sug = s.get("suggestion") or {}
-        sug_name = str(sug.get("name") or "") if isinstance(sug, dict) else str(sug or "")
-        bits = "%d 句 · %s" % (int(s.get("n_utterances") or 0),
-                              _hms(s.get("seconds") or 0))
-        lines.append("%d. %s · %s%s" % (
-            i, tag, bits,
-            ("（可叫 %s）" % sug_name) if (not named and sug_name) else ""))
-    if not first_unnamed:
-        lines.append("\n名字都齐了。要改名发：/补名 %s 1 新名字"
-                     % (label or "CHxx"))
-    else:
-        example = "/补名 %s %s 阿哲" % (
-            (label + " ") if label else "", first_unnamed)
-        lines.append("\n一次可以补多个：%s 2 小北" % example)
-        lines.append("已发布的场次改完名，后台会自动重写文档的人物表。")
-    return "\n".join(lines)
-
-
-def _name_list_worker(sid: str, label: str, open_id: str, chat_id: str = "",
-                      chat_type: str = "p2p") -> None:
-    _send_text_target(_name_list_text(sid), open_id, chat_id, chat_type)
-
-
-def cmd_name(rest: str, open_id: str = "", chat_id: str = "",
-             chat_type: str = "p2p") -> str:
-    body = (rest or "").strip()
-    room: dict | None = None
-    m = _CH_HEAD_RE.match(body)
-    if m:
-        target = m.group(1)
-        body = m.group(2).strip()
-        rooms = _rooms()
-        room = _resolve_room(rooms, target) if rooms else None
-        if not room:
-            return "没有找到「%s」。\n%s" % (target, cmd_rooms())
-    pairs = _name_pairs(body)
-    if not pairs:
-        if room and room.get("session_id"):
-            return _name_list_text(str(room["session_id"]), room)
-        room, cands, err = _pick_room_choice("")
-        if not room:
-            if cands:
-                return _room_candidates_text(cands, "发：/补名 %s 1 阿哲")
-            return err or "现在没有可命名的场次。"
-        return _name_list_text(str(room.get("session_id") or ""), room)
-    if not room:
-        room, cands, err = _pick_room_choice("")
-        if not room:
-            if cands:
-                return ("有 %d 路可用，写清楚哪一路：\n%s"
-                        % (len(cands), _room_candidates_text(cands,
-                                                             "发：/补名 %s 1 阿哲")))
-            return err or "现在没有可命名的场次。"
-    sid = str(room.get("session_id") or "")
-    if not sid:
-        return "%s 还没有会话 id。" % _ch(room)
-    try:
-        data = _top_speakers(sid)
-    except Exception as e:
-        return "读说话人失败：%s" % _short_err(str(e))
-    speakers = data.get("speakers") or []
-    if not data.get("ok") or not speakers:
-        return str(data.get("error") or "这场还没有说话人数据。")
-    done: list[str] = []
-    bad: list[str] = []
-    for idx, name in pairs:
-        if not (1 <= idx <= len(speakers)):
-            bad.append("第 %d 位不存在（只有 %d 位）" % (idx, len(speakers)))
-            continue
-        spk = str(speakers[idx - 1].get("speaker_id") or "")
-        try:
-            out = _api("/api/speakers/name", {
-                "session_id": sid, "speaker_id": spk, "name": name})
-        except Exception as e:
-            bad.append("%d %s：%s" % (idx, name, _short_err(str(e))))
-            continue
-        if out.get("ok"):
-            done.append("%s（原第 %d 位）" % (name, idx))
-        else:
-            bad.append("%d %s：%s" % (
-                idx, name, str(out.get("error") or "没改成")))
-    lines = []
-    if done:
-        lines.append("已补名：" + "、".join(done))
-        lines.append("已发布的场次会在后台重写文档；下次 /文档 就能看到新名字。")
-    if bad:
-        lines.append("没成功的：" + "；".join(bad))
-    return "\n".join(lines) or "没改动。"
-
-
 def cmd_trust() -> str:
     added = watchlink.trust_list()
     lines = ["已知平台（默认放行）：" + "、".join(watchlink.PRESET_SITES)]
@@ -2477,7 +3124,6 @@ def _help_text() -> str:
             "/分享 CH01 1:30 2分钟 从第 1:30 起截 2 分钟\n"
             "/发布 [CH] 把这场发成云文档 + 场次表一行\n"
             "/文档 [CH] 看发布到哪了、文档链接和状态\n"
-            "/补名 CH01 1 阿哲 2 小北 给上麦的人补名字\n"
             "/周报 [上周|7天|11-03~11-09] 汇总多场生成周报（私聊）\n"
             "/复盘 [范围] 生成可填结论/行动的复盘模板（私聊）\n"
             "/刷新 重做上一条简报（绕过缓存）\n"
@@ -2488,7 +3134,11 @@ def _help_text() -> str:
             "/stop 1 或 /stop CH02 停掉一路\n"
             "/白名单 看过哪些站点被放行\n"
             "关注 FDE、OPC 给关键词加权\n"
-            "/话题 OPC政策 搜历史场次里的原话\n\n"
+            "/话题 OPC政策 搜历史场次里的原话\n"
+            "/找人 阿哲 看这个人的观点档案\n"
+            "/搜 OPC政策 找结论和原话（带时间码与文档链接）\n"
+            "/问 阿哲怎么看 OPC？ 用笔记回答问题并给引用\n"
+            "/补名 [CH] 给上麦的人补名字（试听 + 表单卡）\n\n"
             "群聊里需要 @我，而且只认白名单群；私聊只有主人能用。")
 
 
@@ -2649,12 +3299,32 @@ def _route(t: str, low: str, open_id: str = "", chat_id: str = "",
     if t.startswith(("/话题", "话题")):
         return cmd_topic(t.split("话题", 1)[-1].strip(" ：:"))
 
+    for verb in ("/找人", "/find"):
+        if low.startswith(verb):
+            return cmd_find_person(t[len(verb):].strip(" ：:"), open_id,
+                                   chat_id, chat_type)
+    for verb in ("/搜", "/搜索", "/search"):
+        if low.startswith(verb):
+            return cmd_search(t[len(verb):].strip(" ：:"), open_id,
+                              chat_id, chat_type)
+    for verb in ("/问", "/ask"):
+        if low.startswith(verb):
+            return cmd_ask(t[len(verb):].strip(" ：:"), open_id,
+                           chat_id, chat_type)
+
     if head in ("/hi", "/help", "/帮助") or t in ("你好", "在吗", "哈喽", "帮助"):
         return _help_text()
     # 选择卡的文字兜底：只在确实有 pending 时生效，不影响普通聊天。
     choice = _take_room_choice(t, open_id, chat_id, chat_type)
     if choice is not None:
         return choice
+    # 补名卡的文字兜底：「1 阿哲 2 小北」。只有刚发过卡才认，平时不拦截聊天。
+    pending, names, _err = _naming_from_text(t, open_id, chat_id)
+    if pending is not None and names:
+        threading.Thread(target=_naming_apply,
+                         args=(pending, names, open_id, chat_id, chat_type),
+                         daemon=True).start()
+        return ""
     if chat_type == "group" and chat_id:
         return _nl_route(t, open_id, chat_id, chat_type)
     return _daily_hint(open_id)
