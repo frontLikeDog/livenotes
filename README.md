@@ -401,6 +401,8 @@ python tools/stress_live.py --tracks 1,3,5,10 --duration 7200 --warmup 60 \
 - [`docs/39-polish-delivery-implementation.md`](docs/39-polish-delivery-implementation.md) M4 精修交付：项目/报告版本/质检/打包工作台与人工交付 SOP
 - [`docs/40-distribution-and-updates.md`](docs/40-distribution-and-updates.md) 分发与更新：发版流水线、壳/引擎/模型三条通道与签名路线
 - [`docs/41-voice-room-knowledge-product-iteration.md`](docs/41-voice-room-knowledge-product-iteration.md) 语音厅知识化：场次形态、观点原子与「AI 管家」的落地顺序
+- [`docs/46-three-surfaces-governance-review.md`](docs/46-three-surfaces-governance-review.md) 多端职责与云端采集制度审查：能力矩阵、回归风险与 R1–R10
+- [`docs/47-feishu-native-reading-surface.md`](docs/47-feishu-native-reading-surface.md) 飞书原生阅读面：云文档 + 多维表格 + 卡片，不建公网网页
 
 ## 许可证
 

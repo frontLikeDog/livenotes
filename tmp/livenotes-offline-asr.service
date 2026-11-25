@@ -1,0 +1,34 @@
+[Unit]
+Description=LiveNotes offline ASR (capture-only backfill)
+After=network-online.target livenotes.service
+Wants=network-online.target
+Requires=livenotes.service
+
+[Service]
+Type=simple
+User=livenotes
+Group=livenotes
+WorkingDirectory=/opt/livenotes
+EnvironmentFile=/opt/livenotes/livenotes.env
+Environment=PYTHONUNBUFFERED=1
+Environment=LIVENOTES_ASR_THREADS=1
+Environment=MALLOC_ARENA_MAX=2
+ExecStart=/opt/livenotes/.venv/bin/python /opt/livenotes/tools/offline_asr.py
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=30
+Nice=10
+# 这台机器 MemTotal 只有 701MB，采集三件套已占约 220MB。把补转写
+# 关在自己的 cgroup 里：超过 480M 先在本组内回收/换出，560M 硬顶，
+# 最多换出 900M；真顶不住时 OOM 只杀它，不碰采集和飞书。
+MemoryHigh=480M
+MemoryMax=560M
+MemorySwapMax=900M
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/livenotes/data
+
+[Install]
+WantedBy=multi-user.target
