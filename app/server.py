@@ -6,6 +6,7 @@ import io
 import json
 import mimetypes
 from html import escape as _esc
+import os
 import socket
 import struct
 import threading
@@ -3121,9 +3122,24 @@ class _Server(ThreadingHTTPServer):
 
 def make_server(host: str = HOST, port: int = PORT) -> ThreadingHTTPServer:
     # Windows 上 SO_REUSEADDR 允许两个进程绑同一个端口，结果是请求随机落到其中
-    # 一个（表现为"页面时好时坏"，很难查）。这里先用一个不带 REUSEADDR 的裸 socket
-    # 探一下，被占用就直接报清楚，而不是静默双绑。
+    # 一个（表现为"页面时好时坏"，很难查）。这里先探一下，被占用就直接报清楚，
+    # 而不是静默双绑。
+    #
+    # 探测 socket 在 Linux 上必须带 SO_REUSEADDR，否则「重启」必然误判：引擎被
+    # 停掉后，刚才还在服务的连接会留在 TIME_WAIT（Debian 默认 tcp_fin_timeout
+    # 60 秒），此时绑同一端口拿到 EADDRINUSE——而紧接着真正要用的 _Server 是
+    # allow_reuse_address=1，本来能正常绑上。实测 systemd 每 5 秒重启一次，前 6
+    # 次全倒在这一步，白等 30 秒才起来。
+    #
+    # 但两个平台的语义不一样，不能无条件加：
+    #   Linux  ：只放过 TIME_WAIT 这类没有活连接的残留，真有进程在 LISTEN 时仍是
+    #            EADDRINUSE —— 正是我们想要的。
+    #   Windows：会允许绑到**已有活监听**的端口上，那就把真正的冲突掩盖了，
+    #            退回原文那条注释警告的问题。
+    # 所以只在类 Unix 上设置；Windows 保持裸绑定。
     probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    if os.name != "nt":
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
         probe.bind((host, port))
     except OSError as e:
