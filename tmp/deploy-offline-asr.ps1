@@ -21,17 +21,24 @@ if ($BindAddress) { $SshOpts = $SshOpts + @("-o", "BindAddress=$BindAddress") }
 # 原生命令的 stderr 在 ErrorActionPreference=Stop 下会变成致命 ErrorRecord，
 # 而 ssh/pip/systemctl 正常也会往 stderr 写字（ssh 的 Warning、pip 的进度）。
 # 所以调用期间临时降到 Continue，并把 stderr 行按普通文本收回来。
+#
+# 编码：远端（Debian，LANG 未设时也是 UTF-8）输出的是 UTF-8，而 PS 5.1 会把
+# 管道默认按控制台代码页（GBK）解，中文全成乱码，日志没法看。这里临时把
+# [Console]::OutputEncoding 设成 UTF-8 收完再还原。
 function Invoke-Native {
   param([string]$Exe, [string[]]$ArgList)
-  $prev = $ErrorActionPreference
+  $prevEap = $ErrorActionPreference
+  $prevEnc = [Console]::OutputEncoding
   $ErrorActionPreference = "Continue"
+  [Console]::OutputEncoding = [Text.Encoding]::UTF8
   try {
     $out = & $Exe @ArgList 2>&1 | ForEach-Object {
       if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.Exception.Message } else { [string]$_ }
     }
     $code = $LASTEXITCODE
   } finally {
-    $ErrorActionPreference = $prev
+    [Console]::OutputEncoding = $prevEnc
+    $ErrorActionPreference = $prevEap
   }
   $text = ($out | ForEach-Object { $_ }) -join "`n"
   if ($null -eq $text) { $text = "" }
