@@ -141,7 +141,7 @@
 - 桌面 `capture_mode` 默认空 → `browser`（[run.py:203](../run.py)）；`browser` 时不拉外部采集代理（[run.py:216](../run.py)）。
 - helpers 只在 `LIVENOTES_HELPERS=1` 时启动（[run.py:134](../run.py)），网页版行为不变。
 - 仅采集支持逐场覆盖，不传就跟全局（[app/server.py:2447](../app/server.py)）；老库自动补 `sessions.capture_only` 列。
-- 本机全量 `pytest`：**843 passed**（2026-11-26）；`test_capture_only.py`、`test_feishu_capture_only.py`、`test_offline_asr.py` 覆盖「仅采集不碰模型/工作池」「飞书文案」「增量补写」，`test_feishu_publish.py`、`test_cloud_chain.py` 覆盖发布幂等与云端整链。
+- 本机全量 `pytest`：**884 passed**（2026-11-26）；`test_capture_only.py`、`test_feishu_capture_only.py`、`test_offline_asr.py` 覆盖「仅采集不碰模型/工作池」「飞书文案」「增量补写」，`test_feishu_publish.py`、`test_cloud_chain.py` 覆盖发布幂等与云端整链。
 - CI 在 Python 3.11/3.13 跑同一套 pytest，并检查网页分层与「不装实时依赖也能 import」。
 
 ### 5.2 回归网没盖住的地方
