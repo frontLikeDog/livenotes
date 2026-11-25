@@ -99,6 +99,8 @@ $u = Invoke-Native "scp" ($SshOpts + @("-O", (Join-Path $PSScriptRoot "deploy-re
 if ($u.Code -ne 0) { throw "上传部署脚本失败：$($u.Text.Trim())" }
 $u = Invoke-Native "scp" ($SshOpts + @("-O", (Join-Path $PSScriptRoot "live-guard.py"), "${Server}:/tmp/live-guard.py"))
 if ($u.Code -ne 0) { throw "上传闸门脚本失败：$($u.Text.Trim())" }
+$u = Invoke-Native "scp" ($SshOpts + @("-O", (Join-Path $PSScriptRoot "restart-engine.sh"), "${Server}:/tmp/restart-engine.sh"))
+if ($u.Code -ne 0) { throw "上传重启脚本失败：$($u.Text.Trim())" }
 
 Write-Host "== 5/8 云端解包（自动备份）=="
 $r = Invoke-Remote "bash /tmp/deploy-remote.sh /tmp/livenotes-code.tar.gz"
@@ -152,7 +154,11 @@ if ($r.Code -ne 0) { throw "写 $Remote/livenotes.env 失败：$($r.Text.Trim())
 
 # 重启顺序有讲究：离线补转写要调引擎的 /api/sessions/finalize，
 # 先把引擎换上新接口，再让补转写去用；反过来会先撞一轮 404。
-# 引擎重启会打断在录的场次：先过闸门，有场次在跑就拒绝。
+#
+# 统一走 /tmp/restart-engine.sh：它先过闸门（有场次在录就拒绝），再停下游、
+# 重启引擎、等端口真的 LISTEN、最后拉起下游。不能直接 systemctl restart
+# livenotes —— 下游三个服务都跟着引擎走，会一起重启并猛连 8765，新引擎在
+# 端口探测阶段就判「已被占用」退出，两边拉锯（实测重试 6 次才起来）。
 $g = Invoke-Remote "python3 /tmp/live-guard.py $ApiBase" -Quiet
 $guard = $g.Text.Trim()
 Write-Host "   引擎闸门：$guard"
@@ -160,13 +166,14 @@ if ($RestartEngine) {
   if ($g.Code -eq 3) {
     throw "有场次正在录（$guard），拒绝重启。等它停了再跑，或去掉 -RestartEngine 只更新代码"
   }
-  Write-Host "   重启引擎"
-  $r = Invoke-Remote "systemctl restart livenotes; sleep 3; systemctl is-active livenotes" -Quiet
-  if ($r.Code -ne 0) { throw "引擎重启后没起来：$($r.Text.Trim())。看 journalctl -u livenotes -n 50" }
-  Write-Host "   engine: $($r.Text.Trim())"
-  $r = Invoke-Remote "systemctl restart livenotes-feishu; sleep 2; systemctl is-active livenotes-feishu" -Quiet
-  Write-Host "   feishu: $($r.Text.Trim())"
-  # 机器人也要跟着重启：它 import 了 app 下的新模块，旧进程里没有。
+  Write-Host "   重启引擎（按顺序：停下游 → 重启引擎 → 等端口 → 拉起下游）"
+  $r = Invoke-Remote "bash /tmp/restart-engine.sh $ApiBase" -Quiet
+  Write-Host (($r.Text.TrimEnd() -split "`r?`n") -join "`n   ")
+  if ($r.Code -ne 0) { throw "引擎重启失败：$($r.Text.Trim())" }
+  foreach ($u in @("livenotes", "livenotes-feishu", "livenotes-offline-asr", "livenotes-capture")) {
+    $s = Invoke-Remote "systemctl is-active $u" -Quiet
+    Write-Host "   $u`: $($s.Text.Trim())"
+  }
 } else {
   Write-Host "   没传 -RestartEngine，引擎还是旧进程（代码已就位，下次重启自动生效）。" -ForegroundColor Yellow
   Write-Host "   新接口 /api/sessions/finalize 要等引擎重启后才存在；下播后带 -RestartEngine 再跑一次。" -ForegroundColor Yellow

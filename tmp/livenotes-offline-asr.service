@@ -2,7 +2,12 @@
 Description=LiveNotes offline ASR (capture-only backfill)
 After=network-online.target livenotes.service
 Wants=network-online.target
-Requires=livenotes.service
+# 只「跟随停止」，不「跟随重启」：原来写的是 Requires=livenotes.service，
+# systemctl restart livenotes 会把本服务一起重启，而本服务一起来就反复请求
+# 127.0.0.1:8765，新引擎在探测端口时看到这些连接就报「端口已被占用」并以
+# 非零码退出，systemd 每 5 秒重试一次，两边互相拖住（实测重试 6 次才起来）。
+# PartOf 让「stop 引擎」仍然能停掉本服务，但 restart 引擎时它原地等着。
+PartOf=livenotes.service
 
 [Service]
 Type=simple
