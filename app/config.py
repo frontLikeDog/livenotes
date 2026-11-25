@@ -386,7 +386,13 @@ LLM_TIMEOUT = int(os.environ.get("LIVENOTES_LLM_TIMEOUT", "60"))
 # 单次 socket 读写的超时（上面的 LLM_TIMEOUT）不封顶「整次请求」：中转站只要一直
 # 慢慢吐字节，urlopen 就永远不会超时——实测有过一次收尾调用挂 7 分钟没回来。
 # 这个值是整次调用的硬上限，到点就放弃本次生成并报错，绝不把收尾线程吊死。
-LLM_TOTAL_TIMEOUT = int(os.environ.get("LIVENOTES_LLM_TOTAL_TIMEOUT", "75"))
+#
+# 为什么是 180 而不是更短：实测一场 1720 句、5.3 小时的总结，输入 4.5 万 token、
+# 输出 4296 token，真实耗时 113 秒（推理型模型的思考过程也计在输出里）。75 秒
+# 会在模型还在正常生成时把它砍断，三次重试一样长，于是一整晚的总结必然失败。
+# 180 秒给到 1.6 倍余量；真正的「吊死」由 LLM_TASK_TIMEOUT_S（600 秒，调度层）
+# 兜底，这里的超时只是不让单次调用无限等。
+LLM_TOTAL_TIMEOUT = int(os.environ.get("LIVENOTES_LLM_TOTAL_TIMEOUT", "180"))
 
 
 def _env_int(name: str, default: int) -> int:

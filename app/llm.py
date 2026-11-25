@@ -24,6 +24,7 @@ from typing import Any
 from . import logs, metrics
 from . import scheduler as _scheduler
 from . import settings
+from .config import LLM_TOTAL_TIMEOUT
 
 
 # 对外的异常基类。保留 RuntimeError 继承，老的 except 分支不用改。
@@ -121,7 +122,9 @@ def _post_chat(cfg: dict, payload: dict, timeout: int,
         except BaseException as e:          # 线程里抛什么都要带回主线程
             box["err"] = e
 
-    limit = float(total_timeout or cfg.get("total_timeout") or 75)
+    # 兜底值要和 config.LLM_TOTAL_TIMEOUT 的默认值一致，否则配置缺失时又退回
+    # 会把长总结砍断的旧值。这里直接引用常量，杜绝两处各写一个数。
+    limit = float(total_timeout or cfg.get("total_timeout") or LLM_TOTAL_TIMEOUT)
     th = threading.Thread(target=_run, name="llm-chat", daemon=True)
     th.start()
     th.join(limit)
