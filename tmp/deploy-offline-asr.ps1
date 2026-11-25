@@ -143,9 +143,8 @@ $r = Invoke-Remote $envCmd -Quiet
 Write-Host (($r.Text.TrimEnd() -split "`r?`n") -join "   ")
 if ($r.Code -ne 0) { throw "写 $Remote/livenotes.env 失败：$($r.Text.Trim())" }
 
-$r = Invoke-Remote "systemctl restart livenotes-offline-asr; sleep 2; systemctl is-active livenotes-offline-asr" -Quiet
-Write-Host "   offline-asr: $($r.Text.Trim())"
-
+# 重启顺序有讲究：离线补转写要调引擎的 /api/sessions/finalize，
+# 先把引擎换上新接口，再让补转写去用；反过来会先撞一轮 404。
 # 引擎重启会打断在录的场次：先过闸门，有场次在跑就拒绝。
 $g = Invoke-Remote "python3 /tmp/live-guard.py $ApiBase" -Quiet
 $guard = $g.Text.Trim()
@@ -160,10 +159,16 @@ if ($RestartEngine) {
   Write-Host "   engine: $($r.Text.Trim())"
   $r = Invoke-Remote "systemctl restart livenotes-feishu; sleep 2; systemctl is-active livenotes-feishu" -Quiet
   Write-Host "   feishu: $($r.Text.Trim())"
+  # 机器人也要跟着重启：它 import 了 app 下的新模块，旧进程里没有。
 } else {
   Write-Host "   没传 -RestartEngine，引擎还是旧进程（代码已就位，下次重启自动生效）。" -ForegroundColor Yellow
   Write-Host "   新接口 /api/sessions/finalize 要等引擎重启后才存在；下播后带 -RestartEngine 再跑一次。" -ForegroundColor Yellow
 }
+
+$r = Invoke-Remote "systemctl restart livenotes-offline-asr; sleep 2; systemctl is-active livenotes-offline-asr" -Quiet
+Write-Host "   offline-asr: $($r.Text.Trim())"
+$r = Invoke-Remote "journalctl -u livenotes-offline-asr -n 6 --no-pager | tail -6" -Quiet
+Write-Host $r.Text.TrimEnd()
 
 if ($CopySettings) {
   $Settings = Join-Path $env:LOCALAPPDATA "LiveNotes\data\settings.json"
