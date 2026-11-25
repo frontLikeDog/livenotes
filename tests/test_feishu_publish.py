@@ -536,6 +536,24 @@ def test_publish_routes(http_base, db, monkeypatch):
 
 # ---------------------------------------------------------------- 自动发布接线
 
+def test_capture_only_stop_requests_skeleton_publish(monkeypatch):
+    from app import live
+    sess = live.LiveSession.__new__(live.LiveSession)
+    sess.cancelled = False
+    sess.id = "S_CAP_STOP"
+    sess.capture_only = True
+    seen: list = []
+    monkeypatch.setattr(feishu_publish, "publish_async",
+                        lambda sid, **kw: seen.append(sid) or True)
+    sess._auto_finalize()
+    assert seen == ["S_CAP_STOP"]
+
+
+def test_publish_async_is_noop_when_disabled(monkeypatch):
+    monkeypatch.setattr(feishu_publish, "enabled", lambda *a, **k: False)
+    assert feishu_publish.publish_async("S_OFF") is False
+
+
 def test_auto_finalize_triggers_async_publish_only_when_auto(db, monkeypatch):
     from app import analysis, insights, notes, notify, tasks
     add_session(db, "S_AUTO")
