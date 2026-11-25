@@ -734,3 +734,43 @@ def test_route_link_passes_group_target(monkeypatch):
     assert fb._route("看看 https://x.example/live/1", "",
                      "ou", "oc_1", "group") == "W"
     assert calls and calls[0][2] == "oc_1" and calls[0][3] == "group"
+
+
+def test_cmd_doc_shows_publish_status_and_links(monkeypatch):
+    monkeypatch.setattr(fb, "_rooms", lambda: [_room()])
+    monkeypatch.setattr(fb, "_api", lambda path, *a, **k: {
+        "enabled": True,
+        "publish": {"status": "ready", "state": "ok",
+                    "doc_url": "https://x.example/doc", "record_url": "",
+                    "error": ""},
+        "state": "ready",
+    })
+    out = fb.cmd_doc("CH01", "ou")
+    assert "已总结" in out and "https://x.example/doc" in out
+
+
+def test_cmd_doc_explains_disabled_publish(monkeypatch):
+    monkeypatch.setattr(fb, "_rooms", lambda: [_room()])
+    monkeypatch.setattr(fb, "_api", lambda path, *a, **k: {
+        "enabled": False, "publish": {}, "state": "pending_summary"})
+    out = fb.cmd_doc("CH01", "ou")
+    assert "还没有发布文档" in out and "FEISHU_PUBLISH_ENABLED" in out
+
+
+def test_cmd_publish_forces_and_reports_failure(monkeypatch):
+    calls: list = []
+    monkeypatch.setattr(fb, "_rooms", lambda: [_room()])
+
+    def api(path, payload=None, timeout=6.0):
+        calls.append((path, payload or {}))
+        return {"ok": True, "state": "ok", "status": "ready",
+                "doc_url": "https://x.example/doc"}
+
+    monkeypatch.setattr(fb, "_api", api)
+    out = fb.cmd_publish("CH01", "ou")
+    assert "已发布" in out and "https://x.example/doc" in out
+    assert calls and calls[0][1]["force"] is True
+
+    monkeypatch.setattr(fb, "_api",
+                        lambda *a, **k: {"ok": False, "message": "飞书未配置：缺少凭证"})
+    assert "飞书未配置" in fb.cmd_publish("CH01", "ou")

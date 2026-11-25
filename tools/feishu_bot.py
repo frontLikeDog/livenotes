@@ -1116,6 +1116,79 @@ def cmd_replay(rest: str, open_id: str = "", chat_id: str = "",
             "再发 /妙记 %s <链接>。" % (_ch(room), link, _ch(room)))
 
 
+_PUBLISH_STATUS = {"pending_transcript": "待补转写", "pending_summary": "待总结",
+                   "ready": "已总结"}
+
+
+def cmd_doc(rest: str, open_id: str = "", chat_id: str = "",
+            chat_type: str = "p2p") -> str:
+    """看这一场发布后的飞书文档链接（只读，不需要模型）。"""
+    room, candidates, err = _pick_room_choice(_room_arg(rest) or str(rest or "").strip())
+    if not room:
+        if candidates:
+            return _room_candidates_text(candidates, "例：/文档 %s")
+        return err or "没找到这一路。"
+    sid = str(room.get("session_id") or "")
+    if not sid:
+        return "这一路还没有会话，等几秒再试。"
+    try:
+        data = _api("/api/publish?session_id=" + urllib.parse.quote(sid),
+                    timeout=15)
+    except Exception as e:
+        return "文档状态没取到：%s" % e
+    row = data.get("publish") or {}
+    status = _PUBLISH_STATUS.get(str(row.get("status") or data.get("state") or ""),
+                                 "")
+    if not row.get("doc_url"):
+        hint = "这场还没有发布文档。"
+        if not data.get("enabled"):
+            hint += "\n发布未开启（在 livenotes.env 设 FEISHU_PUBLISH_ENABLED=1）。"
+        else:
+            hint += "\n发 /发布 %s 生成。" % _ch(room)
+        return hint
+    lines = ["📄 %s %s" % (_ch(room), _md_safe(_room_name(room)))]
+    if status:
+        lines.append("状态：%s" % status)
+    if row.get("state") == "failed":
+        lines.append("发布失败：%s" % str(row.get("error") or "")[:100])
+    elif row.get("state") == "partial":
+        lines.append("场次表还没写进去：%s" % str(row.get("error") or "")[:100])
+    if row.get("record_url"):
+        lines.append("场次表：%s" % row["record_url"])
+    lines.append(str(row.get("doc_url")))
+    return "\n".join(lines)
+
+
+def cmd_publish(rest: str, open_id: str, chat_id: str = "",
+                chat_type: str = "p2p") -> str:
+    """手动发布/重试：补名或失败重试后，不必等下一场。"""
+    room, candidates, err = _pick_room_choice(_room_arg(rest) or str(rest or "").strip())
+    if not room:
+        if candidates:
+            return _room_candidates_text(candidates, "例：/发布 %s")
+        return err or "没找到这一路。"
+    sid = str(room.get("session_id") or "")
+    if not sid:
+        return "这一路还没有会话，等几秒再试。"
+    try:
+        out = _api("/api/publish", {"session_id": sid, "force": True},
+                   timeout=120)
+    except Exception as e:
+        return "发布没成功：%s" % e
+    if out.get("ok"):
+        head = "✅ 已发布" if out.get("state") == "ok" else "⚠️ 文档已发布"
+        lines = [head]
+        status = _PUBLISH_STATUS.get(str(out.get("status") or ""), "")
+        if status:
+            lines.append("状态：%s" % status)
+        if out.get("doc_url"):
+            lines.append(str(out["doc_url"]))
+        if out.get("message"):
+            lines.append(str(out["message"])[:200])
+        return "\n".join(lines)
+    return str(out.get("message") or out.get("error") or "发布没成功")
+
+
 def _send_card_target(card: dict, text: str, open_id: str, chat_id: str = "",
                       chat_type: str = "p2p") -> bool:
     ok = False
@@ -2215,6 +2288,8 @@ def _help_text() -> str:
             "/状态 [CH] 在听哪几路、有没有断流\n"
             "/近聊 [CH] [10分钟] 最近在聊什么（默认 10 分钟）\n"
             "/总结 [CH] 开播至今的阶段性总结（先确认再生成）\n"
+            "/文档 [CH] 这一场的飞书文档链接\n"
+            "/发布 [CH] 重新发布/重试（补名或失败后）\n"
             "/分享 [CH] [90秒] 把最近一段原声发到飞书（群聊需确认）\n"
             "/分享 CH01 1:30 2分钟 从第 1:30 起截 2 分钟\n"
             "/周报 [上周|7天|11-03~11-09] 汇总多场生成周报（私聊）\n"
@@ -2323,6 +2398,13 @@ def _route(t: str, low: str, open_id: str = "", chat_id: str = "",
     for verb in ("/总结", "/summary"):
         if low.startswith(verb):
             return cmd_summary(t[len(verb):].strip(" ：:"), open_id, chat_id, chat_type)
+    for verb in ("/文档", "/doc"):
+        if low.startswith(verb):
+            return cmd_doc(t[len(verb):].strip(" ：:"), open_id, chat_id, chat_type)
+    for verb in ("/发布", "/publish"):
+        if low.startswith(verb):
+            return cmd_publish(t[len(verb):].strip(" ：:"), open_id,
+                               chat_id, chat_type)
     for verb in ("/刷新", "/refresh"):
         if low.startswith(verb):
             return cmd_refresh(open_id, chat_id, chat_type)

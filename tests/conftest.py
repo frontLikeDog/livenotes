@@ -19,8 +19,8 @@ for p in (str(ROOT), str(TESTS)):
         sys.path.insert(0, p)
 
 from app import audio as audio_mod  # noqa: E402
-from app import (clips, delivery, glossary, live, logs, metrics, profile,  # noqa: E402
-                 report, settings, store)
+from app import (clips, delivery, feishu, feishu_publish, glossary, live,  # noqa: E402
+                 logs, metrics, profile, report, rooms, settings, store)
 
 
 @pytest.fixture(autouse=True)
@@ -46,6 +46,13 @@ def isolated_paths(tmp_path, monkeypatch):
     monkeypatch.setattr(glossary, "PATH", data / "glossary.json")
     monkeypatch.setattr(profile, "PATH", data / "profile.json")
     monkeypatch.setattr(settings, "_PATH", data / "settings.json")
+    # 飞书凭证/房间文件也隔离：发布与房间查询不能读到真实配置。
+    monkeypatch.setattr(feishu, "CFG_PATH", data / "feishu.json")
+    monkeypatch.setattr(rooms, "PATH", data / "rooms.json")
+    monkeypatch.delenv("FEISHU_PUBLISH_ENABLED", raising=False)
+    feishu_publish.reset_bot()
+    feishu_publish._INFLIGHT.clear()
+    feishu_publish._TABLES.clear()
 
     metrics.METRICS.reset()
     glossary._cache.update({"key": None, "entries": []})

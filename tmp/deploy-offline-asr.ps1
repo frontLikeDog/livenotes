@@ -16,7 +16,9 @@ if ($LASTEXITCODE -ne 0) { throw "SSH 不通：先在华为云控制台解封本
 Write-Host "== 2/5 上传代码 =="
 $AppFiles = @(
   "app\config.py", "app\store.py", "app\live.py", "app\livebrief.py",
-  "app\server.py", "app\offline_asr.py"
+  "app\server.py", "app\offline_asr.py",
+  # 发布与收尾：offline_asr 补完后调 /api/sessions/finalize，发布走 feishu_publish
+  "app\tasks.py", "app\export.py", "app\feishu.py", "app\feishu_publish.py"
 ) | ForEach-Object { Join-Path $Root $_ }
 & scp @SshArgs $AppFiles "${Server}:/opt/livenotes/app/"
 if ($LASTEXITCODE -ne 0) { throw "上传 app 失败" }
@@ -34,6 +36,10 @@ if ($LASTEXITCODE -ne 0) { throw "模型下载失败" }
 Write-Host "== 4/5 安装 systemd 服务 =="
 & scp @SshArgs (Join-Path $PSScriptRoot "livenotes-offline-asr.service") "${Server}:/etc/systemd/system/livenotes-offline-asr.service"
 & ssh @SshArgs $Server "systemctl daemon-reload && systemctl enable --now livenotes-offline-asr && systemctl restart livenotes-feishu"
+if (-not $RestartEngine) {
+  Write-Host "提醒：补完自动收尾用的 /api/sessions/finalize 是新增接口，引擎没重启前不存在。"
+  Write-Host "      低峰时用 -RestartEngine 再跑一次（会中断在录场次，WAV 保留）。"
+}
 
 if ($CopySettings) {
   $Settings = Join-Path $env:LOCALAPPDATA "LiveNotes\data\settings.json"
@@ -51,4 +57,5 @@ if ($RestartEngine) {
 
 Write-Host "== 5/5 状态 =="
 & ssh @SshArgs $Server "systemctl --no-pager --full status livenotes-offline-asr | head -20; echo ---; free -m; echo ---; journalctl -u livenotes-offline-asr -n 20 --no-pager"
-Write-Host "完成。看飞书 /状态 或发 /总结 CH01。"
+Write-Host "完成。看飞书 /状态，或发 /总结 CH01、/文档 CH01。"
+Write-Host "发布默认关；要开就在 livenotes.env 设 FEISHU_PUBLISH_ENABLED=1（另需 docx/bitable 权限）。"

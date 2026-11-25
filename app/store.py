@@ -75,6 +75,13 @@ CREATE TABLE IF NOT EXISTS offline_asr (
     status        TEXT NOT NULL DEFAULT '',   -- running | done | error
     error         TEXT NOT NULL DEFAULT '',
     n_utterances  INTEGER NOT NULL DEFAULT 0,
+    -- 补完字之后自动触发一次收尾（总结 + 发布）。finalize_state 是这段
+    -- 跨进程链路的耐久状态：''（未触发）| queued | done | failed。
+    -- 只记状态、不存结果；总结本身仍由引擎的调度器跑。
+    finalize_state TEXT NOT NULL DEFAULT '',
+    finalize_job   TEXT NOT NULL DEFAULT '',
+    finalize_error TEXT NOT NULL DEFAULT '',
+    finalize_at    TEXT NOT NULL DEFAULT '',
     updated_at    TEXT
 );
 
@@ -334,6 +341,28 @@ CREATE TABLE IF NOT EXISTS follows (
     auto_record      INTEGER NOT NULL DEFAULT 0,
     created_at       TEXT NOT NULL,
     UNIQUE(platform, room_key)
+);
+
+-- 飞书发布台账：SQLite 是唯一真相，飞书文档/多维表格只是它的投影。
+-- 只记录「哪一场对应哪篇文档/哪一行」，不把飞书内容同步回来（补名除外）。
+-- version = hash(标题 + 正文 + 署名)；相同就不重复写文档。
+CREATE TABLE IF NOT EXISTS feishu_publish (
+    session_id   TEXT NOT NULL,
+    kind         TEXT NOT NULL DEFAULT 'session',  -- session = 场次文档
+    state        TEXT NOT NULL DEFAULT '',         -- ok | partial | failed | skipped
+    status       TEXT NOT NULL DEFAULT '',         -- pending_transcript | pending_summary | ready
+    version      TEXT NOT NULL DEFAULT '',
+    title        TEXT NOT NULL DEFAULT '',
+    doc_token    TEXT NOT NULL DEFAULT '',
+    doc_url      TEXT NOT NULL DEFAULT '',
+    record_id    TEXT NOT NULL DEFAULT '',
+    base_url     TEXT NOT NULL DEFAULT '',
+    card_sent    INTEGER NOT NULL DEFAULT 0,
+    attempts     INTEGER NOT NULL DEFAULT 0,
+    error        TEXT NOT NULL DEFAULT '',
+    latency_ms   INTEGER NOT NULL DEFAULT 0,
+    updated_at   TEXT,
+    PRIMARY KEY (session_id, kind)
 );
 
 -- 一篇笔记的生成状态。没有行时按「有总结→ready / 无总结→empty」推导，
@@ -859,7 +888,11 @@ def finish_session(conn: sqlite3.Connection, sid: str, duration_s: float,
 
 
 def ensure_offline_asr(conn: sqlite3.Connection) -> None:
-    """离线服务可能先于引擎重启启动；自己保证进度表存在。"""
+    """离线服务可能先于引擎重启启动；自己保证进度表存在。
+
+    表是早于「补完自动收尾」建的：老库要补 finalize_* 四列，否则进度写入
+    会一直报 no column。补列后旧行为不变（finalize_state='' 表示没触发过）。
+    """
     conn.execute(
         "CREATE TABLE IF NOT EXISTS offline_asr ("
         " session_id TEXT PRIMARY KEY,"
@@ -867,7 +900,16 @@ def ensure_offline_asr(conn: sqlite3.Connection) -> None:
         " status TEXT NOT NULL DEFAULT '',"
         " error TEXT NOT NULL DEFAULT '',"
         " n_utterances INTEGER NOT NULL DEFAULT 0,"
+        " finalize_state TEXT NOT NULL DEFAULT '',"
+        " finalize_job TEXT NOT NULL DEFAULT '',"
+        " finalize_error TEXT NOT NULL DEFAULT '',"
+        " finalize_at TEXT NOT NULL DEFAULT '',"
         " updated_at TEXT)")
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(offline_asr)")}
+    for name in ("finalize_state", "finalize_job", "finalize_error", "finalize_at"):
+        if name not in cols:
+            conn.execute("ALTER TABLE offline_asr ADD COLUMN %s TEXT NOT NULL DEFAULT ''"
+                         % name)
     conn.commit()
 
 
@@ -892,11 +934,101 @@ def set_offline_asr(conn: sqlite3.Connection, sid: str, *,
     }
     conn.execute(
         "INSERT OR REPLACE INTO offline_asr"
-        "(session_id,processed_s,status,error,n_utterances,updated_at) "
-        "VALUES (?,?,?,?,?,?)",
+        "(session_id,processed_s,status,error,n_utterances,"
+        " finalize_state,finalize_job,finalize_error,finalize_at,updated_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?)",
         (sid, float(vals["processed_s"]), vals["status"], vals["error"],
-         int(vals["n_utterances"]), now()))
+         int(vals["n_utterances"]),
+         str(old.get("finalize_state") or ""), str(old.get("finalize_job") or ""),
+         str(old.get("finalize_error") or ""), str(old.get("finalize_at") or ""),
+         now()))
     conn.commit()
+
+
+def set_offline_finalize(conn: sqlite3.Connection, sid: str, *,
+                         state: str, job: str | None = None,
+                         error: str | None = None) -> None:
+    """记录「补完字后触发的收尾」的状态，不动转写进度。"""
+    ensure_offline_asr(conn)
+    old = get_offline_asr(conn, sid) or {}
+    conn.execute(
+        "UPDATE offline_asr SET finalize_state=?, finalize_job=?, finalize_error=?, "
+        "finalize_at=?, updated_at=? WHERE session_id=?",
+        (str(state or ""),
+         str(old.get("finalize_job") or "") if job is None else str(job),
+         str(old.get("finalize_error") or "") if error is None else str(error),
+         now(), now(), sid))
+    conn.commit()
+
+
+def list_offline_finalize(conn: sqlite3.Connection, *,
+                          states: tuple[str, ...] = ("queued",),
+                          limit: int = 10) -> list[dict]:
+    """等待/失败待重试的收尾触发。只返回仍然存在的仅采集场次。"""
+    states = tuple(str(s) for s in states if s)
+    if not states:
+        return []
+    sql = ("SELECT o.* FROM offline_asr o JOIN sessions s ON s.id=o.session_id "
+           "WHERE s.deleted_at IS NULL AND s.capture_only=1 "
+           "AND o.finalize_state IN (" + ",".join("?" * len(states)) + ") "
+           "ORDER BY o.finalize_at ASC, o.session_id LIMIT ?")
+    return [dict(r) for r in conn.execute(sql, list(states) + [int(limit)])]
+
+
+_PUBLISH_COLS = ("state", "status", "version", "title", "doc_token", "doc_url",
+                 "record_id", "base_url", "card_sent", "attempts", "error",
+                 "latency_ms")
+
+
+def ensure_feishu_publish(conn: sqlite3.Connection) -> None:
+    """机器人可能先于引擎重启：读台账前自己保证表在。"""
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS feishu_publish ("
+        " session_id TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'session',"
+        " state TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT '',"
+        " version TEXT NOT NULL DEFAULT '', title TEXT NOT NULL DEFAULT '',"
+        " doc_token TEXT NOT NULL DEFAULT '', doc_url TEXT NOT NULL DEFAULT '',"
+        " record_id TEXT NOT NULL DEFAULT '', base_url TEXT NOT NULL DEFAULT '',"
+        " card_sent INTEGER NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0,"
+        " error TEXT NOT NULL DEFAULT '', latency_ms INTEGER NOT NULL DEFAULT 0,"
+        " updated_at TEXT, PRIMARY KEY (session_id, kind))")
+    conn.commit()
+
+
+def get_publish(conn: sqlite3.Connection, sid: str,
+                kind: str = "session") -> dict | None:
+    sql = "SELECT * FROM feishu_publish WHERE session_id=? AND kind=?"
+    try:
+        row = conn.execute(sql, (sid, kind)).fetchone()
+    except sqlite3.OperationalError:
+        ensure_feishu_publish(conn)
+        row = conn.execute(sql, (sid, kind)).fetchone()
+    return rowdict(row)
+
+
+def set_publish(conn: sqlite3.Connection, sid: str, kind: str = "session",
+                **fields: Any) -> dict:
+    """写发布台账。只更新传入的字段，没传的保持原值。"""
+    old = get_publish(conn, sid, kind) or {}
+    vals: dict[str, Any] = {}
+    for k in _PUBLISH_COLS:
+        vals[k] = old.get(k, "" if k not in ("card_sent", "attempts", "latency_ms")
+                          else 0)
+        if k in fields:
+            vals[k] = fields[k]
+    conn.execute(
+        "INSERT OR REPLACE INTO feishu_publish"
+        "(session_id,kind,state,status,version,title,doc_token,doc_url,record_id,"
+        " base_url,card_sent,attempts,error,latency_ms,updated_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (sid, kind, str(vals["state"] or ""), str(vals["status"] or ""),
+         str(vals["version"] or ""), str(vals["title"] or ""),
+         str(vals["doc_token"] or ""), str(vals["doc_url"] or ""),
+         str(vals["record_id"] or ""), str(vals["base_url"] or ""),
+         int(vals["card_sent"] or 0), int(vals["attempts"] or 0),
+         str(vals["error"] or ""), int(vals["latency_ms"] or 0), now()))
+    conn.commit()
+    return get_publish(conn, sid, kind) or {}
 
 
 _AUDIO_META_COLS = ("audio_path", "audio_format", "audio_original_path",

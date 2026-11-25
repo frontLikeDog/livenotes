@@ -38,6 +38,21 @@ OFFLINE_ASR_MAX_FEED_S = float(os.environ.get(
 # 关掉声纹可以再省一份 CAM++ 和逐句 embedding；代价是只有「说话人」一个标签。
 OFFLINE_ASR_SPEAKERS = os.environ.get(
     "LIVENOTES_OFFLINE_ASR_SPEAKERS", "1").lower() in ("1", "true", "yes", "on")
+# 补完字后自动触发一次收尾（总结 → 发布）。关掉时仍可手动调用
+# POST /api/sessions/finalize；失败按 RETRY 秒退避重试，避免模型/飞书临时故障时
+# 永远停在「转写完成、没有总结」。
+OFFLINE_ASR_FINALIZE = os.environ.get(
+    "LIVENOTES_OFFLINE_ASR_FINALIZE", "1").lower() in ("1", "true", "yes", "on")
+OFFLINE_ASR_FINALIZE_RETRY_S = float(os.environ.get(
+    "LIVENOTES_OFFLINE_ASR_FINALIZE_RETRY", "600"))
+
+# 飞书原生阅读面（docs/47）：总结完成后把场次发布成一篇云文档 + 多维表格
+# 里的一行。默认关 —— 没配飞书凭证的机器不应该因为发布失败而受影响。
+# 凭证和开关都可由 data/feishu.json 覆盖（环境变量优先）。
+FEISHU_PUBLISH_ENABLED = os.environ.get(
+    "FEISHU_PUBLISH_ENABLED", "0").lower() in ("1", "true", "yes", "on")
+
+
 def _lan_ip() -> str:
     """取本机局域网 IP。手机点卡片链接时不能用 127.0.0.1，这里自动填对。
 

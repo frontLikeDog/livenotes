@@ -20,7 +20,7 @@ from collections import OrderedDict
 from pathlib import Path
 
 from . import logs
-from .config import DATA_DIR
+from .config import DATA_DIR, FEISHU_PUBLISH_ENABLED
 
 CFG_PATH = DATA_DIR / "feishu.json"
 _CFG_LOCK = threading.Lock()
@@ -56,6 +56,22 @@ def load_config() -> dict:
     audio_folder = (os.environ.get("FEISHU_AUDIO_FOLDER_TOKEN")
                     or str(raw.get("audio_folder_token") or "")
                     or doc_folder)
+    # 发布开关：环境变量 > feishu.json > app/config.py 的全局默认（默认关）。
+    env_pub = os.environ.get("FEISHU_PUBLISH_ENABLED")
+    if env_pub is None:
+        publish_enabled = bool(raw.get("publish_enabled", FEISHU_PUBLISH_ENABLED))
+    else:
+        publish_enabled = env_pub.strip().lower() in ("1", "true", "yes", "on")
+    publish_folder = (os.environ.get("FEISHU_PUBLISH_FOLDER_TOKEN")
+                      or str(raw.get("publish_folder_token") or "")
+                      or doc_folder)
+    publish_owner = (os.environ.get("FEISHU_PUBLISH_OWNER")
+                     or str(raw.get("publish_owner_open_id") or "")
+                     or owner)
+    base_app = (os.environ.get("FEISHU_BASE_APP_TOKEN")
+                or str(raw.get("base_app_token") or ""))
+    base_table = (os.environ.get("FEISHU_BASE_TABLE_ID")
+                  or str(raw.get("base_table_id") or ""))
     return {
         "app_id": os.environ.get("FEISHU_APP_ID") or str(raw.get("app_id") or ""),
         "app_secret": os.environ.get("FEISHU_APP_SECRET") or str(raw.get("app_secret") or ""),
@@ -72,6 +88,15 @@ def load_config() -> dict:
         "audio_folder_token": audio_folder,
         "drive_url_base": (os.environ.get("FEISHU_DRIVE_URL_BASE")
                            or str(raw.get("drive_url_base") or "")),
+        # 发布：一篇场次文档 + 多维表格「场次」表里的一行。base_app_token 为空
+        # 表示只发文档、不建表；base_table_id 为空表示表由首次发布自动建。
+        "publish_enabled": publish_enabled,
+        "publish_folder_token": publish_folder,
+        "publish_owner": publish_owner,
+        "base_app_token": base_app,
+        "base_table_id": base_table,
+        "base_url_base": (os.environ.get("FEISHU_BASE_URL_BASE")
+                          or str(raw.get("base_url_base") or "")),
     }
 
 
@@ -345,6 +370,139 @@ class Bot:
                 out["share_error"] = grant.get("error") or ""
         return out
 
+    def _convert_md(self, markdown: str) -> tuple[list, list, dict | None]:
+        """Markdown → 文档块。返回 (blocks, first_level_ids, 失败信息)。"""
+        from lark_oapi.api.docx.v1 import (
+            ConvertDocumentRequest, ConvertDocumentRequestBody)
+        conv = (ConvertDocumentRequestBody.builder()
+                .content_type("markdown").content(str(markdown)).build())
+        resp = self.client.docx.v1.document.convert(
+            ConvertDocumentRequest.builder().request_body(conv).build())
+        if not resp.success():
+            return [], [], self._doc_fail("Markdown 转换失败", resp)
+        data = resp.data
+        blocks = list(getattr(data, "blocks", None) or [])
+        first = list(getattr(data, "first_level_block_ids", None) or [])
+        if not blocks or not first:
+            return [], [], self._doc_fail("Markdown 转换没返回内容", error="empty")
+        return blocks, first, None
+
+    def _write_docx_body(self, doc_id: str, blocks: list, first: list) -> dict:
+        """把转换好的块写进文档根节点（index=0）。"""
+        from lark_oapi.api.docx.v1 import (
+            CreateDocumentBlockDescendantRequest,
+            CreateDocumentBlockDescendantRequestBody)
+        desc = (CreateDocumentBlockDescendantRequestBody.builder()
+                .children_id(first).index(0).descendants(blocks).build())
+        added = self.client.docx.v1.document_block_descendant.create(
+            CreateDocumentBlockDescendantRequest.builder()
+            .document_id(doc_id).block_id(doc_id)
+            .request_body(desc).build())
+        if not added.success():
+            return self._doc_fail("写入正文失败", added)
+        return {"ok": True, "blocks": len(blocks)}
+
+    def _list_docx_children(self, doc_id: str) -> tuple[list[str], dict | None]:
+        from lark_oapi.api.docx.v1 import GetDocumentBlockChildrenRequest
+        ids: list[str] = []
+        token = ""
+        for _ in range(20):          # 防御性上限：正常文档远小于 20 页 × 500 块
+            builder = (GetDocumentBlockChildrenRequest.builder()
+                       .document_id(doc_id).block_id(doc_id).page_size(500))
+            if token:
+                builder = builder.page_token(token)
+            resp = self.client.docx.v1.document_block_children.get(builder.build())
+            if not resp.success():
+                return [], self._doc_fail("读取文档结构失败", resp)
+            data = resp.data
+            for item in (getattr(data, "items", None) or []):
+                bid = str(getattr(item, "block_id", "") or "")
+                if bid:
+                    ids.append(bid)
+            if not getattr(data, "has_more", False):
+                break
+            token = str(getattr(data, "page_token", "") or "")
+            if not token:
+                break
+        return ids, None
+
+    def _clear_docx_children(self, doc_id: str) -> dict:
+        """清空文档正文。返回 {"ok": True, "removed": n} 或失败信息。
+
+        飞书 batch_delete 的索引按「子块下标」从 0 数起；不同租户/SDK 版本
+        对 page block 是否算第 0 个有差异。第一次失败且子块数量没变时，
+        再用 1 起数重试一次——重试前重新读取，避免把已经删掉的内容再删一遍。
+        """
+        from lark_oapi.api.docx.v1 import (
+            BatchDeleteDocumentBlockChildrenRequest,
+            BatchDeleteDocumentBlockChildrenRequestBody)
+        ids, err = self._list_docx_children(doc_id)
+        if err:
+            return err
+        n = len(ids)
+        if not n:
+            return {"ok": True, "removed": 0}
+
+        def _delete(start: int, end: int):
+            body = (BatchDeleteDocumentBlockChildrenRequestBody.builder()
+                    .start_index(start).end_index(end).build())
+            return self.client.docx.v1.document_block_children.batch_delete(
+                BatchDeleteDocumentBlockChildrenRequest.builder()
+                .document_id(doc_id).block_id(doc_id)
+                .request_body(body).build())
+
+        resp = _delete(0, n)
+        if not resp.success():
+            ids2, err2 = self._list_docx_children(doc_id)
+            if err2:
+                return err2
+            if len(ids2) == n:
+                resp = _delete(1, n + 1)
+                if not resp.success():
+                    return self._doc_fail("清空文档正文失败", resp)
+            else:
+                # 第一次其实删掉了一部分：再删剩下的，索引仍从 0 数。
+                rest = len(ids2)
+                if rest:
+                    resp = _delete(0, rest)
+                    if not resp.success():
+                        return self._doc_fail("清空文档正文失败", resp)
+        return {"ok": True, "removed": n}
+
+    def rewrite_docx(self, document_id: str, markdown: str) -> dict:
+        """原地重写一篇已有文档的正文（发布幂等：不新建第二篇）。
+
+        先清空根节点下的子块，再按新 Markdown 写入。文档创建后写到一半失败
+        也走这里重试：document_id 已经入库，重试不会留下第二篇。
+        """
+        if not str(markdown or "").strip():
+            return {"ok": False, "error": "内容为空",
+                    "document_id": document_id, "url": self._doc_url(document_id)}
+        try:
+            blocks, first, err = self._convert_md(markdown)
+            if err:
+                err.update(document_id=document_id, url=self._doc_url(document_id))
+                return err
+            cleared = self._clear_docx_children(document_id)
+            if not cleared.get("ok"):
+                cleared.update(document_id=document_id,
+                               url=self._doc_url(document_id))
+                return cleared
+            out = self._write_docx_body(document_id, blocks, first)
+            if not out.get("ok"):
+                out.update(document_id=document_id, url=self._doc_url(document_id))
+                return out
+            logs.log_event("feishu.docx_rewritten", document_id=document_id,
+                           blocks=len(blocks), removed=cleared.get("removed"))
+            return {"ok": True, "document_id": document_id,
+                    "url": self._doc_url(document_id), "blocks": len(blocks),
+                    "removed": int(cleared.get("removed") or 0)}
+        except Exception as e:
+            traceback.print_exc()
+            out = self._doc_fail("云文档更新异常", error=str(e))
+            out.update(document_id=document_id, url=self._doc_url(document_id))
+            return out
+
     def create_docx(self, title: str, markdown: str,
                     share_with: str = "") -> dict:
         """把 Markdown 建成一篇飞书云文档，可选授权给发起人。
@@ -360,22 +518,11 @@ class Bot:
             return {"ok": False, "error": "内容为空"}
         try:
             from lark_oapi.api.docx.v1 import (
-                ConvertDocumentRequest, ConvertDocumentRequestBody,
-                CreateDocumentBlockDescendantRequest,
-                CreateDocumentBlockDescendantRequestBody,
                 CreateDocumentRequest, CreateDocumentRequestBody)
 
-            conv = (ConvertDocumentRequestBody.builder()
-                    .content_type("markdown").content(str(markdown)).build())
-            resp = self.client.docx.v1.document.convert(
-                ConvertDocumentRequest.builder().request_body(conv).build())
-            if not resp.success():
-                return self._doc_fail("Markdown 转换失败", resp)
-            data = resp.data
-            blocks = list(getattr(data, "blocks", None) or [])
-            first = list(getattr(data, "first_level_block_ids", None) or [])
-            if not blocks or not first:
-                return self._doc_fail("Markdown 转换没返回内容", error="empty")
+            blocks, first, err = self._convert_md(markdown)
+            if err:
+                return err
 
             folder = (self.cfg.get("doc_folder_token") or "").strip()
             body_builder = CreateDocumentRequestBody.builder().title(str(title))
@@ -390,16 +537,11 @@ class Bot:
             if not doc_id:
                 return self._doc_fail("创建文档没返回 document_id")
 
-            desc = (CreateDocumentBlockDescendantRequestBody.builder()
-                    .children_id(first).index(0).descendants(blocks).build())
-            added = self.client.docx.v1.document_block_descendant.create(
-                CreateDocumentBlockDescendantRequest.builder()
-                .document_id(doc_id).block_id(doc_id)
-                .request_body(desc).build())
-            if not added.success():
-                # 文档已经建出来但正文没写进去：把链接带回去，至少不是"什么都没留下"。
-                # 也要授权，否则用户点开这个空文档同样会撞无权限。
-                out = self._doc_fail("写入正文失败", added)
+            out = self._write_docx_body(doc_id, blocks, first)
+            if not out.get("ok"):
+                # 文档已经建出来但正文没写进去：把 document_id/链接带回去，
+                # 重试时原地重写，不会再生出第二篇空文档。
+                out["document_id"] = doc_id
                 out["url"] = self._doc_url(doc_id)
                 return self._share_doc(out, doc_id, share_with)
             logs.log_event("feishu.docx_created", document_id=doc_id,

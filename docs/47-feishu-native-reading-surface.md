@@ -12,8 +12,8 @@
 | 还要不要做 Cloudflare 公网网页？ | **不作为默认方案。** 它把「阅读」误当成「再做一个桌面端网页」；如果读者在飞书里，云文档、多维表格、卡片已经覆盖阅读、查找、转发、评论、权限。只有「非飞书外部客户」才需要单独立项。 |
 | 飞书端到底是什么？ | **阅读面 + 检索面 + 转发面**，不是桌面端的缩小版。桌面负责整理和校对，飞书负责「我在外面看一眼、找一句话、转给一个人」。 |
 | 最小闭环是什么？ | **一场 = 一篇云文档 + 一行多维表格；一人 = 一篇档案 + 一行人物；一周 = 一篇周报；一个动作 = 一条任务。** |
-| 最大的前提是什么？ | 云端场次必须先有转写和总结。现在 `capture_only` 不产生总结，离线补转写也不触发 finalize（[docs/46](46-three-surfaces-governance-review.md) P1）；**不接通这条链，文档就是空壳。** |
-| 先做什么？ | 先修 `offline_asr → finalize`，再做发布器（场次文档 + 场次表 + 收尾卡）。不要先做搜索页、问答页、公网网页。 |
+| 最大的前提是什么？ | 云端场次必须先有转写和总结。`capture_only` 不产生总结，离线补转写也不触发 finalize（[docs/46](46-three-surfaces-governance-review.md) P1）；**不接通这条链，文档就是空壳。**（2026-11-26 已接通） |
+| 先做什么？ | 先修 `offline_asr → finalize`，再做发布器（场次文档 + 场次表 + 收尾卡）。不要先做搜索页、问答页、公网网页。（P0 已落地，见 §7） |
 
 ---
 
@@ -299,6 +299,12 @@ captured ──→ transcribed ──→ summarized ──→ published
 7. 发收尾卡片：`看文档` / `补名` / `听 3 段` / `问这场`。
 8. 写 `feishu_publish`：`state=ok`、`version=hash`、`doc_token`、`record_id`、`latency_ms`。
 
+**实现落点（2026-11-26）**：
+
+- `tasks._run_summary` 只在「整场口径」的总结后自动发布；带筛选条件的总结不发布，避免筛选稿冒充整场文档。
+- 仅采集下播由 `live._auto_finalize` 先发「待补转写」骨架；离线补完字后调 `POST /api/sessions/finalize`（`recluster=False`，重聚类已由补转写做过），走同一套收尾和发布。
+- 正文更新是「列根块 → `batch_delete` → 从 0 写回」。这会丢评论锚点，所以只有版本变化、补名或显式 `/发布` 才重写；普通重试版本没变就跳过。
+
 **幂等**：
 
 - `feishu_publish` 唯一键 `(session_id, kind)`；`version` 是 Markdown + 标题 + 人名的 hash。版本没变，重试直接跳过。
@@ -373,15 +379,16 @@ SQLite（唯一真相源）
 5. **不自动建群**：把机器人拉进用户已有的房间群即可；自动建群是打扰。
 6. **应用建的 Base 也要授权**：和文档一样，应用创建的 Base 默认只有应用能看；用 `permission_member`、`type=bitable` 授权给 owner/群，否则用户点开就是无权限。
 
-**配置新增**（建议）：
+**配置新增**（已实现的名字）：
 
 | 配置 | 用途 |
 |---|---|
 | `FEISHU_PUBLISH_ENABLED=1` | 总开关；默认关，桌面用户可不开 |
-| `FEISHU_PUBLISH_FOLDER_TOKEN` | 场次/人物文档的云空间文件夹 |
-| `FEISHU_BASE_FOLDER_TOKEN` | 多维表格存放文件夹 |
-| `FEISHU_BASE_APP_TOKEN` | 可选：预建 Base，避免每次重建 |
-| `FEISHU_PUBLISH_OWNER` | 默认授权给 owner；群场景另配 |
+| `FEISHU_PUBLISH_FOLDER_TOKEN` | 场次/人物文档的云空间文件夹；不填沿用 `doc_folder_token` |
+| `FEISHU_PUBLISH_OWNER` | 默认授权给 owner；不填用机器人配置里的 owner |
+| `FEISHU_BASE_APP_TOKEN` | 可选：预建 Base；不填时只建文档，不建场次表 |
+| `FEISHU_BASE_TABLE_ID` | 可选：已有「场次」表；不填则在 Base 里按需自动建 |
+| `FEISHU_BASE_URL_BASE` | 可选：Base 链接前缀（私有化/自定义域名） |
 
 **可观测**：
 
@@ -410,7 +417,17 @@ SQLite（唯一真相源）
 - 固定 fixture 场次 → 生成 1 篇文档 + 1 行表格；重复发布不新增第二篇/第二行。
 - 飞书接口失败 → 采集/总结不受影响；`/发布` 可重试；错误在日志和卡片里可见。
 - 仅采集场次 → 发布「待补转写」骨架，正文没有摘要、没有编造原话。
-- 现有 823 个测试仍通过；新增测试覆盖发布器与补名回调。
+- 现有测试仍通过（实现时全量 843）；新增测试覆盖发布器与补名回调。
+
+**实现状态（2026-11-26）：P0 已落地，全量 843 passed。** 落地时和计划有出入的地方，以代码为准：
+
+- **接通链路**：离线补转写 `done` 后调 `POST /api/sessions/finalize`，由引擎调度器跑总结、`notes.index_session`、`claims.rebuild_session`、`insights.after_finalize`、`notify.note_ready`，再发布。触发状态存 `offline_asr.finalize_state`，失败按窗口重试；离线进程仍不加载模型和飞书凭证（[docs/45](45-offline-asr.md)）。
+- **发布器**：`app/feishu_publish.py` + `feishu_publish` 表。版本 hash（标题+Markdown+人名+模板）没变直接跳过；文档正文失败保留 `document_id`，下次原地重写；表格失败记 `partial`，重试只补表、不重写正文。
+- **文档**：`export.to_publish_md()` 生成手机阅读稿（一句话、观点地图、值得回听、人物、相关场次、录音）。仅采集下播先发「待补转写」骨架，补完字后同一篇原地升级；最新总结若是筛选口径，拒绝发布（避免筛选稿冒充整场）。
+- **场次表**：配了 `FEISHU_BASE_APP_TOKEN` 才写；没有 `FEISHU_BASE_TABLE_ID` 时自动建「场次」表（文本/数字/日期/链接字段），按 `session_id` upsert。文档权限授权给 `FEISHU_PUBLISH_OWNER`。
+- **卡片与命令**：完成卡片只在首次「有完整总结」的发布时发，骨架和重试不重复刷屏；`/发布 [CH]` 手动重发，`/文档 [CH]` 看链接和状态。
+- **失败隔离**：发布失败只写 `feishu_publish.state` 和日志，不影响采集/总结；`FEISHU_PUBLISH_ENABLED` 默认关。
+- **验收**：`tests/test_feishu_publish.py` 覆盖幂等/失败降级/骨架升级/筛选稿拒绝；`tests/test_cloud_chain.py` 用真实 PCM/WAV + 真实 HTTP + 真实调度器（模型与飞书换替身）跑通「仅采集 → 补转写 → 自动收尾 → 发布 → 飞书 `/总结`」。
 
 ### P1（8~12 人日）：人物 + 观点 + 补名 + 搜/问
 
@@ -483,5 +500,7 @@ SQLite（唯一真相源）
 - 检索/问答：`app/server.py:1514`（`/api/search`）、`:1216`（`/api/qa/answer`）
 - 周报：`app/report.py:963`（`build`）、`app/weekly.py:64`（调度）
 - 收尾链路：`app/live.py:729`、`:753`（finalize）；`app/tasks.py:92`（索引/观点/通知）
-- 云端仅采集：`app/config.py:25`（`CAPTURE_ONLY`）；`app/offline_asr.py:443`（补转写收尾，尚未触发 finalize）
+- 云端仅采集：`app/config.py:25`（`CAPTURE_ONLY`）；`app/offline_asr.py`（补转写收尾，2026-11-26 起触发 finalize）
+- 发布实现：`app/feishu_publish.py`、`app/export.py`（`to_publish_md`）、`app/store.py`（`feishu_publish` 表）、`app/tasks.py`（`_publish_quiet`）、`app/server.py`（`/api/publish`、`/api/sessions/finalize`）、`tools/feishu_bot.py`（`/发布` `/文档`）
+- 验收：`tests/test_feishu_publish.py`、`tests/test_cloud_chain.py`
 - 官方限制：多维表格 `batch_create` 单次 ≤1000 条、单表 ≤2 万条、50 次/秒（飞书开放平台文档，2026-11 核对）

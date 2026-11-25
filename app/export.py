@@ -195,6 +195,277 @@ def to_note_md(conn: sqlite3.Connection, sid: str) -> str:
     return "\n".join(out)
 
 
+# ---------------------------------------------------------------- 飞书发布
+#
+# 发布稿是「手机单端」能读的那一版：只留结论、可引用的原话和回听入口，
+# 逐字稿留在桌面端。它仍然只做聚合，不新增任何模型调用（docs/47 §4）。
+
+PUBLISH_TEMPLATE_VERSION = "1"
+
+
+def _whole_filter(raw) -> bool:
+    """这份总结是不是「整场口径」。老数据没有 filter_json 时按整场处理。"""
+    import json
+
+    if not raw:
+        return True
+    try:
+        f = json.loads(raw) if isinstance(raw, str) else dict(raw)
+    except (TypeError, ValueError):
+        return True
+    if not isinstance(f, dict):
+        return True
+    if f.get("categories") or f.get("speakers"):
+        return False
+    if str(f.get("q") or "").strip():
+        return False
+    return all(f.get(k) is None for k in ("t_from", "t_to", "min_conf"))
+
+
+def _clip(text: str, limit: int = 90) -> str:
+    s = " ".join(str(text or "").split())
+    return s if len(s) <= limit else s[:limit] + "…"
+
+
+def _at(seconds) -> str:
+    try:
+        return fmt_ts(float(seconds or 0), with_hours=False)
+    except (TypeError, ValueError):
+        return "00:00"
+
+
+def _publish_status(n_utterances: int, capture_only: bool,
+                    has_summary: bool) -> str:
+    if not n_utterances and capture_only:
+        return "pending_transcript"
+    if not has_summary:
+        return "pending_summary"
+    return "ready"
+
+
+_PUBLISH_STATUS_TEXT = {"pending_transcript": "待补转写",
+                        "pending_summary": "待总结", "ready": "已总结"}
+
+
+def to_publish_md(conn: sqlite3.Connection, sid: str) -> dict:
+    """生成发布到飞书的 Markdown 与场次表字段。失败/跳过都返回 dict，不抛。
+
+    返回：
+        ok / skipped / reason / message
+        title / markdown / names / state（pending_transcript|pending_summary|ready）
+        row：多维表格「场次」表的一行（链接字段留空，由发布方回填）
+    """
+    import json
+    from datetime import datetime as _dt
+
+    from . import notes as _notes, timefmt
+
+    s = store.get_session(conn, sid)
+    if not s or s.get("deleted_at"):
+        return {"ok": False, "reason": "missing", "message": "场次不存在"}
+    n = int(conn.execute("SELECT COUNT(*) AS n FROM utterances WHERE session_id=?",
+                         (sid,)).fetchone()["n"])
+    capture_only = int(s.get("capture_only") or 0) == 1
+    speakers = store.speaker_totals(conn, sid)
+
+    latest = store.recent_summaries(conn, sid, "content", 1)
+    if latest and not _whole_filter(latest[0].get("filter_json")):
+        # 最新一条是筛选口径：直接发布会把「筛过的要点」冒充整场结论。
+        return {"ok": False, "skipped": True, "reason": "filtered_summary",
+                "message": "最新总结是筛选口径，先重跑整场总结再发布"}
+    summary = store.latest_summary(conn, sid, "content") if latest else None
+    state = _publish_status(n, capture_only, bool(summary))
+    status_text = _PUBLISH_STATUS_TEXT[state]
+
+    note = _notes.build_note(conn, sid) if summary else {}
+    if note and not note.get("ok"):
+        note = {}
+    shape_info = (note or {}).get("shape") or {}
+    title_plain = str((note or {}).get("session", {}).get("title")
+                      or s.get("title") or sid)
+    title = "%s ·《%s》" % (timefmt.start_hm(s), title_plain)
+    shape_label = str(shape_info.get("label") or "")
+    if state == "ready" and shape_label and shape_info.get("kind") != "single":
+        title += " · " + shape_label
+    title = _clip(title, 120)
+
+    duration = float(s.get("duration_s") or 0)
+    host = str((note or {}).get("host") or (note or {}).get("streamer") or "")
+    speakers_n = int(shape_info.get("speaker_count") or len(speakers))
+    audio_url = str(s.get("drive_url") or s.get("minutes_url") or "")
+    room_name = ""
+    try:
+        from . import rooms as _rooms
+        room = _rooms.get_by_session(sid) or {}
+        room_name = str(room.get("name") or "")
+    except Exception:
+        room_name = ""
+
+    meta = ["时长 %s" % fmt_ts(duration)]
+    if state == "ready":
+        meta.append("上麦 %d 人" % speakers_n if speakers_n else "上麦 —")
+    else:
+        meta.append("逐字稿 %d 句" % n)
+    if host:
+        meta.append("主持：%s" % host)
+    if capture_only:
+        meta.append("采集：仅采集")
+    meta.append("状态：%s" % status_text)
+
+    out = ["# %s" % title, "", "> " + " ｜ ".join(meta), ""]
+
+    if state == "pending_transcript":
+        out += ["这场是仅采集，逐字稿还没补出来。",
+                "补写完成后这篇文档会自动更新成完整的总结、观点和原话。", ""]
+    elif state == "pending_summary":
+        note_row = store.get_note(conn, sid) or {}
+        why = "总结还没生成。"
+        if str(note_row.get("state") or "") == "failed":
+            why = "上次总结失败：%s" % (str(note_row.get("error") or "")[:120]
+                                       or "原因未知")
+        out += ["## 逐字稿概况", "",
+                "- 已补 %d 句，%d 位说话人" % (n, len(speakers))]
+        for sp in speakers[:6]:
+            out.append("- %s：%d 句 / %s" % (
+                store.speaker_display(sp["speaker_label"], sp.get("person_name"),
+                                      sp.get("person_state")),
+                int(sp.get("n") or 0), fmt_ts(sp.get("seconds") or 0)))
+        out += ["", "## 总结", "", why, ""]
+    else:
+        overview = str(((note or {}).get("summary") or {}).get("overview") or "")
+        if overview:
+            out += [overview, ""]
+        out += _publish_opinions(note)
+        out += _publish_highlights(note)
+        out += _publish_people(note, shape_info)
+        rel = (note or {}).get("related") or []
+        if rel:
+            out += ["## 相关场次", ""]
+            for r in rel[:4]:
+                when = str(r.get("started_at") or "")[5:16].replace("T", " ")
+                out.append("- %s ·《%s》 · %s" % (when, _clip(r.get("title"), 40),
+                                                 r.get("reason") or "相关"))
+            out += [""]
+
+    if audio_url:
+        out += ["## 录音", "", "- [整场录音](%s)" % audio_url, ""]
+    out += ["---",
+            "由 LiveNotes 生成。内容只来自本场逐字稿与总结；"
+            "逐字稿、时间轴和回听在桌面端。"]
+
+    overview = str(((note or {}).get("summary") or {}).get("overview") or "")
+    started = str(s.get("started_at") or "")
+    try:
+        date_ms = int(_dt.fromisoformat(started).timestamp() * 1000)
+    except (TypeError, ValueError):
+        date_ms = 0
+    topics = [str(t) for t in (((note or {}).get("summary") or {}).get("topics") or [])
+              if str(t).strip()][:8]
+    counts = (note or {}).get("counts") or {}
+    row = {
+        "session_id": sid, "title": title, "title_plain": title_plain,
+        "started_at": started, "date_ms": date_ms,
+        "duration_min": int(round(duration / 60.0)), "room": room_name,
+        "shape": shape_label, "host": host, "speakers": speakers_n,
+        "overview": overview, "points": int(counts.get("points") or 0),
+        "highlights": int(counts.get("highlights") or 0),
+        "status": status_text, "audio_url": audio_url,
+        "doc_url": "", "topics": topics,
+        "mode": "仅采集" if capture_only else "完整",
+    }
+    names = "|".join(str(sp.get("label") or "") for sp in speakers)
+    return {"ok": True, "title": title, "markdown": "\n".join(out),
+            "state": state, "status_text": status_text, "names": names,
+            "row": row, "template": PUBLISH_TEMPLATE_VERSION,
+            "one_line": _clip(overview or ("%d 句逐字稿，%d 位说话人"
+                                          % (n, speakers_n)), 120)}
+
+
+def _publish_opinions(note: dict) -> list[str]:
+    """观点地图：按主题列人，标出明确分歧和没人回答的问题。"""
+    om = note.get("opinion_map") or {}
+    topics = [g for g in (om.get("topics") or []) if g.get("entries")]
+    out: list[str] = []
+    if topics:
+        out += ["## 观点地图", ""]
+        for g in topics:
+            out += ["### %s" % (g.get("label") or "其他"), ""]
+            for e in g.get("entries") or []:
+                stance = _clip(e.get("stance") or e.get("gist") or "", 60)
+                gist = _clip(e.get("gist") or "", 100)
+                bits = "**%s**" % (e.get("who") or "本场共同讨论")
+                if stance:
+                    bits += "：%s" % stance
+                if gist and gist.strip() != stance.strip():
+                    bits += "，%s" % gist
+                bits += "（%s）" % _at(e.get("t"))
+                if e.get("vs"):
+                    bits += " ↔ 与%s相反" % e["vs"]
+                out.append("- " + bits)
+                quote = _clip(e.get("quote"), 90)
+                if quote and quote[:20] not in (stance + gist):
+                    out.append("  > %s" % quote)
+            out.append("")
+    questions = [q for q in (om.get("open_questions") or []) if q.get("text")]
+    if questions:
+        out += ["### 还没答案", ""]
+        for q in questions[:3]:
+            line = "- %s「%s」" % ((q.get("who") + "：") if q.get("who") else "",
+                                  _clip(q.get("text"), 80))
+            if q.get("t") is not None:
+                line += "（%s）" % _at(q.get("t"))
+            line += "，到结束没人接"
+            out.append(line)
+        out.append("")
+    if not topics and note.get("points"):
+        out += ["## 要点", ""]
+        for p in (note.get("points") or [])[:10]:
+            out.append("- **%s**：%s（%s）" % (
+                _clip(p.get("title") or p.get("stance"), 50),
+                _clip(p.get("gist"), 120), _at(p.get("t_from"))))
+        out.append("")
+    return out
+
+
+def _publish_highlights(note: dict) -> list[str]:
+    rows = [h for h in (note.get("highlights") or [])
+            if str(h.get("source") or "") in ("manual", "live")]
+    if not rows:
+        rows = (note.get("highlights") or [])[:5]
+    if not rows:
+        return []
+    out = ["## 值得回听", ""]
+    for h in rows[:6]:
+        who = str(h.get("speaker_label") or "")
+        line = "- `%s`%s %s" % (
+            _at(h.get("peak_t") if h.get("peak_t") is not None
+                else h.get("t_start")),
+            (" " + who) if who else "",
+            _clip(h.get("quote") or h.get("hook") or h.get("text"), 80))
+        why = _clip(h.get("why") or "", 60)
+        if why:
+            line += " —— %s" % why
+        out.append(line)
+    out += [""]
+    return out
+
+
+def _publish_people(note: dict, shape_info: dict) -> list[str]:
+    rows = note.get("speakers") or []
+    if not rows:
+        return []
+    roles = shape_info.get("roles") or {}
+    out = ["## 人物", "", "| 人物 | 角色 | 发言 | 时长 |", "|---|---|---|---|"]
+    for p in rows[:12]:
+        sid = str(p.get("speaker_id") or "")
+        role = str((roles.get(sid) or {}).get("label") or "—")
+        out.append("| %s | %s | %d | %s |" % (
+            _clip(p.get("label") or sid, 30) or "—", role,
+            int(p.get("n") or 0), fmt_ts(p.get("seconds") or 0)))
+    out += [""]
+    return out
+
+
 def build(conn: sqlite3.Connection, sid: str, fmt: str) -> tuple[str, str, str]:
     """返回 (正文, MIME, 文件名)。"""
     fmt = (fmt or "md").lower()
