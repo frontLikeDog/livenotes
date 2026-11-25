@@ -123,6 +123,33 @@ class SummaryFlowTest(unittest.TestCase):
         self.assertFalse(second.cached)
         self.assertEqual(self.calls, 2, "用户再点一次应该真正重新调用模型")
 
+    def test_summary_uses_long_timeout_not_the_default(self):
+        """整场总结要比分类/润色这类短调用等得久。
+
+        实测一场 1720 句的总结，同一份输入两次分别要 113 秒和 >180 秒（推理型
+        模型的思考量不固定）。用默认的 180 秒仍会砍断长尾，所以总结单独传
+        LLM_SUMMARY_TOTAL_TIMEOUT。
+        """
+        from app.config import LLM_SUMMARY_TOTAL_TIMEOUT, LLM_TOTAL_TIMEOUT
+
+        self.assertGreater(LLM_SUMMARY_TOTAL_TIMEOUT, LLM_TOTAL_TIMEOUT,
+                           "总结的上限必须比默认值宽松，否则等于没覆盖长尾")
+
+        seen: list = []
+
+        def spy(cfg, payload, timeout, total_timeout=None):
+            seen.append(total_timeout)
+            return self._fake_chat(cfg, payload, timeout, total_timeout)
+
+        with mock.patch.object(llm, "_post_chat", side_effect=spy):
+            job = tasks.submit_finalize(SID)
+            job.wait(timeout=10)
+            self.assertEqual(job.status, "succeeded")
+
+        self.assertTrue(seen, "总结应当真的调用了模型")
+        self.assertEqual(seen[0], LLM_SUMMARY_TOTAL_TIMEOUT,
+                         "总结调用必须带长超时，否则长场次会被砍断")
+
 
 if __name__ == "__main__":
     unittest.main()

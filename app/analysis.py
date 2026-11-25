@@ -19,7 +19,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from . import identity, llm, scheduler, settings, shape, store, titles
-from .config import LLM_SUMMARY_MAX_ROWS
+from .config import LLM_SUMMARY_MAX_ROWS, LLM_SUMMARY_TOTAL_TIMEOUT
 from .models import CATEGORY_META, category_label, fmt_ts
 
 # ---------------------------------------------------------------- 分类 / 降权
@@ -356,7 +356,8 @@ def _llm_groups(scope: Scope, usage: dict | None = None,
                       for c in cats for r in by_cat[c][:120]],
             }, ensure_ascii=False)},
         ], temperature=0.2, usage=usage,
-            session_id=_scope_sid(scope), task="summary")
+            session_id=_scope_sid(scope), task="summary",
+            total_timeout=LLM_SUMMARY_TOTAL_TIMEOUT)
         content = re.sub(r"^(" + chr(96) * 3 + r")(?:json)?|(" + chr(96) * 3 + r")$", "",
                          content.strip(), flags=re.M).strip()
         data = json.loads(content)
@@ -580,7 +581,8 @@ def _llm_points(scope: Scope, usage: dict | None = None,
             {"role": "system", "content": _LLM_PROMPT},
             {"role": "user", "content": json.dumps(packed, ensure_ascii=False)},
         ], temperature=0.2, usage=usage,
-            session_id=_scope_sid(scope), task="summary")
+            session_id=_scope_sid(scope), task="summary",
+            total_timeout=LLM_SUMMARY_TOTAL_TIMEOUT)
         content = re.sub(r"^```(?:json)?|```$", "", content.strip(), flags=re.M).strip()
         data = json.loads(content)
         by_id = {r["id"]: r for r in candidates}
