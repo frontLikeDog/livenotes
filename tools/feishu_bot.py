@@ -2971,7 +2971,25 @@ def _doc_text(data: dict, room: dict | None) -> str:
     label = _ch(room) if room else ""
     name = _room_name(room) if room else ""
     title = str(data.get("title") or name or "这场")
+    # 兼容只带台账行的老响应：没有 published 时从 publish 行推出同样字段。
+    row = data.get("publish") or {}
+    if "published" not in data and row:
+        meta = row.get("meta") or {}
+        data = dict(data)
+        data["published"] = bool(row.get("doc_url") or row.get("doc_token"))
+        data.setdefault("state", row.get("state") or "")
+        data.setdefault("doc_url", row.get("doc_url") or "")
+        data.setdefault("base_url", meta.get("base_url")
+                        or row.get("base_url") or "")
+        data.setdefault("doc_state", row.get("status")
+                        or meta.get("doc_state") or "")
+        data.setdefault("error", row.get("error") or "")
     if not data.get("published"):
+        if data.get("enabled") is False:
+            return ("《%s》还没有发布文档。\n"
+                    "发布器没开：在 livenotes.env 设 FEISHU_PUBLISH_ENABLED=1 "
+                    "后重启。\n本地录音和总结不受影响。"
+                    % title)
         return ("《%s》还没发布过。\n"
                 "发 /发布%s 生成云文档和场次表。"
                 % (title, (" " + label) if label else ""))

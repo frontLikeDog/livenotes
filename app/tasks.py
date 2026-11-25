@@ -68,6 +68,28 @@ def fingerprint_payload(payload: dict) -> dict:
 
 # ---------------------------------------------------------------- 总结
 
+def _whole_scope(payload: dict) -> bool:
+    """这次总结是不是整场口径。筛选稿不发布：文档代表「整场」。"""
+    f = payload.get("filters") or {}
+    return not (f.get("categories") or f.get("speakers")
+                or str(f.get("q") or "").strip()
+                or f.get("t_from") is not None or f.get("t_to") is not None)
+
+
+def _publish_quiet(conn, sid: str) -> None:
+    """发布是投影：失败只记日志，绝不影响总结/收尾。"""
+    try:
+        from . import feishu_publish
+        feishu_publish.publish(sid, conn=conn)
+    except Exception:
+        traceback.print_exc()
+        try:
+            logs.log_event("feishu.publish_error", level="warn", session_id=sid,
+                           error=str(traceback.format_exc())[:200])
+        except Exception:
+            pass
+
+
 def _run_summary(sid: str, payload: dict) -> dict:
     conn = store.connect()
     try:
@@ -93,6 +115,12 @@ def _run_summary(sid: str, payload: dict) -> dict:
         except Exception:
             logs.log_event("notes.index_failed", level="warn", session_id=sid,
                            error=str(traceback.format_exc())[:200])
+        # 整场总结成功 → 更新飞书文档与场次表（docs/47 §5.1）。
+        # 放在 index 之后、通知之前：文档链接先就位，随后那条通知/卡片
+        # 指向的是能打开的新内容。自动收尾走下面的 publish_session_async，
+        # 这里只同步发布手动总结，避免同一场排队两次。默认关闭时只读配置就返回。
+        if _whole_scope(payload) and not payload.get("auto"):
+            _publish_quiet(conn, sid)
         if payload.get("auto"):
             logs.log_event("live.finalize_done", session_id=sid,
                            engine=str(out.get("engine") or ""),
@@ -134,6 +162,15 @@ def _run_summary(sid: str, payload: dict) -> dict:
                                title=r.get("title"), reason=r.get("reason"))
             except Exception:
                 traceback.print_exc()
+            # 第一次总结就失败时，发布一篇「待总结」骨架，手机端至少能看到
+            # 这场录了什么、为什么失败；已经有旧总结的场次保留旧文档不动。
+            if _whole_scope(payload):
+                try:
+                    has_summary = bool(store.recent_summaries(conn, sid, "content", 1))
+                except Exception:
+                    has_summary = True
+                if not has_summary:
+                    _publish_quiet(conn, sid)
             try:
                 notify.note_failed(sid, str(e))
             except Exception:
@@ -154,10 +191,14 @@ def submit_summary(sid: str, filters: dict, mode: str = "content",
         fingerprint_payload=fingerprint_payload(payload), force=force)
 
 
-def submit_finalize(sid: str) -> scheduler.Job:
-    """下播后的自动收尾。与用户默认「按内容」总结使用同一套筛选条件。"""
+def submit_finalize(sid: str, *, recluster: bool = True) -> scheduler.Job:
+    """下播后的自动收尾。与用户默认「按内容」总结使用同一套筛选条件。
+
+    离线补转写进程已经做过全场重聚类，触发收尾时传 ``recluster=False``，
+    避免同一场跑两遍重聚类（它会改写 speaker_label，白花 CPU）。
+    """
     return submit_summary(sid, dict(analysis.WHOLE_FILTERS), "content", "auto",
-                          auto=True, recluster=True)
+                          auto=True, recluster=recluster)
 
 
 # ---------------------------------------------------------------- 润色

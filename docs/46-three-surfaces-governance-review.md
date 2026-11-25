@@ -141,7 +141,7 @@
 - 桌面 `capture_mode` 默认空 → `browser`（[run.py:203](../run.py)）；`browser` 时不拉外部采集代理（[run.py:216](../run.py)）。
 - helpers 只在 `LIVENOTES_HELPERS=1` 时启动（[run.py:134](../run.py)），网页版行为不变。
 - 仅采集支持逐场覆盖，不传就跟全局（[app/server.py:2447](../app/server.py)）；老库自动补 `sessions.capture_only` 列。
-- 本机全量 `pytest`：**823 passed**（2026-11-25）；新增的 `test_capture_only.py`、`test_feishu_capture_only.py`、`test_offline_asr.py` 覆盖了「仅采集不碰模型/工作池」「飞书文案」「增量补写」。
+- 本机全量 `pytest`：**843 passed**（2026-11-26）；`test_capture_only.py`、`test_feishu_capture_only.py`、`test_offline_asr.py` 覆盖「仅采集不碰模型/工作池」「飞书文案」「增量补写」，`test_feishu_publish.py`、`test_cloud_chain.py` 覆盖发布幂等与云端整链。
 - CI 在 Python 3.11/3.13 跑同一套 pytest，并检查网页分层与「不装实时依赖也能 import」。
 
 ### 5.2 回归网没盖住的地方
@@ -149,7 +149,7 @@
 - `run.py` 的 helper 编排（`_capture_mode` / `_capture_agent_cmd` / `_watch_capture_mode`）没有测试引用；只有 `settings` 的枚举测试。
 - 桌面壳 Rust（房间 watcher、采集模式读取、进程回收）不在 CI；`tests/test_desktop_shell.py` 是对 `shell.js/html` 的静态断言。
 - `tools/ui_smoke.py` 不在 CI（需要 Chrome），前端白屏类回归只能手动跑。
-- 没有「仅采集 + 离线补转写 + 飞书 /总结」的端到端用例；也没有磁盘满、机器人租约冲突、断流死链的用例。
+- 「仅采集 + 离线补转写 + 飞书 /总结」的端到端用例已补上（`tests/test_cloud_chain.py`，2026-11-26）；磁盘满、机器人租约冲突、断流死链仍没有用例。
 - `test_capture_watch.py` 在 CI 会 `importorskip("websockets")` 而整体跳过（`requirements-dev.txt` 不含 websockets），下播判定逻辑在 CI 实际没有跑。
 
 ### 5.3 已发现的具体回归风险
@@ -159,7 +159,8 @@
 
 **P1 · 云端断流预警死链。** `push_capture_lost` 用 `lan.base_url()` 拼 `/live?session=`（[app/live.py:1914](../app/live.py)）；云端默认回环，手机打不开。机器人自己的 `_live_hint` 有 `CAPTURE_ONLY` 分支，但这条引擎侧推送绕过了它。
 
-**P1 · 离线补转写后的下游断链。** 仅采集收尾不跑 `tasks.submit_finalize`（[app/live.py:749](../app/live.py)），离线补写完成后也只 `recluster + set_offline_asr`（[app/offline_asr.py:443](../app/offline_asr.py)）。`insights.after_finalize`、`note_ready`、`notes.index_session`（进而 `claims.rebuild_session`）都不会跑（[app/tasks.py:92](../app/tasks.py)）。结果：飞书 `/总结` 能出（它直接读库），但观点档案、主动提醒、笔记索引不会随云端场次积累。
+**P1 · 离线补转写后的下游断链（2026-11-26 已修）。** 此前仅采集收尾不跑 `tasks.submit_finalize`（[app/live.py:749](../app/live.py)），离线补写完成后也只 `recluster + set_offline_asr`（[app/offline_asr.py:443](../app/offline_asr.py)）。`insights.after_finalize`、`note_ready`、`notes.index_session`（进而 `claims.rebuild_session`）都不会跑（[app/tasks.py:92](../app/tasks.py)）。结果：飞书 `/总结` 能出（它直接读库），但观点档案、主动提醒、笔记索引不会随云端场次积累。
+现在补写完成后，离线进程通过 `POST /api/sessions/finalize`（`recluster=False`）让引擎排队收尾；状态存 `offline_asr.finalize_state`，失败按窗口重试。引擎侧还新增 `GET /api/jobs?job_id=` 供离线进程跟任务，以及 `/api/publish` 手动发布。整链由 `tests/test_cloud_chain.py` 覆盖。
 
 **P2 · 仅采集的文案依赖机器人自己的环境变量。** `tools/feishu_bot.py` 在 import 时读 `CAPTURE_ONLY`（[tools/feishu_bot.py:38](../tools/feishu_bot.py)）。如果引擎是仅采集而机器人进程没带这个变量（或反之），它会给手机发 `127.0.0.1` 链接，或隐藏本来可用的入口。引擎已经在 `/api/live/info` 暴露 `capture_only`（[app/live.py:2621](../app/live.py)），机器人应该读它，而不是信自己的 env。
 

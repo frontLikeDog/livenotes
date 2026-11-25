@@ -68,6 +68,8 @@ FIELD_DEFS: list[dict[str, Any]] = [
     # 主题词是自由文本，做成多选会因为「选项不存在」写不进去；先用文本存，
     # Base 里仍能用「包含」筛选，P1 再统一管理选项后迁移。
     {"field_name": "标签", "type": 1},
+    # 云端链路：区分「完整采集」与「仅采集，等离线补字」的场次。
+    {"field_name": "采集", "type": 1},
 ]
 
 _BASE_READY: set[tuple[str, str]] = set()
@@ -75,6 +77,10 @@ _BASE_READY: set[tuple[str, str]] = set()
 
 _LOCKS: dict[str, threading.Lock] = {}
 _LOCKS_GUARD = threading.Lock()
+# 后台发布去重；_TABLES 是旧实现留下的缓存名，测试会清它，保留为空占位。
+_INFLIGHT: set[str] = set()
+_TABLES: dict[str, str] = {}
+_BOT = None
 
 
 def _session_lock(sid: str) -> threading.Lock:
@@ -89,27 +95,83 @@ def _session_lock(sid: str) -> threading.Lock:
 
 # ---------------------------------------------------------------- 配置 / 状态
 
+def config() -> dict:
+    """发布配置的统一读法：环境变量优先，其次 data/feishu.json。
+
+    同时保留两套键名：``enabled`` / ``folder`` / ``owner`` 是云端链路与
+    HTTP 状态接口用的短名，``publish_*`` / ``base_*`` 是引擎内部沿用的原名。
+    """
+    raw = feishu.load_config()
+    folder = str(raw.get("publish_folder_token")
+                 or raw.get("doc_folder_token") or "")
+    owner = str(raw.get("publish_owner")
+                or raw.get("owner_open_id") or raw.get("open_id") or "")
+    on = bool(raw.get("publish_enabled"))
+    return {
+        "enabled": on,
+        "publish_enabled": on,
+        "app_id": str(raw.get("app_id") or ""),
+        "app_secret": str(raw.get("app_secret") or ""),
+        "folder": folder,
+        "publish_folder_token": folder,
+        "doc_folder_token": str(raw.get("doc_folder_token") or ""),
+        "owner": owner,
+        "owner_open_id": owner,
+        "open_id": str(raw.get("open_id") or ""),
+        "doc_url_base": str(raw.get("doc_url_base") or ""),
+        "base_enabled": bool(raw.get("base_enabled", True)),
+        "base_app_token": str(raw.get("base_app_token") or ""),
+        "base_table_id": str(raw.get("base_table_id") or ""),
+        "base_folder_token": str(raw.get("base_folder_token") or ""),
+        "base_url_base": str(raw.get("base_url_base") or ""),
+    }
+
+
 def _cfg(bot=None) -> dict:
     cfg = getattr(bot, "cfg", None)
     if isinstance(cfg, dict) and cfg:
         return cfg
     try:
-        return feishu.load_config()
+        return config()
     except Exception:
         return {}
+
+
+def _default_bot(cfg: dict):
+    """懒建一个 Bot。只在真发布时创建，仅采集节点不装 lark 也能启动。"""
+    global _BOT
+    with _LOCKS_GUARD:
+        if _BOT is None:
+            bot = feishu.Bot()
+            folder = str(cfg.get("folder") or cfg.get("publish_folder_token") or "")
+            if folder:
+                bot.cfg = dict(bot.cfg or {})
+                bot.cfg["doc_folder_token"] = folder
+            _BOT = bot
+        return _BOT
+
+
+def reset_bot() -> None:
+    """测试/换凭证用：丢掉缓存的 Bot。"""
+    global _BOT
+    with _LOCKS_GUARD:
+        _BOT = None
 
 
 def enabled(bot=None) -> bool:
     """总开关 + 凭证齐不齐。没有飞书凭证时发布器整体静默跳过。"""
     cfg = _cfg(bot)
-    return bool(cfg.get("publish_enabled")) and bool(
-        cfg.get("app_id") and cfg.get("app_secret"))
+    on = cfg.get("publish_enabled", cfg.get("enabled"))
+    return bool(on) and bool(cfg.get("app_id") and cfg.get("app_secret"))
 
 
 def _owner(bot) -> str:
+    cfg = _cfg(bot)
     return str(getattr(bot, "owner_open_id", "")
-               or _cfg(bot).get("owner_open_id")
-               or _cfg(bot).get("open_id") or "")
+               or cfg.get("publish_owner")
+               or cfg.get("owner")
+               or cfg.get("owner_open_id")
+               or cfg.get("open_id") or "")
 
 
 def has_published(conn: sqlite3.Connection, sid: str) -> bool:
@@ -159,13 +221,13 @@ def _bot_or_error(bot=None) -> tuple[Any, str]:
     if bot is not None:
         return bot, ""
     try:
-        return feishu.Bot(), ""
+        return _default_bot(config()), ""
     except Exception as e:
         return None, "飞书未配置：%s" % e
 
 
-def publish(sid: str, *, bot=None, conn: sqlite3.Connection | None = None,
-            force: bool = False, notify: bool = True) -> dict:
+def _publish(sid: str, *, bot=None, conn: sqlite3.Connection | None = None,
+             force: bool = False, notify: bool = True) -> dict:
     """发布一场。返回 {ok, state, doc_url, record_id, unchanged, error...}。
 
     - ``force=True``：显式重发布（用户发 /发布），即使版本没变也重写正文。
@@ -195,6 +257,8 @@ def publish(sid: str, *, bot=None, conn: sqlite3.Connection | None = None,
         doc = export.build_publish(conn, sid)
         if not doc.get("ok"):
             return {"ok": False, "session_id": sid,
+                    "skipped": bool(doc.get("skipped")),
+                    "reason": str(doc.get("reason") or ""),
                     "error": doc.get("error") or "生成发布内容失败"}
 
         row = store.get_publish(conn, sid) or {}
@@ -317,6 +381,65 @@ def publish(sid: str, *, bot=None, conn: sqlite3.Connection | None = None,
         lock.release()
         if own:
             conn.close()
+
+
+def publish(sid: str, *, bot=None, conn: sqlite3.Connection | None = None,
+            force: bool = False, notify: bool = True) -> dict:
+    """发布入口：任何异常都转为失败结果，调用方（HTTP/线程）不用兜底。"""
+    try:
+        return _publish(sid, bot=bot, conn=conn, force=force, notify=notify)
+    except Exception as e:
+        traceback.print_exc()
+        msg = "%s: %s" % (type(e).__name__, e)
+        try:
+            c = conn or store.connect()
+            try:
+                store.upsert_publish(c, sid, KIND_SESSION, state=STATE_FAILED,
+                                     error=msg[:1000], meta={})
+            finally:
+                if conn is None:
+                    c.close()
+        except Exception:
+            traceback.print_exc()
+        try:
+            logs.log_event("feishu.publish_error", level="warn", session_id=sid,
+                           error=msg[:200])
+        except Exception:
+            pass
+        return {"ok": False, "session_id": sid, "state": STATE_FAILED,
+                "error": "发布异常：" + msg}
+
+
+def after_summary(conn: sqlite3.Connection, sid: str) -> dict:
+    """总结成功后调用。发布只是投影，失败不影响本地结果。"""
+    return publish(sid, conn=conn)
+
+
+def publish_async(sid: str, *, force: bool = False) -> bool:
+    """后台发布（仅采集下播建骨架用）。返回是否真的排了线程。"""
+    if not enabled():
+        logs.log_event("feishu.publish_skipped", session_id=sid,
+                       reason="disabled")
+        return False
+    with _LOCKS_GUARD:
+        if sid in _INFLIGHT:
+            return False
+        _INFLIGHT.add(sid)
+
+    def run() -> None:
+        conn = store.connect()
+        try:
+            publish(sid, conn=conn, force=force)
+        except Exception:
+            traceback.print_exc()
+        finally:
+            conn.close()
+            with _LOCKS_GUARD:
+                _INFLIGHT.discard(sid)
+
+    threading.Thread(target=run, name="feishu-publish-" + str(sid),
+                     daemon=True).start()
+    return True
 
 
 def publish_session_async(sid: str, *, only_if_published: bool = False) -> bool:
@@ -544,6 +667,8 @@ def _record_fields(doc: dict, doc_ok: bool, doc_url: str) -> dict:
         "状态": status,
         "session_id": str(doc.get("session_id") or ""),
     }
+    if doc.get("capture_only"):
+        fields["采集"] = "仅采集"
     if doc.get("started_ms"):
         fields["日期"] = int(doc["started_ms"])
     if doc_url:

@@ -53,7 +53,8 @@ def main() -> int:
         return 0
     if args.once or args.backfill:
         out = worker.run_once(backfill=args.backfill, limit=args.limit)
-        print("完成：%(sessions)d 场，读入 %(fed_bytes)d 字节，收尾 %(done)d 场" % out)
+        print("完成：%(sessions)d 场，读入 %(fed_bytes)d 字节，收尾 %(done)d 场，"
+              "确认收尾 %(finalized)d 场" % out)
         return 0
     try:
         worker.run_forever()

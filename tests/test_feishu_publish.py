@@ -323,6 +323,32 @@ def test_disabled_publisher_skips_silently(db):
     assert store.get_publish(db, sid) is None
 
 
+def test_filtered_summary_is_not_published(db):
+    sid = _ready_session(db)
+    # 最新一条是筛选口径：不能拿筛过的要点冒充整场结论。
+    store.save_summary(db, sid, "content", {"q": "OPC"}, "fake", {
+        "overview": "只筛了 OPC", "points": []})
+    bot = FakeBot()
+    out = feishu_publish.publish(sid, bot=bot, conn=db, notify=False)
+    assert out["ok"] is False and out["skipped"] is True
+    assert out["reason"] == "filtered_summary"
+    assert not bot.calls
+
+
+def test_publish_never_raises_and_records_failure(db, monkeypatch):
+    sid = _ready_session(db)
+    bot = FakeBot()
+
+    def boom(conn, sid):
+        raise RuntimeError("组装炸了")
+
+    monkeypatch.setattr(feishu_publish.export, "build_publish", boom)
+    out = feishu_publish.publish(sid, bot=bot, conn=db, notify=False)
+    assert out["ok"] is False and out["state"] == "failed"
+    assert "组装炸了" in out["error"]
+    assert store.get_publish(db, sid)["state"] == "failed"
+
+
 def test_wrapup_card_links_doc_and_offers_name_fix(db):
     sid = _ready_session(db)
     bot = FakeBot()

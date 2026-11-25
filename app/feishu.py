@@ -74,6 +74,10 @@ def load_config() -> dict:
     base_env = os.environ.get("FEISHU_PUBLISH_BASE")
     base_on = _on(base_env if base_env is not None
                   else raw.get("publish_base", True))
+    # 发布 owner 可以单独指定；不填仍用机器人的 owner，兼容旧配置。
+    publish_owner = (os.environ.get("FEISHU_PUBLISH_OWNER")
+                     or str(raw.get("publish_owner_open_id") or "")
+                     or owner)
     return {
         "app_id": os.environ.get("FEISHU_APP_ID") or str(raw.get("app_id") or ""),
         "app_secret": os.environ.get("FEISHU_APP_SECRET") or str(raw.get("app_secret") or ""),
@@ -94,6 +98,7 @@ def load_config() -> dict:
         # 建一个 Base，并把 token 记进 index_meta，下次直接复用。
         "publish_enabled": publish_enabled,
         "publish_folder_token": publish_folder,
+        "publish_owner": publish_owner,
         "base_folder_token": base_folder,
         "base_enabled": base_on,
         "base_app_token": (os.environ.get("FEISHU_BASE_APP_TOKEN")
@@ -587,6 +592,14 @@ class Bot:
             out["document_id"] = str(document_id)
             out["url"] = self._doc_url(document_id)
             return out
+
+    def rewrite_docx(self, document_id: str, markdown: str) -> dict:
+        """兼容 P1 读侧的 ``rewrite_docx(id, md)``：不带标题的覆盖写。
+
+        发布器用 ``overwrite_docx(id, title, md)`` 同步改标题；人物档案只需要
+        改正文，走这个别名即可，避免读侧为了一个方法名再写一套兜底。
+        """
+        return self.overwrite_docx(str(document_id), "", markdown)
 
 
 def _nodes_text(node, out: list[str]) -> None:

@@ -3,7 +3,7 @@
 > 面向：部署、运维
 > 依据：[43 · 仅采集模式](43-capture-only-mode.md)、[14 · 飞书直播简报](14-feishu-live-brief.md)、[17 · 采集生命周期](17-capture-lifecycle.md)
 > 代码：`tools/feishu_bot.py`、`app/livebrief.py`
-> 结论时间：2026-11-25
+> 结论时间：2026-11-25（2026-11-26 补 `/发布` `/文档`）
 
 ## 1. 目标与边界
 
@@ -11,7 +11,8 @@
 
 - 看每路房间在不在录、断没断流；
 - 开始/停止/重试一路；
-- 按需把最近一段原声以飞书语音消息发到聊天里。
+- 按需把最近一段原声以飞书语音消息发到聊天里；
+- 看这一场的云文档（可选发布）：总结后自动成文，补出字后骨架原地升级。
 
 不做的部分：
 
@@ -36,7 +37,7 @@
 | `livenotes.service` | 引擎：仅采集 + 直取，SQLite、录音、m4a | `127.0.0.1:8765` |
 | `livenotes-capture.service` | 采集代理：按房间拉起 ffmpeg | 无 |
 | `livenotes-feishu.service` | 飞书机器人：长连接收命令、发状态/语音 | 出站 |
-| `livenotes-offline-asr.service` | 可选：离线补转写，给仅采集场次补逐字稿 | 无 |
+| `livenotes-offline-asr.service` | 可选：离线补转写；补完自动触发引擎收尾 | 无 |
 
 机器人只读 `data/feishu.json`（`chmod 600`），通过 `LIVENOTES_API`
 访问本机引擎；它不直接写数据库。
@@ -115,7 +116,8 @@ journalctl -u livenotes-feishu -f
 | `/stop CH01` | 停止这一路并关掉 ffmpeg |
 | `/控制台` | 一张卡片看所有房间和按钮 |
 | `/发布 [CH]` | 把这场发成飞书云文档 + 场次表一行，完成后发收尾卡（需 `FEISHU_PUBLISH_ENABLED=1`） |
-| `/文档 [CH]` | 看这场发布到哪了：状态、文档链接、场次表、失败原因 |
+| `/文档 [CH]` | 看这场发布到哪了：状态、文档链接、场次表、失败原因；未开启发布时给配置提示 |
+| `/发布 [CH]` | 手动重发/重试；会重写同一篇文档，不会建第二篇 |
 | `/补名 CH01 1 阿哲 2 小北` | 给上麦的人补名字；已发布的场次会在后台重写文档 |
 | `/回听` | 没有公网页面时返回 `/分享` 提示，不会给手机发打不开的 127.0.0.1 链接 |
 
@@ -127,6 +129,12 @@ journalctl -u livenotes-feishu -f
 状态和回执里不会出现「0 句」「还没有字幕」这种像故障的措辞。
 云端没有公网页面时，简报证据只保留原话，不再发 127/172.24 这类
 手机上打不开的回听链接；要听原声发 `/分享 CH01 90秒`。
+
+发布是可选能力（`FEISHU_PUBLISH_ENABLED=1`，默认关，详见
+[47](47-feishu-native-reading-surface.md)）：总结成功后自动把这一场发成
+一篇云文档 + 场次表一行；仅采集场次下播先发「待补转写」骨架，补完字后
+同一篇原地升级。文档/表格失败只记状态和日志，不影响采集与总结；
+`/文档` 看链接，`/发布` 重试或强制重发。
 
 ## 5. 生命周期
 
@@ -166,11 +174,13 @@ journalctl -u livenotes-capture -n 50 --no-pager
 ## 7. 测试
 
 ```bash
-python -m pytest tests/test_feishu_capture_only.py tests/test_offline_asr.py -q
+python -m pytest tests/test_feishu_capture_only.py tests/test_offline_asr.py \
+  tests/test_feishu_publish.py tests/test_cloud_chain.py -q
 ```
 
 用例覆盖：仅采集状态文案、停止场次的 `/分享` 提示、`/重试` 的
-`pending` 落点、运行中的房间拒绝重试。
+`pending` 落点、运行中的房间拒绝重试；发布幂等、失败降级、骨架升级；
+以及「仅采集 → 离线补转写 → 自动收尾 → 发布 → `/总结`」整链。
 
 2026-11-25 在真实抖音语音厅上验证：云端机器人长连接成功；
 `/状态` 输出「已录 3:19 · 有声 3:16 · 仅录制」；

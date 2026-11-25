@@ -3,7 +3,7 @@
 > 面向：部署、实现
 > 依据：[43 · 仅采集模式](43-capture-only-mode.md)、[44 · 云端飞书机器人](44-cloud-feishu-bot.md)
 > 代码：`app/offline_asr.py`、`tools/offline_asr.py`
-> 结论时间：2026-11-25
+> 结论时间：2026-11-25（2026-11-26 补「补完自动收尾」）
 
 ## 1. 解决什么
 
@@ -39,6 +39,17 @@ data/audio/<sid>.wav ──收尾读──┘        │
   进程重启从上次位置继续；同一时间戳的句子会去重，不会整场重跑。
 - 声纹照常保存；场次收尾后调用 `recluster.recluster_session()` 做全场
   重分人。句子少于 4 条时自动跳过，标签保持「说话人N」。
+- 整场补完（`status=done`）后自动触发引擎收尾：`POST /api/sessions/finalize`
+  让总结、笔记索引、观点档案和发布走和「下播」同一条链路。离线进程
+  不加载大模型配置，也拿不到飞书凭证；触发状态写在
+  `offline_asr.finalize_state`（`queued / done / failed`）。引擎回
+  「还没有逐字稿」时不记失败，下一轮再试；真失败按
+  `LIVENOTES_OFFLINE_ASR_FINALIZE_RETRY`（默认 600 秒）重试。
+- 整场没有一句有效发言（静音/纯 BGM）时不触发收尾：没有可总结的材料，
+  也避免每轮都去问一次引擎。
+- 自动收尾要求引擎已升级到带 `/api/sessions/finalize`、`/api/jobs?job_id=`
+  的版本。补字本身不依赖它，设 `LIVENOTES_OFFLINE_ASR_FINALIZE=0`
+  就只补转写。
 - 不修改 `sessions.capture_only`：这一场仍然是「仅采集」，只是多了
   一份事后补出的逐字稿。
 
@@ -74,6 +85,8 @@ EnvironmentFile=/opt/livenotes/livenotes.env
 Environment=PYTHONUNBUFFERED=1
 Environment=LIVENOTES_ASR_THREADS=1
 Environment=MALLOC_ARENA_MAX=2
+Environment=LIVENOTES_API=http://127.0.0.1:8765
+Environment=LIVENOTES_OFFLINE_ASR_FINALIZE=1
 ExecStart=/opt/livenotes/.venv/bin/python /opt/livenotes/tools/offline_asr.py
 Restart=on-failure
 RestartSec=10
@@ -108,10 +121,14 @@ journalctl -u livenotes-offline-asr -f
 | `LIVENOTES_OFFLINE_ASR_DAYS` | `2` | 自动补最近几天内的场次 |
 | `LIVENOTES_OFFLINE_ASR_MAX_FEED_S` | `120` | 每轮每场最多补多少秒 |
 | `LIVENOTES_OFFLINE_ASR_SPEAKERS` | `1` | 关掉可省 CAM++ 和 embedding，只留一个「说话人」标签 |
+| `LIVENOTES_OFFLINE_ASR_FINALIZE` | `1` | 补完自动触发引擎收尾（总结/索引/发布）；`0` 只补字 |
+| `LIVENOTES_OFFLINE_ASR_FINALIZE_RETRY` | `600` | 触发失败后多少秒重试 |
+| `LIVENOTES_API` | `http://127.0.0.1:8765` | 引擎地址；改过端口时同步改这里 |
 
-> 不需要为了补转写重启 `livenotes.service`：总结接口直接读库。
-> 飞书 `/状态` 里的「补转写 N 句」要等引擎和机器人重启后才显示；
-> 不重启也不影响 `/总结`。
+> 补字本身不需要重启 `livenotes.service`；但「补完自动收尾」用的
+> `/api/sessions/finalize` 是新增接口，**升级后要重启一次引擎**（会中断
+> 正在录的场次，WAV 会保留）。飞书 `/状态` 里的「补转写 N 句」要等
+> 引擎和机器人重启后才显示；不重启也不影响 `/总结`。
 
 ## 4. 手动命令
 
@@ -129,11 +146,17 @@ journalctl -u livenotes-offline-asr -f
 .venv/bin/python tools/offline_asr.py --backfill --limit 5
 ```
 
+`--once` 输出里的「确认收尾 N 场」是这一轮跟进的收尾任务数
+（查询引擎任务状态），不是新补完的场次数。
+
 进度与结果：
 
 ```bash
 sqlite3 /opt/livenotes/data/livenotes.db \
   "select session_id,round(processed_s),status,n_utterances,error from offline_asr;"
+# 自动收尾：queued=等引擎 / done=已排过 / failed=看 finalize_error
+sqlite3 /opt/livenotes/data/livenotes.db \
+  "select session_id,finalize_state,finalize_job,finalize_error from offline_asr;"
 sqlite3 /opt/livenotes/data/livenotes.db \
   "select count(*) from utterances where session_id='LIVE_...';"
 ```
@@ -163,9 +186,15 @@ sqlite3 /opt/livenotes/data/livenotes.db \
 ## 6. 测试
 
 ```bash
-python -m pytest tests/test_offline_asr.py tests/test_feishu_capture_only.py -q
+python -m pytest tests/test_offline_asr.py tests/test_feishu_capture_only.py \
+  tests/test_cloud_chain.py -q
 ```
 
 用例覆盖：PCM 增量出字与时间戳、无新音频不重复、追加音频继续、
 WAV 收尾 flush 并标记 done、重启按时间戳去重、完整链路场次被忽略、
-飞书在补出字后显示「补转写 N 句」并放出总结按钮。
+补完只触发一次收尾、触发失败按窗口重试、飞书在补出字后显示
+「补转写 N 句」并放出总结按钮。
+
+`tests/test_cloud_chain.py` 是整条云端链路的轻集成：真实 PCM/WAV +
+真实 HTTP 引擎 + 真实调度器（模型和飞书换成替身），断言补完自动总结、
+发布只建一篇文档/一行表格、重复发布跳过，以及补出字后 `/总结` 可用。

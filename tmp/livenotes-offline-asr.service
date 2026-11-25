@@ -13,6 +13,9 @@ EnvironmentFile=/opt/livenotes/livenotes.env
 Environment=PYTHONUNBUFFERED=1
 Environment=LIVENOTES_ASR_THREADS=1
 Environment=MALLOC_ARENA_MAX=2
+# 补完字后让引擎排队收尾（总结/索引/发布）；离线进程仍不加载模型和飞书凭证。
+Environment=LIVENOTES_API=http://127.0.0.1:8765
+Environment=LIVENOTES_OFFLINE_ASR_FINALIZE=1
 ExecStart=/opt/livenotes/.venv/bin/python /opt/livenotes/tools/offline_asr.py
 Restart=on-failure
 RestartSec=10

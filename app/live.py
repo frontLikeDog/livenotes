@@ -726,13 +726,16 @@ class LiveSession:
                 traceback.print_exc()
         if not self.capture_only:
             POOL.unregister(self.id)
-        if finalize and not self.capture_only:
+        if finalize:
             # 重聚类 / 起标题 / 总结全部丢到后台：stop 只负责把音频和逐字稿落盘。
             # 以前重聚类是同步跑的（就在这个请求线程里），场次一长「录音落盘」那一格
             # 就得干等；而它本来也不影响数据完整性。
+            # 仅采集也走这里：没有总结可排队，但先发一篇「待补转写」骨架，
+            # 手机端当场就能看到这场录了什么。
             self._auto_finalize()
-            out = self.status()
-            out["asr"] = asr_snapshot
+            if not self.capture_only:
+                out = self.status()
+                out["asr"] = asr_snapshot
         with self._stop_lock:
             self._stop_done = True
         return out
@@ -746,9 +749,18 @@ class LiveSession:
         """
         if self.cancelled:      # 取消 = 用户不要这场，别在聊天里留下一条回顾
             return
-        if self.capture_only:   # 仅采集没有逐字稿，总结/回顾都无从谈起
-            return
         sid = self.id
+        if self.capture_only:
+            # 仅采集没有逐字稿，总结/回顾都无从谈起；但飞书文档可以先生成
+            # 「待补转写」骨架，离线补出字后由 finalize 链路原地更新同一篇。
+            # 发布默认关闭，这里是空操作，不碰 lark、不建线程。
+            try:
+                from . import feishu_publish
+                if feishu_publish.publish_async(sid):
+                    _log("已排队发布骨架 %s" % sid, event="live.publish_skeleton")
+            except Exception:
+                traceback.print_exc()
+            return
         try:
             job = tasks.submit_finalize(sid)
             _log("已排队自动总结：%s（%s）" % (job.id, sid))

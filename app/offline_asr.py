@@ -16,16 +16,24 @@ utterances。总结需要文字，所以这里用一个**独立进程**做增量
   极少数跨越重启的句子可能断成两段，但不会整场重跑。
 * 声纹照常提取并保存，场次收尾后复用 ``recluster`` 做全场重分人；
   直播中的标签先用「说话人N」，不影响总结。
+* 补完字后，通过引擎的 ``POST /api/sessions/finalize`` 触发正常的收尾链路
+  （总结 → 发布），不在本进程里加载 LLM/飞书。触发状态落在
+  ``offline_asr.finalize_state``，进程重启不会重复总结，失败会退避重试。
 
 默认只处理最近 ``LIVENOTES_OFFLINE_ASR_DAYS`` 天内的场次；历史场次用
 ``tools/offline_asr.py --backfill --session SID`` 显式补。
 """
 from __future__ import annotations
 
+import json
+import os
 import sqlite3
 import subprocess
 import time
 import traceback
+import urllib.error
+import urllib.parse
+import urllib.request
 import wave
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -38,9 +46,12 @@ from .config import (
     LIVE_MAX_SPEAKERS,
     LIVE_MIN_SPEECH_S,
     OFFLINE_ASR_DAYS,
+    OFFLINE_ASR_FINALIZE,
+    OFFLINE_ASR_FINALIZE_RETRY_S,
     OFFLINE_ASR_INTERVAL_S,
     OFFLINE_ASR_MAX_FEED_S,
     OFFLINE_ASR_SPEAKERS,
+    PORT,
     SAMPLE_RATE,
     VAD_MODEL,
 )
@@ -330,7 +341,10 @@ class OfflineAsr:
                  days: float = OFFLINE_ASR_DAYS,
                  max_feed_s: float = OFFLINE_ASR_MAX_FEED_S,
                  speakers: bool = OFFLINE_ASR_SPEAKERS,
-                 audio_dir: Path | None = None) -> None:
+                 audio_dir: Path | None = None,
+                 finalize: bool = OFFLINE_ASR_FINALIZE,
+                 finalize_retry_s: float = OFFLINE_ASR_FINALIZE_RETRY_S,
+                 api_base: str | None = None) -> None:
         self.engine = engine
         self.vad_factory = vad_factory or _default_vad
         self.interval = max(0.5, float(interval))
@@ -338,6 +352,11 @@ class OfflineAsr:
         self.max_feed_s = max(5.0, float(max_feed_s))
         self.speakers = bool(speakers)
         self.audio_dir = Path(audio_dir or AUDIO_DIR)
+        # 补完自动收尾走引擎的 HTTP 接口：模型和飞书都不进这个进程。
+        self.finalize = bool(finalize)
+        self.finalize_retry_s = max(30.0, float(finalize_retry_s))
+        self.api_base = (api_base or os.environ.get("LIVENOTES_API")
+                         or "http://127.0.0.1:%d" % PORT).rstrip("/")
         self.states: dict[str, _State] = {}
         self._loaded = False
 
@@ -384,11 +403,117 @@ class OfflineAsr:
             out.append(r)
         return out[:limit] if limit > 0 else out
 
+    # ---------------------------------------------------------- 收尾触发
+    def _http_json(self, path: str, payload: dict | None = None,
+                   timeout: float = 8.0) -> tuple[int, dict]:
+        """调本机引擎。返回 (HTTP 状态, JSON)；4xx/5xx 的 JSON 也照常返回。"""
+        data = None if payload is None else json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            self.api_base + path, data=data,
+            method="POST" if payload is not None else "GET",
+            headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                raw = r.read().decode("utf-8") or "{}"
+                return int(getattr(r, "status", 200) or 200), json.loads(raw)
+        except urllib.error.HTTPError as e:
+            try:
+                body = json.loads(e.read().decode("utf-8") or "{}")
+            except Exception:
+                body = {}
+            return int(e.code), body if isinstance(body, dict) else {}
+
+    def _request_finalize(self, conn: sqlite3.Connection, sid: str) -> None:
+        """补完字 → 请引擎排队一次正常的收尾（总结 → 发布）。"""
+        if not self.finalize:
+            return
+        prev = store.get_offline_asr(conn, sid) or {}
+        if str(prev.get("finalize_state") or "") in ("queued", "done"):
+            return
+        try:
+            code, out = self._http_json(
+                "/api/sessions/finalize",
+                {"session_id": sid, "recluster": False})
+        except Exception as e:
+            msg = "引擎没响应：%s" % e
+            store.set_offline_finalize(conn, sid, state="failed", error=msg)
+            _log("收尾触发失败 %s: %s" % (sid, msg))
+            return
+        if code == 200 and out.get("ok"):
+            jid = str(out.get("job_id") or "")
+            store.set_offline_finalize(conn, sid, state="queued", job=jid,
+                                       error="")
+            _log("已排队收尾 %s（%s）" % (sid, jid))
+            return
+        msg = str(out.get("error") or out.get("message") or "HTTP %s" % code)
+        if code == 409 and (out.get("not_ready") or out.get("capture_only")):
+            # 逐字稿还没入库（极少见：flush 之后可能有短暂延迟）：下一轮再试，
+            # 不记成失败，免得退避 10 分钟。
+            store.set_offline_finalize(conn, sid, state="", error=msg)
+            _log("收尾暂缓 %s: %s" % (sid, msg))
+            return
+        store.set_offline_finalize(conn, sid, state="failed", error=msg)
+        _log("收尾触发被拒绝 %s: %s" % (sid, msg))
+
+    def _poll_finalize(self, conn: sqlite3.Connection) -> int:
+        """跟进已触发的收尾；失败的按间隔重试。返回本轮确认完成的场次数。"""
+        if not self.finalize:
+            return 0
+        try:
+            rows = store.list_offline_finalize(
+                conn, states=("queued", "failed"), limit=8)
+        except sqlite3.Error:
+            return 0
+        done = 0
+        for row in rows:
+            sid = str(row.get("session_id") or "")
+            state = str(row.get("finalize_state") or "")
+            if not sid:
+                continue
+            if state == "failed":
+                ts = None
+                try:
+                    ts = datetime.fromisoformat(str(row.get("finalize_at") or ""))
+                except ValueError:
+                    ts = None
+                if ts and (datetime.now() - ts).total_seconds() < self.finalize_retry_s:
+                    continue
+                store.set_offline_finalize(conn, sid, state="")
+                self._request_finalize(conn, sid)
+                continue
+            jid = str(row.get("finalize_job") or "")
+            if not jid:
+                store.set_offline_finalize(conn, sid, state="failed",
+                                           error="没有任务号")
+                continue
+            try:
+                code, out = self._http_json(
+                    "/api/jobs?job_id=" + urllib.parse.quote(jid))
+            except Exception:
+                continue          # 引擎暂时没响应，下一轮再查
+            job = out.get("job") if isinstance(out.get("job"), dict) else out
+            status = str((job or {}).get("status") or "")
+            if not job or (code != 200 and not status):
+                store.set_offline_finalize(
+                    conn, sid, state="failed",
+                    error="任务丢失（引擎可能重启过，发 /发布 可手动重试）")
+                continue
+            if status == "succeeded":
+                store.set_offline_finalize(conn, sid, state="done", error="")
+                done += 1
+                _log("收尾完成 %s" % sid)
+            elif status in ("failed", "cancelled", "interrupted"):
+                store.set_offline_finalize(
+                    conn, sid, state="failed",
+                    error=str((job or {}).get("error") or status)[:200])
+                _log("收尾失败 %s: %s" % (sid, (job or {}).get("error") or status))
+        return done
+
     def run_once(self, *, sid: str | None = None, backfill: bool = False,
                  limit: int = 0, conn: sqlite3.Connection | None = None) -> dict:
         own = conn is None
         conn = conn or store.connect()
-        fed = done = 0
+        fed = done = finalized = 0
         rows: list[dict] = []
         try:
             try:
@@ -397,9 +522,12 @@ class OfflineAsr:
                 # 全新数据目录（还没起过引擎）：把库建起来，别让 --once 直接崩。
                 store.init_db(conn)
             store.ensure_offline_asr(conn)
+            # 先收掉上一轮的收尾状态：即使这一轮没有可补的场次，也要跟进。
+            finalized = self._poll_finalize(conn)
             rows = self._targets(conn, sid=sid, backfill=backfill, limit=limit)
             if not rows:
-                return {"ok": True, "sessions": 0, "fed_bytes": 0, "done": 0}
+                return {"ok": True, "sessions": 0, "fed_bytes": 0, "done": 0,
+                        "finalized": finalized}
             self._ensure_engine()
             for row in rows:
                 sid2 = str(row["id"])
@@ -438,7 +566,10 @@ class OfflineAsr:
         for sid2 in list(self.states):
             if sid2 not in alive:
                 self.states.pop(sid2, None)
-        return {"ok": True, "sessions": len(rows), "fed_bytes": fed, "done": done}
+        # 再查一次：短场次的总结可能几秒就完成，不必等下一轮 5 秒。
+        finalized += self._poll_finalize(conn)
+        return {"ok": True, "sessions": len(rows), "fed_bytes": fed,
+                "done": done, "finalized": finalized}
 
     def _finish(self, conn: sqlite3.Connection, st: _State) -> None:
         # 即使本轮只补了尾巴、没有新 embedding，库里也可能已有上一轮存的声纹；
@@ -455,6 +586,12 @@ class OfflineAsr:
         store.set_offline_asr(conn, st.sid, processed_s=round(st.fed_s, 3),
                               status="done", error="", n_utterances=st.n)
         _log("场次完成 %s: %d 句, %.0f 秒" % (st.sid, st.n, st.fed_s))
+        # 补完字只是拿到材料；总结/发布仍由引擎的调度器做。触发失败会在
+        # 下一轮由 _poll_finalize 重试，不影响已经落库的逐字稿。
+        # 整场一句有效发言都没有（静音/纯 BGM）时不触发：引擎也会回
+        # 「还没有逐字稿」，每 5 秒重试一次只会刷日志。
+        if st.n:
+            self._request_finalize(conn, st.sid)
 
     def run_forever(self) -> None:
         _log("启动", interval=self.interval, days=self.days,
@@ -466,7 +603,7 @@ class OfflineAsr:
                 now = time.monotonic()
                 if out.get("sessions") and (out.get("done") or now - last_log >= 60):
                     _log("本轮 %(sessions)d 场, 读入 %(fed_bytes)d 字节, "
-                         "收尾 %(done)d 场" % out)
+                         "收尾 %(done)d 场, 确认收尾 %(finalized)d 场" % out)
                     last_log = now
             except KeyboardInterrupt:
                 raise

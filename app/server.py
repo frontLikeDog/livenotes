@@ -1264,6 +1264,17 @@ p{font-size:14px;line-height:1.75;margin:8px 0}
             return self._json({"sessions": store.list_session_metrics(
                 limit=min(200, int(_num(q.get("limit"), 40) or 40)))})
         if p == "/api/jobs":
+            jid = str(q.get("job_id") or "")
+            if jid:
+                # 单任务查询给离线补转写进程用：它只关心「这场总结跑完没有」。
+                job = scheduler.SCHEDULER.get(jid)
+                if job:
+                    return self._json({"job": job.public()})
+                row = store.get_llm_job(jid)
+                if not row:
+                    return self._json({"error": "任务不存在"}, 404)
+                row.pop("payload", None)     # 台账里的 payload 可能很大
+                return self._json({"job": row})
             # 任务面板/排障：内存里正在跑的 + 台账里最近的历史（含重启前失败的）。
             limit = min(200, int(_num(q.get("limit"), 50) or 50))
             sid = str(q.get("session_id") or "")
@@ -1334,7 +1345,24 @@ p{font-size:14px;line-height:1.75;margin:8px 0}
             sid = str(q.get("session_id") or q.get("id") or "")
             if not sid:
                 return self._json({"error": "缺少 session_id"}, 400)
-            return self._json(feishu_publish.status(conn, sid))
+            sess = store.get_session(conn, sid)
+            if not sess or sess.get("deleted_at"):
+                return self._json({"error": "场次不存在"}, 404)
+            st = feishu_publish.status(conn, sid)
+            row = st.get("publish") or {}
+            n = int(conn.execute(
+                "SELECT COUNT(*) AS n FROM utterances WHERE session_id=?",
+                (sid,)).fetchone()["n"])
+            st.update({
+                "enabled": bool(feishu_publish.enabled()),
+                "publish": row,
+                "state": str(st.get("doc_state") or row.get("state") or ""),
+                "session": {"id": sid, "title": sess.get("title") or "",
+                            "started_at": sess.get("started_at") or "",
+                            "capture_only": bool(int(sess.get("capture_only") or 0)),
+                            "n_utterances": n},
+            })
+            return self._json(st)
         if p == "/api/timeline":
             bucket = int(_num(q.get("bucket"), 300) or 300)
             return self._json({"bucket": bucket,
@@ -2558,12 +2586,43 @@ p{font-size:14px;line-height:1.75;margin:8px 0}
                 return self._json({"error": str(e)}, 400)
         if p == "/api/analysis/cancel":
             return self._json(analysis_job.cancel(conn, str(b.get("session_id") or "")))
+        if p == "/api/sessions/finalize":
+            # 离线补转写进程补完字后调这里，触发和「下播」同一套收尾链路。
+            # 它不加载模型，只负责排队；总结/发布仍由调度器执行。
+            sid = str(b.get("session_id") or "")
+            if not sid:
+                return self._json({"error": "缺少 session_id"}, 400)
+            sess = store.get_session(conn, sid)
+            if not sess or sess.get("deleted_at"):
+                return self._json({"error": "场次不存在"}, 404)
+            if live.is_active(sid):
+                return self._json({"error": "这一场还在录，结束后再收尾"}, 409)
+            n = int(conn.execute(
+                "SELECT COUNT(*) AS n FROM utterances WHERE session_id=?",
+                (sid,)).fetchone()["n"])
+            if not n:
+                return self._json({
+                    "error": "还没有逐字稿（补转写还没完成）",
+                    "not_ready": True,
+                    "capture_only": bool(int(sess.get("capture_only") or 0)),
+                }, 409)
+            try:
+                job = tasks.submit_finalize(
+                    sid, recluster=bool(b.get("recluster", True)))
+            except Exception as e:
+                return self._json({"error": str(e)}, 500)
+            return self._json({"ok": True, "job_id": job.id,
+                               "status": job.status, "reused": bool(job.cached),
+                               "session_id": sid})
         if p == "/api/summarize/estimate":
             sid = str(b.get("session_id") or "")
             sess = store.get_session(conn, sid) or {}
-            if int(sess.get("capture_only") or 0):
-                return self._json({"error": "这一场是仅采集，没有逐字稿可总结",
-                                   "capture_only": True}, 400)
+            n_utts = int(conn.execute(
+                "SELECT COUNT(*) AS n FROM utterances WHERE session_id=?",
+                (sid,)).fetchone()["n"])
+            if int(sess.get("capture_only") or 0) and not n_utts:
+                return self._json({"error": "这一场是仅采集，逐字稿还没补出来",
+                                   "capture_only": True, "not_ready": True}, 400)
             f = parse_filters(b.get("filters") or {})
             f["session_id"] = sid
             try:
@@ -2585,11 +2644,15 @@ p{font-size:14px;line-height:1.75;margin:8px 0}
             # 客户端没表态时按 true 兜底，别因为少传一个字段就把不可信片段算进去。
             if "exclude_overlap" not in raw_f:
                 f["exclude_overlap"] = True
-            # 仅采集场次没有逐字稿：不排队、不打模型，直接告诉用户为什么。
+            # 仅采集「还没补出字」才拒绝；补出字之后与普通场次一样可总结
+            # （离线补转写的收尾链路就是走这条路）。
             sess = store.get_session(conn, sid) or {}
-            if int(sess.get("capture_only") or 0):
-                return self._json({"error": "这一场是仅采集，没有逐字稿可总结",
-                                   "capture_only": True}, 400)
+            n_utts = int(conn.execute(
+                "SELECT COUNT(*) AS n FROM utterances WHERE session_id=?",
+                (sid,)).fetchone()["n"])
+            if int(sess.get("capture_only") or 0) and not n_utts:
+                return self._json({"error": "这一场是仅采集，逐字稿还没补出来",
+                                   "capture_only": True, "not_ready": True}, 400)
             try:
                 # 入全局队列：重复点击/下播自动总结会命中同一指纹，不产生第二次调用。
                 job = tasks.submit_summary(sid, f, str(b.get("mode") or "content"),

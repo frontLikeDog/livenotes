@@ -303,12 +303,37 @@ def _pub_related(conn: sqlite3.Connection, note: dict) -> list[str]:
     return lines
 
 
+def _whole_filter(raw) -> bool:
+    """这份总结是不是「整场口径」。老数据没有 filter_json 时按整场处理。"""
+    import json
+
+    if not raw:
+        return True
+    try:
+        f = json.loads(raw) if isinstance(raw, str) else dict(raw)
+    except (TypeError, ValueError):
+        return True
+    if not isinstance(f, dict):
+        return True
+    if f.get("categories") or f.get("speakers"):
+        return False
+    if str(f.get("q") or "").strip():
+        return False
+    return all(f.get(k) is None for k in ("t_from", "t_to", "min_conf"))
+
+
 def build_publish(conn: sqlite3.Connection, sid: str) -> dict:
     """一场的发布视图：标题、Meta、发布用 Markdown、状态。
 
     ``state``：ready / pending_transcript / pending_summary / failed_summary。
     没有总结时不写摘要、不写要点、不引原文；只写「已经有什么、还缺什么」。
+    最新总结若是筛选口径，直接跳过：筛选稿不能冒充整场文档。
     """
+    latest = store.recent_summaries(conn, sid, "content", 1)
+    if latest and not _whole_filter(latest[0].get("filter_json")):
+        return {"ok": False, "skipped": True, "reason": "filtered_summary",
+                "error": "最新总结是筛选口径，先重跑整场总结再发布",
+                "message": "最新总结是筛选口径，先重跑整场总结再发布"}
     from . import notes as _notes
     note = _notes.build_note(conn, sid)
     if not note.get("ok"):
@@ -384,6 +409,9 @@ def build_publish(conn: sqlite3.Connection, sid: str) -> dict:
                         tail = "（明确反对）"
                     when = "（%s）" % stamp if stamp else ""
                     lines.append("- **%s**：%s%s%s" % (who, stance, tail, when))
+                    gist = _pub_clean(e.get("gist"), 120)
+                    if gist and gist[:20] not in stance:
+                        lines.append("  %s" % gist)
                     quote = _pub_clean(e.get("quote"), 80)
                     if quote and quote[:20] not in stance:
                         lines.append("  > 原话：「%s」" % quote)
@@ -407,6 +435,9 @@ def build_publish(conn: sqlite3.Connection, sid: str) -> dict:
                 for p in g.get("points") or []:
                     stance = _pub_clean(p.get("stance") or p.get("title"), 120)
                     lines.append("- %s" % stance)
+                    gist = _pub_clean(p.get("gist"), 120)
+                    if gist and gist[:20] not in stance:
+                        lines.append("  %s" % gist)
                 lines.append("")
 
         highlights = [h for h in (note.get("highlights") or [])
@@ -490,6 +521,8 @@ def build_publish(conn: sqlite3.Connection, sid: str) -> dict:
                                      "speakers": len(roster)},
         "audio_url": audio_url, "error": note_error,
         "n_utterances": n_utt,
+        "capture_only": bool(s.get("capture_only")),
+        "mode": mode,
     }
 
 
