@@ -337,6 +337,32 @@ def _publish(sid: str, *, bot=None, conn: sqlite3.Connection | None = None,
                             "counts": doc.get("counts") or {}}
                 if not claims_res.get("skipped"):
                     latency_ms = int((time.monotonic() - started) * 1000)
+                    if claims_res.get("grant_error"):
+                        err_msg = "观点表授权失败：%s" % claims_res["grant_error"]
+                        new_meta = dict(row.get("meta") or {})
+                        new_meta["base_ok"] = False
+                        store.upsert_publish(
+                            conn, sid, KIND_SESSION, state=STATE_PARTIAL,
+                            error=err_msg[:1000], meta=new_meta,
+                            latency_ms=latency_ms,
+                            attempts=int(row.get("attempts") or 0) + 1)
+                        logs.log_event(
+                            "feishu.publish_ok", level="info", session_id=sid,
+                            state=STATE_PARTIAL, kind=KIND_SESSION,
+                            latency_ms=latency_ms, doc_state=doc["state"],
+                            error=err_msg[:200])
+                        return {"ok": True, "unchanged": False,
+                                "claims_updated": True, "session_id": sid,
+                                "state": STATE_PARTIAL, "doc_state": doc["state"],
+                                "title": doc["title"],
+                                "doc_url": row.get("doc_url") or "",
+                                "record_id": row.get("record_id") or "",
+                                "record_url": new_meta.get("record_url") or "",
+                                "base_url": new_meta.get("base_url") or "",
+                                "version": version, "latency_ms": latency_ms,
+                                "error": err_msg, "warnings": [err_msg],
+                                "overview": doc.get("overview") or "",
+                                "counts": doc.get("counts") or {}}
                     return {"ok": True, "unchanged": False,
                             "claims_updated": True, "session_id": sid,
                             "state": STATE_OK, "doc_state": doc["state"],
@@ -438,7 +464,7 @@ def _publish(sid: str, *, bot=None, conn: sqlite3.Connection | None = None,
             "record_url": (base_res.get("record_url")
                            or old_meta.get("record_url") or ""),
             "base_skipped": bool(base_res.get("skipped")),
-            "base_ok": bool(base_res.get("ok")),
+            "base_ok": bool(base_res.get("ok")) and not bool(base_res.get("grant_error")),
         }
         row = store.upsert_publish(
             conn, sid, KIND_SESSION, state=state, version=version,
