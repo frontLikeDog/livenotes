@@ -209,26 +209,26 @@ def _default_bot():
     return feishu.Bot()
 
 
-def archive_session(conn, session: dict, bot=None) -> dict:
-    """把一场录音上传到云空间并授权给操作者，成功后把 token/链接写回库里。
-
-    失败不抛异常：返回 ``{ok: False, error}``，由接口层转成 4xx/5xx。
-    重复调用会重新上传并覆盖库里的链接（飞书侧同名文件会并存，不做去重）。
-    """
-    sid = str(session.get("id") or "")
-    path = audio_path_for(session)
-    if not path:
-        return {"ok": False, "error": "这场没有可上传的音频"}
-    # WAV 是兜底：超长场次的 WAV 动辄 1 GB，别让用户在请求线程里等半小时。
-    if path.suffix.lower() == ".wav" and path.stat().st_size > MAX_WAV_UPLOAD:
-        return {"ok": False,
-                "error": "WAV 还没转码完成（%d MB），等 m4a 生成后再存"
-                         % (path.stat().st_size // (1024 * 1024))}
+def _delete_file(client, token: str) -> bool:
+    """删掉被替换掉的旧云端副本。失败只记 warn，多一个孤儿文件不影响结果。"""
     try:
-        bot = bot or _default_bot()
+        from lark_oapi.api.drive.v1 import DeleteFileRequest
+        resp = client.drive.v1.file.delete(
+            DeleteFileRequest.builder().file_token(str(token)).type("file").build())
+        if _ok(resp):
+            return True
+        err = _err(resp)
     except Exception as e:
-        return {"ok": False, "error": "飞书未配置：%s" % e}
+        traceback.print_exc()
+        err = str(e)
+    logs.log_event("feishu.drive_delete_failed", level="warn",
+                   file_token=str(token)[:12], error=err)
+    return False
 
+
+def _do_archive(conn, session: dict, bot, path: Path) -> dict:
+    """上传 + 授权 + 写库。手动归档与发布前归档共用这一段，写出的列一致。"""
+    sid = str(session.get("id") or "")
     folder = str((bot.cfg or {}).get("audio_folder_token") or "").strip()
     if not folder:
         return {"ok": False,
@@ -256,3 +256,80 @@ def archive_session(conn, session: dict, bot=None) -> dict:
             "size": out.get("size", 0), "chunks": out.get("chunks", 1),
             "shared": bool(share.get("ok")),
             "share_error": "" if share.get("ok") else share.get("error", "")}
+
+
+def archive_session(conn, session: dict, bot=None) -> dict:
+    """把一场录音上传到云空间并授权给操作者，成功后把 token/链接写回库里。
+
+    失败不抛异常：返回 ``{ok: False, error}``，由接口层转成 4xx/5xx。
+    重复调用会重新上传并覆盖库里的链接（飞书侧同名文件会并存，不做去重）。
+    """
+    sid = str(session.get("id") or "")
+    path = audio_path_for(session)
+    if not path:
+        return {"ok": False, "error": "这场没有可上传的音频"}
+    # WAV 是兜底：超长场次的 WAV 动辄 1 GB，别让用户在请求线程里等半小时。
+    if path.suffix.lower() == ".wav" and path.stat().st_size > MAX_WAV_UPLOAD:
+        return {"ok": False,
+                "error": "WAV 还没转码完成（%d MB），等 m4a 生成后再存"
+                         % (path.stat().st_size // (1024 * 1024))}
+    try:
+        bot = bot or _default_bot()
+    except Exception as e:
+        return {"ok": False, "error": "飞书未配置：%s" % e}
+    return _do_archive(conn, session, bot, path)
+
+
+def ensure_archived(conn, session: dict, bot=None) -> dict:
+    """幂等归档：已经传过且不比转码旧就跳过。
+
+    返回 {ok, skipped, file_token, url, replaced, error}。
+    任何失败都不抛异常——云端副本缺失不影响本地录音、逐字稿和发布结果。
+    """
+    sid = str(session.get("id") or "")
+    if not sid:
+        return {"ok": False, "skipped": False, "file_token": "", "url": "",
+                "replaced": False, "error": "缺少场次 id"}
+    path = audio_path_for(session)
+    if not path:
+        return {"ok": False, "skipped": False, "file_token": "", "url": "",
+                "replaced": False, "error": "这场没有可上传的音频"}
+    if path.suffix.lower() == ".wav" and path.stat().st_size > MAX_WAV_UPLOAD:
+        return {"ok": False, "skipped": False, "file_token": "", "url": "",
+                "replaced": False,
+                "error": "WAV 还没转码完成（%d MB），等 m4a 生成后再存"
+                         % (path.stat().st_size // (1024 * 1024))}
+
+    old_token = str(session.get("drive_token") or "")
+    uploaded_at = str(session.get("drive_uploaded_at") or "")
+    transcoded_at = str(session.get("audio_transcoded_at") or "")
+    if old_token and uploaded_at >= transcoded_at:
+        return {"ok": True, "skipped": True, "file_token": old_token,
+                "url": str(session.get("drive_url") or ""),
+                "replaced": False, "error": ""}
+
+    try:
+        bot = bot or _default_bot()
+    except Exception as e:
+        return {"ok": False, "skipped": False, "file_token": "", "url": "",
+                "replaced": False, "error": "飞书未配置：%s" % e}
+    try:
+        out = _do_archive(conn, session, bot, path)
+        if not out.get("ok"):
+            err = str(out.get("error") or "")
+            logs.log_event("feishu.drive_archive_failed", level="warn",
+                           session_id=sid, error=err)
+            return {"ok": False, "skipped": False, "file_token": "", "url": "",
+                    "replaced": False, "error": err}
+        token = str(out.get("file_token") or "")
+        replaced = bool(old_token and old_token != token
+                        and _delete_file(bot.client, old_token))
+        return {"ok": True, "skipped": False, "file_token": token,
+                "url": str(out.get("url") or ""), "replaced": replaced,
+                "error": ""}
+    except Exception as e:
+        traceback.print_exc()
+        logs.log_event("feishu.drive_archive_failed", level="warn",
+                       session_id=sid, error=str(e))
+        return {"ok": False, "skipped": False, "file_token": "", "url": "",
+                "replaced": False, "error": str(e)}

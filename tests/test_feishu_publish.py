@@ -13,7 +13,7 @@ import urllib.request
 
 import pytest
 
-from app import feishu, feishu_publish, live, server, store
+from app import export, feishu, feishu_drive, feishu_publish, live, server, store
 from helpers import add_rows, add_session, utt_row
 
 SID = "S_PUB"
@@ -219,9 +219,34 @@ class FakeBitable:
         self.app_table_record = FakeRecords()
 
 
+class FakeDriveFiles:
+    def __init__(self):
+        self.all_calls = []
+        self.delete_calls = []
+
+    def upload_all(self, req):
+        self.all_calls.append(req)
+        return Resp(Obj(file_token="ft_pub", url="https://x.feishu.cn/file/ft_pub"))
+
+    def delete(self, req):
+        self.delete_calls.append(req)
+        return Resp(Obj())
+
+
+class FakeDriveMembers:
+    def __init__(self):
+        self.calls = []
+
+    def create(self, req):
+        self.calls.append(req)
+        return Resp(Obj())
+
+
 class FakeClient:
     def __init__(self, app_fail=False):
         self.bitable = Obj(v1=FakeBitable(app_fail=app_fail))
+        self.drive = Obj(v1=Obj(file=FakeDriveFiles(),
+                                permission_member=FakeDriveMembers()))
 
 
 class FakeBot:
@@ -798,3 +823,72 @@ def test_handle_card_publish_retry_spawns_worker(monkeypatch):
             break
         threading.Event().wait(0.01)
     assert seen == ["S1"]
+
+
+# ---------------------------------------------------------------- 发布前归档
+
+def _fake_archive(url="https://x.feishu.cn/file/ft_pub"):
+    def fake(conn, session, bot=None):
+        store.set_audio_meta(conn, session["id"], drive_token="ft_pub",
+                             drive_url=url, drive_uploaded_at=store.now())
+        return {"ok": True, "skipped": False, "file_token": "ft_pub",
+                "url": url, "replaced": False, "error": ""}
+    return fake
+
+
+def test_publish_archives_before_build(db, monkeypatch):
+    sid = _ready_session(db)
+    monkeypatch.setattr(feishu_drive, "ensure_archived", _fake_archive())
+    bot = FakeBot()
+
+    out = feishu_publish.publish(sid, bot=bot, conn=db, notify=False)
+
+    assert out["ok"] and out["state"] == "ok"
+    assert "## 录音" in bot.doc_markdown
+    assert "https://x.feishu.cn/file/ft_pub" in bot.doc_markdown
+    row = store.get_publish(db, sid)
+    assert row["meta"]["archive_skipped"] is False
+    assert row["meta"]["archive_error"] == ""
+
+
+def test_publish_archive_failure_keeps_state_ok(db, monkeypatch):
+    sid = _ready_session(db)
+    monkeypatch.setattr(feishu_drive, "ensure_archived",
+                        lambda conn, session, bot=None: {
+                            "ok": False, "skipped": False, "error": "drive boom"})
+    bot = FakeBot()
+
+    out = feishu_publish.publish(sid, bot=bot, conn=db, notify=False)
+
+    assert out["ok"] and out["state"] == "ok" and out["error"] == ""
+    assert "## 录音" not in bot.doc_markdown
+    row = store.get_publish(db, sid)
+    assert row["meta"]["archive_skipped"] is False
+    assert row["meta"]["archive_error"] == "drive boom"
+
+
+def test_publish_archive_disabled_by_config(db, monkeypatch):
+    sid = _ready_session(db)
+    bot = FakeBot()
+    bot.cfg["archive_on_publish"] = False
+    calls = []
+    monkeypatch.setattr(feishu_drive, "ensure_archived",
+                        lambda *a, **k: calls.append(1) or {"ok": True})
+
+    out = feishu_publish.publish(sid, bot=bot, conn=db, notify=False)
+
+    assert out["ok"] and not calls
+    row = store.get_publish(db, sid)
+    assert row["meta"]["archive_skipped"] is True
+    assert row["meta"]["archive_error"] == ""
+
+
+def test_publish_ready_doc_has_audio_section(db):
+    sid = _ready_session(db)
+    store.set_audio_meta(db, sid, drive_url="https://x.feishu.cn/file/ft_ready")
+
+    doc = export.build_publish(db, sid)
+
+    assert doc["ok"] and doc["state"] == "ready"
+    assert "## 录音" in doc["markdown"]
+    assert "https://x.feishu.cn/file/ft_ready" in doc["markdown"]
