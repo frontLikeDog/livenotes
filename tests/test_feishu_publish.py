@@ -365,26 +365,37 @@ def test_wrapup_card_links_doc_and_offers_name_fix(db):
 # ---------------------------------------------------------------- 覆盖写细节
 
 class FakeConvert:
-    def __init__(self, ok=True):
+    def __init__(self, ok=True, blocks=None, first=None):
         self.ok = ok
         self.calls = []
+        self._blocks = blocks
+        self._first = first
 
     def __call__(self, req):
         self.calls.append(req)
         if not self.ok:
             return Resp(code=400, msg="convert failed")
+        if self._blocks is not None:
+            return Resp(Obj(blocks=self._blocks,
+                            first_level_block_ids=list(self._first or [])))
         return Resp(Obj(blocks=[Obj(block_id="b1")],
                         first_level_block_ids=["b1"]))
 
 
 class FakeChildren:
+    """方法名必须和 lark-oapi 1.9.0 一致：读是 ``get``，不是 ``list``。
+
+    之前这里写成 ``list``，测试全绿但线上 ``overwrite_docx`` 直接抛
+    AttributeError——假对象凭空多出的方法把 bug 挡住了。
+    """
+
     def __init__(self, count=3, fail=False):
         self.count = count
         self.fail = fail
         self.listed = []
         self.deleted = []
 
-    def list(self, req):
+    def get(self, req):
         self.listed.append(req)
         if self.fail:
             return Resp(code=500, msg="read failed")
@@ -454,6 +465,29 @@ def test_overwrite_docx_does_not_clear_when_children_unreadable():
     assert not out["ok"] and out["document_id"] == "doc_1"
     assert not docx.children.deleted
     assert not docx.descendants.calls
+
+
+def test_md_blocks_strips_table_merge_info():
+    """表格的 merge_info 原样回传会让飞书报 1770001，写正文整篇失败。
+
+    2026-11-26 实测：convert 返回的表格块带着 merge_info，原样传给
+    block_descendant.create 稳定失败；清掉它就正常。这条测试盯住这个坑。
+    """
+    table = Obj(block_id="t1", block_type=31,
+                table=Obj(property=Obj(
+                    row_size=2, column_size=2,
+                    merge_info=[Obj(row_span=1, col_span=1)],
+                    column_width=[100, 100])),
+                children=["c1"])
+    docx = FakeDocx()
+    docx.convert = FakeConvert(blocks=[table, Obj(block_id="p1", block_type=2)],
+                               first=["t1", "p1"])
+    docx.document = Obj(convert=docx.convert)   # FakeDocx 构造时抓的是旧对象
+    bot = _real_bot(docx)
+    blocks, first, err = bot._md_blocks("| A | B |\n|---|---|\n| 1 | 2 |\n")
+    assert err is None and first == ["t1", "p1"]
+    assert blocks[0].table.property.merge_info is None      # 被清掉
+    assert blocks[0].table.property.column_width == [100, 100]  # 其余不动
 
 
 # ---------------------------------------------------------------- HTTP 路由

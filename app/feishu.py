@@ -382,6 +382,28 @@ class Bot:
                 out["share_error"] = grant.get("error") or ""
         return out
 
+    @staticmethod
+    def _strip_table_merge_info(blocks: list) -> int:
+        """去掉转换结果里的表格 ``merge_info``，返回清掉的表格数。
+
+        **这是飞书接口的一个坑**（2026-11-26 实测）：``documents/blocks/convert``
+        把 Markdown 表格转出来的块，property 里带着 ``merge_info`` 和
+        ``column_width``；原样回传给 ``block_descendant.create`` 会稳定报
+        ``code=1770001 invalid param``，正文一个字都写不进去，而且错误信息
+        完全看不出是表格引起的。只清 ``merge_info`` 就好——``column_width``
+        留着不影响（单独去掉它仍然失败，说明罪魁就是 merge_info）。
+        """
+        fixed = 0
+        for b in blocks or []:
+            if int(getattr(b, "block_type", 0) or 0) != 31:
+                continue
+            table = getattr(b, "table", None)
+            prop = getattr(table, "property", None) if table is not None else None
+            if prop is not None and getattr(prop, "merge_info", None):
+                prop.merge_info = None
+                fixed += 1
+        return fixed
+
     def _md_blocks(self, markdown: str) -> tuple[list, list, dict | None]:
         """Markdown -> (blocks, first_level_block_ids, error)。"""
         try:
@@ -398,6 +420,9 @@ class Bot:
             first = list(getattr(data, "first_level_block_ids", None) or [])
             if not blocks or not first:
                 return [], [], self._doc_fail("Markdown 转换没返回内容", error="empty")
+            tables = self._strip_table_merge_info(blocks)
+            if tables:
+                logs.log_event("feishu.docx_merge_info_stripped", tables=tables)
             return blocks, first, None
         except Exception as e:
             traceback.print_exc()
@@ -475,7 +500,7 @@ class Bot:
                        .block_id(str(document_id)).page_size(500))
             if token:
                 builder = builder.page_token(token)
-            resp = self.client.docx.v1.document_block_children.list(builder.build())
+            resp = self.client.docx.v1.document_block_children.get(builder.build())
             if not resp.success():
                 return 0, "读取文档块失败：code=%s %s" % (resp.code, resp.msg)
             data = resp.data
