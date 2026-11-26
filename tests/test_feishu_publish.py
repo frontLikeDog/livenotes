@@ -53,64 +53,169 @@ class FakeTables:
     def __init__(self):
         self.created = []
         self.listed = 0
+        self.tables: dict[str, dict] = {}
+        self.fail = False
+        self.fail_names: set[str] = set()
+        self._next = 0
 
     def list(self, req):
         self.listed += 1
-        return Resp(Obj(items=[], has_more=False, page_token=""))
-
-    def create(self, req):
-        self.created.append(req)
-        return Resp(Obj(table_id="tbl_1"))
-
-
-class FakeFields:
-    def __init__(self):
-        self.created = []
-
-    def list(self, req):
-        items = [Obj(field_name=f["field_name"])
-                 for f in feishu_publish.FIELD_DEFS]
+        items = [Obj(table_id=tid, name=t["name"])
+                 for tid, t in self.tables.items()]
         return Resp(Obj(items=items, has_more=False, page_token=""))
 
     def create(self, req):
         self.created.append(req)
+        tbl = getattr(getattr(req, "request_body", None), "table", None)
+        name = str(getattr(tbl, "name", "") or "")
+        if self.fail or name in self.fail_names:
+            return Resp(code=500, msg="create table failed")
+        self._next += 1
+        tid = "tbl_%d" % self._next
+        fields = [str(getattr(f, "field_name", ""))
+                  for f in (getattr(tbl, "fields", None) or [])]
+        self.tables[tid] = {
+            "name": name,
+            "default_view_name": str(getattr(tbl, "default_view_name", "") or ""),
+            "fields": fields,
+        }
+        return Resp(Obj(table_id=tid))
+
+
+class FakeFields:
+    def __init__(self, tables=None):
+        self.created = []
+        self._tables = tables
+        self.fields_by_table: dict[str, list[str]] = {}
+        self.list_fail = False
+        self.create_fail = False
+
+    def list(self, req):
+        if self.list_fail:
+            return Resp(code=500, msg="list fields failed")
+        tid = str(getattr(req, "table_id", "") or "")
+        if tid in self.fields_by_table:
+            names = list(self.fields_by_table[tid])
+        elif self._tables and tid in self._tables.tables:
+            names = list(self._tables.tables[tid]["fields"])
+        else:
+            names = [f["field_name"] for f in feishu_publish.FIELD_DEFS]
+        items = [Obj(field_name=n) for n in names]
+        return Resp(Obj(items=items, has_more=False, page_token=""))
+
+    def create(self, req):
+        self.created.append(req)
+        if self.create_fail:
+            return Resp(code=500, msg="create field failed")
+        tid = str(getattr(req, "table_id", "") or "")
+        fname = str(getattr(getattr(req, "request_body", None), "field_name", "") or "")
+        if tid and fname:
+            cur = self.fields_by_table.setdefault(tid, [])
+            if fname not in cur:
+                cur.append(fname)
         return Resp(Obj())
 
 
 class FakeRecords:
     def __init__(self):
         self.rows = {}
+        self.by_table: dict[str, dict[str, dict]] = {}
         self.created = []
         self.updated = []
+        self.batch_created = []
+        self.batch_deleted = []
+        self.searches = []
+        self.ops: list[str] = []
+        self.search_page_size: int | None = None
+        self.search_fail = False
+        self.batch_delete_fail = False
+        self.batch_create_fail = False
         self._next = 0
 
+    def _table_rows(self, table_id: str) -> dict[str, dict]:
+        tid = str(table_id or "")
+        if tid:
+            return self.by_table.setdefault(tid, {})
+        return self.rows
+
     def search(self, req):
+        self.searches.append(req)
+        self.ops.append("search")
+        if self.search_fail:
+            return Resp(code=500, msg="search failed")
         cond = req.request_body.filter.conditions[0]
         want = str((cond.value or [""])[0])
-        items = [Obj(record_id=rid, fields=f)
-                 for rid, f in self.rows.items()
-                 if str(f.get("session_id") or "") == want]
-        return Resp(Obj(items=items, has_more=False, page_token=""))
+        tid = str(getattr(req, "table_id", "") or "")
+        store_rows = self.by_table.get(tid, {}) if tid else self.rows
+        matched = [Obj(record_id=rid, fields=f)
+                   for rid, f in store_rows.items()
+                   if str(f.get("session_id") or "") == want]
+        page_size = int(getattr(req, "page_size", 0) or 100)
+        if self.search_page_size is not None:
+            page_size = min(page_size, self.search_page_size)
+        offset = int(str(getattr(req, "page_token", "") or "0") or 0)
+        chunk = matched[offset:offset + page_size]
+        next_off = offset + len(chunk)
+        has_more = next_off < len(matched)
+        next_token = str(next_off) if has_more else ""
+        return Resp(Obj(items=chunk, has_more=has_more, page_token=next_token))
 
     def create(self, req):
         self._next += 1
         rid = "rec_%d" % self._next
-        self.rows[rid] = dict(req.request_body.fields)
+        fields = dict(req.request_body.fields)
+        self.rows[rid] = fields
+        tid = str(getattr(req, "table_id", "") or "")
+        if tid:
+            self._table_rows(tid)[rid] = fields
         self.created.append(req)
+        self.ops.append("create")
         return Resp(Obj(record=Obj(record_id=rid,
-                                   record_url="https://x.feishu.cn/base/app_1?table=tbl_1&record=%s" % rid)))
+                                   record_url="https://x.feishu.cn/base/app_1?table=%s&record=%s" % (tid or "tbl_1", rid))))
 
     def update(self, req):
-        self.rows[str(req.record_id)] = dict(req.request_body.fields)
+        rid = str(req.record_id)
+        fields = dict(req.request_body.fields)
+        self.rows[rid] = fields
+        tid = str(getattr(req, "table_id", "") or "")
+        if tid:
+            self._table_rows(tid)[rid] = fields
         self.updated.append(req)
-        return Resp(Obj(record=Obj(record_id=str(req.record_id), record_url="")))
+        self.ops.append("update")
+        return Resp(Obj(record=Obj(record_id=rid, record_url="")))
+
+    def batch_create(self, req):
+        self.batch_created.append(req)
+        self.ops.append("batch_create")
+        if self.batch_create_fail:
+            return Resp(code=500, msg="batch create failed")
+        tid = str(getattr(req, "table_id", "") or "")
+        tbl = self._table_rows(tid)
+        out = []
+        for rec in (getattr(req.request_body, "records", None) or []):
+            self._next += 1
+            rid = "rec_%d" % self._next
+            tbl[rid] = dict(rec.fields)
+            out.append(Obj(record_id=rid, fields=dict(rec.fields)))
+        return Resp(Obj(records=out))
+
+    def batch_delete(self, req):
+        self.batch_deleted.append(req)
+        self.ops.append("batch_delete")
+        if self.batch_delete_fail:
+            return Resp(code=500, msg="batch delete failed")
+        tid = str(getattr(req, "table_id", "") or "")
+        tbl = self._table_rows(tid)
+        for rid in (getattr(req.request_body, "records", None) or []):
+            tbl.pop(str(rid), None)
+        return Resp(Obj(records=[]))
 
 
 class FakeBitable:
     def __init__(self, app_fail=False):
         self.app = FakeApps(fail=app_fail)
         self.app_table = FakeTables()
-        self.app_table_field = FakeFields()
+        self.app_table_field = FakeFields(tables=self.app_table)
         self.app_table_record = FakeRecords()
 
 

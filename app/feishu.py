@@ -105,6 +105,8 @@ def load_config() -> dict:
                            or str(raw.get("base_app_token") or "")),
         "base_table_id": (os.environ.get("FEISHU_BASE_TABLE_ID")
                           or str(raw.get("base_table_id") or "")),
+        "base_claims_table_id": (os.environ.get("FEISHU_BASE_CLAIMS_TABLE_ID")
+                                 or str(raw.get("base_claims_table_id") or "")),
         "base_url_base": (os.environ.get("FEISHU_BASE_URL_BASE")
                           or str(raw.get("base_url_base") or "")),
     }

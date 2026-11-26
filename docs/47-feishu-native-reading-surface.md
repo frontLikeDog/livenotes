@@ -810,3 +810,44 @@ import 发布器，发布器换实现不会让 `/搜` `/找人` 挂掉。
 - `tests/test_offline_asr.py` 新增 6 例：补完只触发一次、失败按窗口重试、
   无有效发言不触发等。
 - 全量 `886 passed`（2026-11-26）。
+
+---
+
+## 14. 观点表实施记录（2026-11-27）
+
+**范围**：在已有 Base 里新增第二张表「观点」（与「场次」表同 `app_token`），作为 `claims` 表的单向只读投影，补上「跨场追一个观点」的索引。不调模型、不重抽、不做双向同步、不放逐字稿全文。
+
+**字段（13 列，主字段「观点」在首位，默认视图「最近观点」）**：
+
+| 字段 | 类型 | 规则 |
+|---|---|---|
+| 观点 | 文本（1，主字段） | `claims.stance`；空退 `gist`，再空退 `quote[:80]` |
+| 谁 | 文本（1） | `person_id` 非空 → `persons.name`；否则 `claims.who`；未命名退回 `identity.claim_ref` 的「本场第 N 位上麦者」 |
+| 主题 | 文本（1） | `claims.topic` 自由词表，空着也照写（不用多选，避免选项缺失导致整行失败） |
+| 类别 | 单选（3） | `主张` / `问题`（`claims.kind` 的 `claim` / `question`） |
+| 状态 | 单选（3） | `新提出` / `重申` / `修正` |
+| 场次 | 文本（1） | `sessions.title` |
+| 日期 | 日期（5） | `started_at` → 毫秒时间戳 |
+| 时间码 | 文本（1） | `timefmt.offset(t)` 纯文本，不假装可点击 |
+| 原话 | 文本（1） | `claims.quote`（截 300 字） |
+| 场次文档链接 | URL（15） | 仅取 `feishu_publish`（`kind="session"`）台账 `doc_url`；没有就不写该键 |
+| claim_id / session_id / person_id | 文本（1） | 隐藏索引/排查/批量删除键，不用关联字段 |
+
+**建表、配置与替换策略**：
+
+- 复用 `ensure_base()`（并确保复用已有 Base 时也会走一次 `permission_member` 授权，覆盖表内所有表）；`_find_table` / `_create_table` / `_ensure_fields` 参数化共用，老表缺字段自动补。
+- `table_id` 持久化到 `index_meta` 的 `feishu_base_claims_table_id`；环境变量 `FEISHU_BASE_CLAIMS_TABLE_ID` 优先；开关沿用 `FEISHU_PUBLISH_BASE=0`（两张表一起停）。
+- **按场次整体替换**（`_upsert_claims`）：用每条 `claim_id|person_id|who|topic|stance|kind|quote|t|状态` 加 `doc_url` 算 sha1 前 16 位签名，落台账 `feishu_publish(session_id, kind="claims")`。签名未变且 `state=ok`（非 `force`）直接跳过；无观点且从未写过也跳过不建空表。需要写入时先按 `session_id` 翻页（`page_size=100`）查全量旧行 → `batch_delete`（每块 ≤500）→ `batch_create`（每块 ≤500），避免要点数量变动留下孤儿行；删成功建失败记 `failed`，重试走「搜空→再建」不会重复。
+- **失败隔离**：`_publish()` 正常路径里观点表失败只标整场 `partial` 并在 `error` 记「观点表没写成功：…」，不让文档失败；下次重试只补观点表不重写正文。文档失败时观点表仍照写（无链接），文档恢复后因 `doc_url` 进签名自动重写补链。版本未变早退路径下若仅 `doc_url` 或观点变化，只重写观点表、不碰文档正文（保住评论锚点），返回 `claims_updated: True`。
+
+**状态规则**：
+
+- 按 `claims.person_key(person_id, who)` + `topic` 找**更早场次**（`sessions.started_at < 当前场` 且未删除）里最近一条（`started_at DESC, t DESC`）；同场内多条不互相比较。
+- 无更早记录 → `新提出`；`claims.similarity(当前, 上条)` `>= SAME_RATIO` → `重申`，`< REVISION_RATIO` → `修正`，其余 → `新提出`。
+
+**已知局限**：
+
+- 不做「被反驳」：引擎仅有 `claims.disagrees()` 词面判断，缺少「谁反驳谁」归属，硬做会误报。
+- 状态相对更早场次计算：补发更早历史场次后，已发布场次的状态不会自动重算，除非对该场再执行 `/发布`。
+- 默认只建「最近观点」视图，不加筛选视图（`app_table.view` 筛选请求体未验证）。
+- `claims.topic` 为本场标注自由词，跨场尚未归一化，筛选以文本包含为主。
