@@ -505,3 +505,32 @@ def test_existing_claims_table_missing_fields_auto_backfills(db):
     ]
     assert created_names == expected_missing
     assert len(bot.client.bitable.v1.app_table_record.by_table["tbl_claims_old"]) == 3
+
+
+def test_base_grant_failure_is_retried_and_not_swallowed_on_retry(db):
+    sid = _session_with_claims(db)
+    bot = FakeBot()
+    fail_bitable_grant = True
+
+    def flaky_grant(document_id, open_id, perm="full_access", doc_type="docx"):
+        bot.grants.append((document_id, open_id, doc_type))
+        if doc_type == "bitable" and fail_bitable_grant:
+            return {"ok": False, "error": "no perm"}
+        return {"ok": True}
+
+    bot._grant_doc = flaky_grant
+
+    out1 = feishu_publish.publish(sid, bot=bot, conn=db, notify=False)
+    assert out1["ok"] is True and out1["state"] == "partial"
+    assert "场次表授权失败" in out1["error"]
+
+    # 权限仍失败时重试：不能吞掉授权失败而误标成 ok
+    out2 = feishu_publish.publish(sid, bot=bot, conn=db, notify=False)
+    assert out2["ok"] is True and out2["state"] == "partial"
+    assert "场次表授权失败" in out2["error"]
+
+    # 权限恢复后重试：补授权成功并回到 ok
+    fail_bitable_grant = False
+    out3 = feishu_publish.publish(sid, bot=bot, conn=db, notify=False)
+    assert out3["ok"] is True and out3["state"] == "ok"
+    assert ("app_1", "ou_owner", "bitable") in bot.grants
