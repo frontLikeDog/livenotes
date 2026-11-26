@@ -34,6 +34,7 @@ class FakeFile:
         self.prepare_calls: list = []
         self.parts: list = []
         self.finish_calls: list = []
+        self.delete_calls: list = []
         self.block_size = 4
 
     def upload_all(self, req):
@@ -53,6 +54,10 @@ class FakeFile:
     def upload_finish(self, req):
         self.finish_calls.append(req.request_body)
         return Resp(Obj(file_token="ft_fin", url=""))
+
+    def delete(self, req):
+        self.delete_calls.append(req)
+        return Resp(Obj())
 
 
 class FakeMembers:
@@ -187,6 +192,94 @@ def test_archive_session_rejects_huge_wav(db, tmp_path, monkeypatch):
     out = feishu_drive.archive_session(db, store.get_session(db, "S4"),
                                        bot=FakeBot())
     assert not out["ok"] and "转码" in out["error"]
+
+
+# ---------------------------------------------------------------- 幂等归档
+
+def _archived_session(db, tmp_path, sid, *, token="ft_old",
+                      uploaded="2026-11-25T22:00:00",
+                      transcoded="2026-11-25T21:00:00"):
+    p = _write(tmp_path, name=sid + ".m4a", size=8)
+    add_session(db, sid, audio_path=str(p), title="周三复盘")
+    store.set_audio_meta(db, sid, drive_token=token,
+                         drive_url="https://x.feishu.cn/file/" + token,
+                         drive_uploaded_at=uploaded,
+                         audio_transcoded_at=transcoded)
+    return store.get_session(db, sid)
+
+
+def test_ensure_archived_skips_when_up_to_date(db, tmp_path, monkeypatch):
+    monkeypatch.setattr(feishu_drive, "AUDIO_DIR", tmp_path)
+    s = _archived_session(db, tmp_path, "S20")
+    bot = FakeBot()
+
+    out = feishu_drive.ensure_archived(db, s, bot=bot)
+
+    assert out["ok"] and out["skipped"]
+    assert out["file_token"] == "ft_old"
+    assert out["url"] == "https://x.feishu.cn/file/ft_old"
+    assert bot.client.file.all_calls == []
+    assert bot.client.file.delete_calls == []
+
+
+def test_ensure_archived_reuploads_after_new_transcode(db, tmp_path, monkeypatch):
+    monkeypatch.setattr(feishu_drive, "AUDIO_DIR", tmp_path)
+    s = _archived_session(db, tmp_path, "S21",
+                          uploaded="2026-11-25T21:00:00",
+                          transcoded="2026-11-25T22:00:00")
+    bot = FakeBot()
+
+    out = feishu_drive.ensure_archived(db, s, bot=bot)
+
+    assert out["ok"] and not out["skipped"] and out["replaced"]
+    assert out["file_token"] == "ft_all"
+    assert len(bot.client.file.all_calls) == 1
+    assert len(bot.client.file.delete_calls) == 1
+    assert bot.client.file.delete_calls[0].file_token == "ft_old"
+    row = store.get_session(db, "S21")
+    assert row["drive_token"] == "ft_all"
+    assert row["drive_url"] == "https://x.feishu.cn/file/ft_all"
+    assert row["drive_uploaded_at"]
+
+
+def test_ensure_archived_without_audio_returns_error(db, tmp_path, monkeypatch):
+    monkeypatch.setattr(feishu_drive, "AUDIO_DIR", tmp_path)
+    add_session(db, "S22", audio_path=None)
+    out = feishu_drive.ensure_archived(db, store.get_session(db, "S22"),
+                                       bot=FakeBot())
+    assert not out["ok"] and not out["skipped"]
+    assert "没有可上传的音频" in out["error"]
+
+
+def test_ensure_archived_huge_wav_returns_error(db, tmp_path, monkeypatch):
+    p = tmp_path / "S23.wav"
+    p.write_bytes(b"x" * 16)
+    monkeypatch.setattr(feishu_drive, "AUDIO_DIR", tmp_path)
+    monkeypatch.setattr(feishu_drive, "MAX_WAV_UPLOAD", 8)
+    add_session(db, "S23", audio_path=str(p))
+    out = feishu_drive.ensure_archived(db, store.get_session(db, "S23"),
+                                       bot=FakeBot())
+    assert not out["ok"] and "转码" in out["error"]
+
+
+def test_archive_session_and_ensure_archived_write_same_columns(
+        db, tmp_path, monkeypatch):
+    monkeypatch.setattr(feishu_drive, "AUDIO_DIR", tmp_path)
+    p1 = _write(tmp_path, name="S24.m4a", size=8)
+    add_session(db, "S24", audio_path=str(p1), title="A")
+    p2 = _write(tmp_path, name="S25.m4a", size=8)
+    add_session(db, "S25", audio_path=str(p2), title="B")
+
+    feishu_drive.archive_session(db, store.get_session(db, "S24"),
+                                 bot=FakeBot())
+    feishu_drive.ensure_archived(db, store.get_session(db, "S25"),
+                                 bot=FakeBot())
+
+    for sid in ("S24", "S25"):
+        row = store.get_session(db, sid)
+        assert row["drive_token"] == "ft_all"
+        assert row["drive_url"] == "https://x.feishu.cn/file/ft_all"
+        assert row["drive_uploaded_at"]
 
 
 # ---------------------------------------------------------------- HTTP 路由

@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 from helpers import add_session
 
-from app import audio, store
+from app import audio, feishu_publish, store
 
 
 def _write_wav(path: Path, seconds: float = 1.0, freq: float = 440.0) -> None:
@@ -244,3 +244,47 @@ def test_extract_opus_from_pcm(isolated_paths):
     assert ok, err
     assert out.stat().st_size > 0
     assert audio.content_type(out) == "audio/ogg"
+
+
+# ---------------------------------------------------------------- 转码后补发
+
+def _transcode_with_fake_m4a(db, isolated_paths, monkeypatch):
+    wav = isolated_paths / "audio" / "S_TEST.wav"
+    _write_wav(wav, 0.5)
+    add_session(db, "S_TEST", audio_path=str(wav))
+
+    def fake_to_m4a(src, dst, *a, **kw):
+        Path(dst).write_bytes(b"m4a")
+        return True, ""
+
+    monkeypatch.setattr(audio, "to_m4a", fake_to_m4a)
+    return wav
+
+
+def test_transcode_republishes_when_published(db, isolated_paths, monkeypatch):
+    wav = _transcode_with_fake_m4a(db, isolated_paths, monkeypatch)
+    calls = []
+    monkeypatch.setattr(feishu_publish, "has_published",
+                        lambda conn, sid: True)
+    monkeypatch.setattr(feishu_publish, "publish_session_async",
+                        lambda sid, **kw: calls.append((sid, kw)))
+
+    out = audio.transcode_session("S_TEST", wav, conn=db)
+
+    assert out and out.suffix == ".m4a"
+    assert calls == [("S_TEST", {"only_if_published": True})]
+
+
+def test_transcode_does_not_republish_unpublished(db, isolated_paths,
+                                                  monkeypatch):
+    wav = _transcode_with_fake_m4a(db, isolated_paths, monkeypatch)
+    calls = []
+    monkeypatch.setattr(feishu_publish, "has_published",
+                        lambda conn, sid: False)
+    monkeypatch.setattr(feishu_publish, "publish_session_async",
+                        lambda sid, **kw: calls.append((sid, kw)))
+
+    out = audio.transcode_session("S_TEST", wav, conn=db)
+
+    assert out and out.suffix == ".m4a"
+    assert calls == []

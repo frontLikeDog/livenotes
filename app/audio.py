@@ -210,6 +210,13 @@ def transcode_session(sid: str, wav_path: Path | str | None = None,
         _mark(conn, sid, dst, src)
         logs.log_event("audio.transcoded", session_id=sid, src=str(src),
                        dst=str(dst), bytes=dst.stat().st_size)
+        # 骨架发布时可能只有 WAV，m4a 出来后补发一次，云端归档才有东西可传。
+        try:
+            from . import feishu_publish
+            if feishu_publish.has_published(conn, sid):
+                feishu_publish.publish_session_async(sid, only_if_published=True)
+        except Exception:
+            traceback.print_exc()
         return dst
     except Exception:
         traceback.print_exc()
