@@ -33,7 +33,7 @@ import time
 import traceback
 from typing import Any
 
-from . import claims, export, feishu, identity, logs, store, timefmt
+from . import claims, export, feishu, feishu_drive, identity, logs, store, timefmt
 
 KIND_SESSION = "session"
 KIND_CLAIMS = "claims"
@@ -191,6 +191,12 @@ def enabled(bot=None) -> bool:
     return bool(on) and bool(cfg.get("app_id") and cfg.get("app_secret"))
 
 
+def _archive_on(cfg: dict) -> bool:
+    """发布时自动归档录音；配置缺失按开处理（这一轮的默认行为）。"""
+    v = cfg.get("archive_on_publish")
+    return True if v is None else bool(v)
+
+
 def _owner(bot) -> str:
     cfg = _cfg(bot)
     return str(getattr(bot, "owner_open_id", "")
@@ -280,6 +286,22 @@ def _publish(sid: str, *, bot=None, conn: sqlite3.Connection | None = None,
             return {"ok": False, "skipped": True, "session_id": sid,
                     "error": "发布器没开（FEISHU_PUBLISH_ENABLED）"}
 
+        cfg = _cfg(bot_obj)
+        # 先归档再生成正文：build_publish 从库里读 drive_url 拼「录音」，
+        # 版本 hash 也拿正文算，顺序反了文档就会少这一节。
+        archive: dict = {"ok": True, "skipped": True, "error": ""}
+        if _archive_on(cfg):
+            try:
+                archive = feishu_drive.ensure_archived(conn, s, bot_obj)
+            except Exception as e:
+                traceback.print_exc()
+                archive = {"ok": False, "skipped": False, "error": str(e)}
+            logs.log_event(
+                "feishu.archive",
+                level="info" if archive.get("ok") else "warn", session_id=sid,
+                ok=bool(archive.get("ok")), skipped=bool(archive.get("skipped")),
+                error=str(archive.get("error") or ""))
+
         doc = export.build_publish(conn, sid)
         if not doc.get("ok"):
             return {"ok": False, "session_id": sid,
@@ -288,7 +310,6 @@ def _publish(sid: str, *, bot=None, conn: sqlite3.Connection | None = None,
                     "error": doc.get("error") or "生成发布内容失败"}
 
         row = store.get_publish(conn, sid) or {}
-        cfg = _cfg(bot_obj)
         owner = _owner(bot_obj)
         version = _version(doc["title"], doc["markdown"])
         base_on = bool(cfg.get("base_enabled", True))
@@ -465,6 +486,10 @@ def _publish(sid: str, *, bot=None, conn: sqlite3.Connection | None = None,
                            or old_meta.get("record_url") or ""),
             "base_skipped": bool(base_res.get("skipped")),
             "base_ok": bool(base_res.get("ok")) and not bool(base_res.get("grant_error")),
+            # 归档失败不改发布状态：文档没有录音链接仍然是一篇完整文档。
+            "archive_skipped": bool(archive.get("skipped")),
+            "archive_error": ("" if archive.get("ok")
+                              else str(archive.get("error") or "")),
         }
         row = store.upsert_publish(
             conn, sid, KIND_SESSION, state=state, version=version,

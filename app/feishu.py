@@ -94,6 +94,9 @@ def load_config() -> dict:
         "audio_folder_token": audio_folder,
         "drive_url_base": (os.environ.get("FEISHU_DRIVE_URL_BASE")
                            or str(raw.get("drive_url_base") or "")),
+        # 发布时自动把整场录音归档到云空间；0 = 只保留手动「存入云空间」。
+        "archive_on_publish": (os.environ.get("FEISHU_ARCHIVE_ON_PUBLISH", "1")
+                               .strip().lower() not in ("0", "false", "no", "off")),
         # 发布器：场次文档 + 场次表（Base）。app/table 留空时首次发布会自动
         # 建一个 Base，并把 token 记进 index_meta，下次直接复用。
         "publish_enabled": publish_enabled,

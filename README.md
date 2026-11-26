@@ -329,6 +329,7 @@ data/               数据库、录音、日志（不提交）
 | `LIVENOTES_PUSH_COOLDOWN` / `_SESSION_CAP` / `_CAP` / `_DIGEST` / `_CARD` | 600 / 3 / 5 / 1 / 1 | 飞书推送节奏与卡片，见 [docs/08](docs/08-feishu-push-time.md) |
 | `FEISHU_OWNER_OPEN_ID` / `FEISHU_CHAT_IDS` | 空 | 主人 open_id；群聊白名单 `chat_id`（逗号分隔） |
 | `FEISHU_AUDIO_FOLDER_TOKEN` | 空 | 云空间归档文件夹 token；空 = 复用 `FEISHU_DOC_FOLDER_TOKEN` |
+| `FEISHU_ARCHIVE_ON_PUBLISH` | `1` | 发布时自动把整场 m4a 归档到云空间；`0` = 只保留手动「存入云空间」 |
 | `FEISHU_DRIVE_URL_BASE` | 空 | 拼云空间文件链接的前缀，如 `https://xxx.feishu.cn/file/` |
 | `FEISHU_NL_ENABLED` | `0` | 1 = 白名单群里 `@机器人` 可用自然语言；总结仍需确认 |
 | `LIVENOTES_BRIEF_LLM` / `_DAILY_CAP` / `_SESSION_TOKEN_CAP` | 1 / 30 / 30000 | 简报模型开关、每日调用上限、单场 token 软上限 |

@@ -467,6 +467,8 @@ def build_publish(conn: sqlite3.Connection, sid: str) -> dict:
         related = _pub_related(conn, note)
         if related:
             lines += ["## 相关场次", ""] + related + [""]
+        if audio_url:
+            lines += ["## 录音", "", "- 整场录音：%s" % audio_url, ""]
         lines += ["---",
                   "由 LiveNotes 生成。逐字稿与完整时间轴在桌面端；"
                   "本页只保留结论与可引用的原话。"]
