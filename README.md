@@ -414,6 +414,8 @@ python tools/stress_live.py --tracks 1,3,5,10 --duration 7200 --warmup 60 \
 - [`docs/41-voice-room-knowledge-product-iteration.md`](docs/41-voice-room-knowledge-product-iteration.md) 语音厅知识化：场次形态、观点原子与「AI 管家」的落地顺序
 - [`docs/46-three-surfaces-governance-review.md`](docs/46-three-surfaces-governance-review.md) 多端职责与云端采集制度审查：能力矩阵、回归风险与 R1–R10
 - [`docs/47-feishu-native-reading-surface.md`](docs/47-feishu-native-reading-surface.md) 飞书原生阅读面：云文档 + 多维表格 + 卡片，不建公网网页
+- [`docs/50-cloud-folders-and-archive.md`](docs/50-cloud-folders-and-archive.md) 云空间按场次组织：发布即归档、一场一个文件夹、逐字稿落盘与文件夹授权
+- [`docs/51-archive-on-publish-brief.md`](docs/51-archive-on-publish-brief.md) 实施提示词：发布即归档（单独给实施者，只做 docs/50 的阶段 0）
 
 ## 许可证
 
