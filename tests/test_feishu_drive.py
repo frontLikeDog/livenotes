@@ -153,6 +153,27 @@ def test_archive_session_writes_columns(db, tmp_path):
     assert row["drive_uploaded_at"]
 
 
+def test_archive_session_without_url_base_keeps_link_empty(db, tmp_path):
+    """接口没给 url、又没配租户域名：drive_url 写 NULL，而不是通用域名。"""
+    p = _write(tmp_path, name="S6.m4a", size=8)
+    add_session(db, "S6", audio_path=str(p))
+    bot = FakeBot()
+    bot.client.file.upload_all = lambda req: Resp(Obj(file_token="ft_nourl"))
+
+    out = feishu_drive.archive_session(db, store.get_session(db, "S6"), bot=bot)
+
+    assert out["ok"] and out["url"] == ""
+    row = store.get_session(db, "S6")
+    assert row["drive_token"] == "ft_nourl"
+    assert row["drive_url"] is None
+
+
+def test_file_url_needs_tenant_base():
+    assert feishu_drive.file_url("ft_1") == ""
+    assert (feishu_drive.file_url("ft_1", "https://x.feishu.cn/file")
+            == "https://x.feishu.cn/file/ft_1")
+
+
 def test_archive_session_without_folder(db, tmp_path):
     p = _write(tmp_path, name="S2.m4a")
     add_session(db, "S2", audio_path=str(p))

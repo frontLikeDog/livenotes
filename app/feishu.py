@@ -90,7 +90,7 @@ def load_config() -> dict:
         "doc_url_base": (os.environ.get("FEISHU_DOC_URL_BASE")
                          or str(raw.get("doc_url_base") or "")),
         # 云空间音频：folder_token 为空 = 没开归档；drive_url_base 用来拼
-        # 文件链接（https://xxx.feishu.cn/file/），不填用飞书通用域名。
+        # 文件链接（https://xxx.feishu.cn/file/），不填则不给链接（通用域名会跳首页）。
         "audio_folder_token": audio_folder,
         "drive_url_base": (os.environ.get("FEISHU_DRIVE_URL_BASE")
                            or str(raw.get("drive_url_base") or "")),

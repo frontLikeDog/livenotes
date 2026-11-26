@@ -64,8 +64,14 @@ def audio_path_for(session: dict) -> Path | None:
 
 
 def file_url(file_token: str, base: str = "") -> str:
-    """拼云空间文件链接。接口返回 url 时优先用接口的，这里只是兜底。"""
-    root = (base or "https://feishu.cn/file/").strip()
+    """拼云空间文件链接。没有租户域名时返回空串。
+
+    通用域名 https://feishu.cn/file/<token> 会 301 到 www 再跳登录页
+    （2026-11-27 实测），手机上点开是飞书首页——不如不给链接。
+    """
+    root = (base or "").strip()
+    if not root:
+        return ""
     if not root.endswith("/"):
         root += "/"
     return root + str(file_token)
@@ -247,7 +253,8 @@ def _do_archive(conn, session: dict, bot, path: Path) -> dict:
     share = grant_member(bot.client, token, owner) if owner else {
         "ok": False, "error": "没有可授权的操作者（先给机器人发一句话）"}
 
-    store.set_audio_meta(conn, sid, drive_token=token, drive_url=url,
+    # 没有可信链接时写 NULL：文档里的「## 录音」据此决定出不出现。
+    store.set_audio_meta(conn, sid, drive_token=token, drive_url=url or None,
                          drive_uploaded_at=store.now())
     logs.log_event("feishu.drive_archived", session_id=sid,
                    size=out.get("size"), chunks=out.get("chunks"),
