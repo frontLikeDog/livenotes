@@ -50,9 +50,13 @@ def isolated_paths(tmp_path, monkeypatch):
     monkeypatch.setattr(feishu, "CFG_PATH", data / "feishu.json")
     monkeypatch.setattr(rooms, "PATH", data / "rooms.json")
     monkeypatch.delenv("FEISHU_PUBLISH_ENABLED", raising=False)
+    monkeypatch.delenv("FEISHU_PUBLISH_BASE", raising=False)
+    monkeypatch.delenv("FEISHU_BASE_CLAIMS_TABLE_ID", raising=False)
     feishu_publish.reset_bot()
     feishu_publish._INFLIGHT.clear()
     feishu_publish._TABLES.clear()
+    feishu_publish._BASE_READY.clear()
+    feishu_publish._BASE_GRANTED.clear()
 
     metrics.METRICS.reset()
     glossary._cache.update({"key": None, "entries": []})

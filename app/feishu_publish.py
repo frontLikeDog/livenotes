@@ -19,21 +19,24 @@
     FEISHU_PUBLISH_FOLDER_TOKEN     场次文档文件夹；不填复用 doc_folder_token
     FEISHU_BASE_FOLDER_TOKEN        场次表文件夹；不填复用文档文件夹
     FEISHU_BASE_APP_TOKEN           可选：预建 Base；不填首次发布自动建
-    FEISHU_BASE_TABLE_ID            可选：预建数据表；不填自动建
-    FEISHU_PUBLISH_BASE=0           只发文档、不写场次表
+    FEISHU_BASE_TABLE_ID            可选：预建场次表；不填自动建
+    FEISHU_BASE_CLAIMS_TABLE_ID     可选：预建观点表；不填自动建
+    FEISHU_PUBLISH_BASE=0           只发文档、不写场次表与观点表
 """
 from __future__ import annotations
 
 import hashlib
+import os
 import sqlite3
 import threading
 import time
 import traceback
 from typing import Any
 
-from . import export, feishu, logs, store
+from . import claims, export, feishu, identity, logs, store, timefmt
 
 KIND_SESSION = "session"
+KIND_CLAIMS = "claims"
 STATE_OK = "ok"
 STATE_PARTIAL = "partial"
 STATE_FAILED = "failed"
@@ -45,6 +48,8 @@ DOC_FAILED_SUMMARY = "failed_summary"
 
 BASE_NAME = "LiveNotes 场次"
 TABLE_NAME = "场次"
+TABLE_CLAIMS = "观点"
+CLAIMS_DEFAULT_VIEW = "最近观点"
 
 # 场次表字段（docs/47 §3.2）。MVP 不用「关联」字段：文本 session_id + URL，
 # upsert 简单，也不会因为跨表 token 变化整表失效。选项就是写入时用的那几个值。
@@ -72,7 +77,27 @@ FIELD_DEFS: list[dict[str, Any]] = [
     {"field_name": "采集", "type": 1},
 ]
 
+# 观点表字段（docs/47 §3.2、§3.6.3）。主字段必须是第一个字段（「观点」）；
+# 主题是本场自由词表，用文本不用多选避免选项缺失整行失败；不用关联字段，
+# 用文本 session_id / person_id + URL。状态只建三个：不做「被反驳」，避免词面误报。
+CLAIMS_FIELD_DEFS: list[dict[str, Any]] = [
+    {"field_name": "观点", "type": 1},
+    {"field_name": "谁", "type": 1},
+    {"field_name": "主题", "type": 1},
+    {"field_name": "类别", "type": 3, "options": ["主张", "问题"]},
+    {"field_name": "状态", "type": 3, "options": ["新提出", "重申", "修正"]},
+    {"field_name": "场次", "type": 1},
+    {"field_name": "日期", "type": 5},
+    {"field_name": "时间码", "type": 1},
+    {"field_name": "原话", "type": 1},
+    {"field_name": "场次文档链接", "type": 15},
+    {"field_name": "claim_id", "type": 1},
+    {"field_name": "session_id", "type": 1},
+    {"field_name": "person_id", "type": 1},
+]
+
 _BASE_READY: set[tuple[str, str]] = set()
+_BASE_GRANTED: set[tuple[str, str]] = set()
 
 
 _LOCKS: dict[str, threading.Lock] = {}
@@ -122,6 +147,7 @@ def config() -> dict:
         "base_enabled": bool(raw.get("base_enabled", True)),
         "base_app_token": str(raw.get("base_app_token") or ""),
         "base_table_id": str(raw.get("base_table_id") or ""),
+        "base_claims_table_id": str(raw.get("base_claims_table_id") or ""),
         "base_folder_token": str(raw.get("base_folder_token") or ""),
         "base_url_base": str(raw.get("base_url_base") or ""),
     }
@@ -272,10 +298,56 @@ def _publish(sid: str, *, bot=None, conn: sqlite3.Connection | None = None,
         can_reuse = (bool(row.get("doc_token")) and same_version and not force
                      and row.get("state") in (STATE_OK, STATE_PARTIAL))
 
-        # 版本没变、上次也成功：什么都不写。重试命令不该把同一篇正文反复清空。
+        # 版本没变、上次也成功：文档不动（保住评论锚点）；若观点签名变了只补观点表。
         if (same_version and not force and row.get("state") == STATE_OK
                 and row.get("doc_url")
                 and (row.get("record_id") or not base_on)):
+            claims_res: dict = {"ok": True, "skipped": True}
+            if base_on:
+                try:
+                    claims_res = _upsert_claims(
+                        conn, bot_obj, sid, str(row.get("doc_url") or ""),
+                        force=False)
+                except Exception as e:
+                    traceback.print_exc()
+                    claims_res = {"ok": False, "error": str(e)}
+                if not claims_res.get("ok"):
+                    err_msg = "观点表没写成功：%s" % claims_res.get("error", "")
+                    latency_ms = int((time.monotonic() - started) * 1000)
+                    store.upsert_publish(
+                        conn, sid, KIND_SESSION, state=STATE_PARTIAL,
+                        error=err_msg[:1000], latency_ms=latency_ms,
+                        attempts=int(row.get("attempts") or 0) + 1)
+                    logs.log_event(
+                        "feishu.publish_ok", level="info", session_id=sid,
+                        state=STATE_PARTIAL, kind=KIND_SESSION,
+                        latency_ms=latency_ms, doc_state=doc["state"],
+                        error=err_msg[:200])
+                    return {"ok": True, "unchanged": False,
+                            "claims_updated": False, "session_id": sid,
+                            "state": STATE_PARTIAL, "doc_state": doc["state"],
+                            "title": doc["title"],
+                            "doc_url": row.get("doc_url") or "",
+                            "record_id": row.get("record_id") or "",
+                            "record_url": (row.get("meta") or {}).get("record_url") or "",
+                            "base_url": (row.get("meta") or {}).get("base_url") or "",
+                            "version": version, "latency_ms": latency_ms,
+                            "error": err_msg, "warnings": [err_msg],
+                            "overview": doc.get("overview") or "",
+                            "counts": doc.get("counts") or {}}
+                if not claims_res.get("skipped"):
+                    latency_ms = int((time.monotonic() - started) * 1000)
+                    return {"ok": True, "unchanged": False,
+                            "claims_updated": True, "session_id": sid,
+                            "state": STATE_OK, "doc_state": doc["state"],
+                            "title": doc["title"],
+                            "doc_url": row.get("doc_url") or "",
+                            "record_id": row.get("record_id") or "",
+                            "record_url": (row.get("meta") or {}).get("record_url") or "",
+                            "base_url": (row.get("meta") or {}).get("base_url") or "",
+                            "version": version, "latency_ms": latency_ms,
+                            "overview": doc.get("overview") or "",
+                            "counts": doc.get("counts") or {}}
             logs.log_event("feishu.publish_skipped", session_id=sid,
                            reason="unchanged", version=version)
             return {"ok": True, "unchanged": True, "session_id": sid,
@@ -317,18 +389,42 @@ def _publish(sid: str, *, bot=None, conn: sqlite3.Connection | None = None,
         if not doc_ok:
             warnings.append(doc_error)
 
+        old_meta = row.get("meta") or {}
         base_res: dict = {"ok": True, "skipped": True}
         if base_on:
+            # 文档和场次表都已为当前版本写过（例如上次仅观点表失败），重试只补观点表。
+            reuse_base = (can_reuse and bool(row.get("record_id"))
+                          and bool(old_meta.get("base_ok")) and doc_ok)
+            if reuse_base:
+                base_res = {"ok": True, "skipped": True,
+                            "record_id": row.get("record_id") or "",
+                            "record_url": old_meta.get("record_url") or "",
+                            "base_url": old_meta.get("base_url") or ""}
+            else:
+                try:
+                    base_res = _upsert_session_row(conn, bot_obj, doc, doc_ok,
+                                                   doc_url, row.get("record_id") or "")
+                except Exception as e:
+                    traceback.print_exc()
+                    base_res = {"ok": False, "error": str(e)}
+                if not base_res.get("ok"):
+                    warnings.append("场次表没写成功：%s" % base_res.get("error", ""))
+                elif base_res.get("grant_error"):
+                    warnings.append("场次表授权失败：%s" % base_res["grant_error"])
+
+        claims_res = {"ok": True, "skipped": True}
+        if base_on:
+            claims_doc_url = doc_url if doc_ok else ""
             try:
-                base_res = _upsert_session_row(conn, bot_obj, doc, doc_ok,
-                                               doc_url, row.get("record_id") or "")
+                claims_res = _upsert_claims(conn, bot_obj, sid, claims_doc_url,
+                                            force=force)
             except Exception as e:
                 traceback.print_exc()
-                base_res = {"ok": False, "error": str(e)}
-            if not base_res.get("ok"):
-                warnings.append("场次表没写成功：%s" % base_res.get("error", ""))
-            elif base_res.get("grant_error"):
-                warnings.append("场次表授权失败：%s" % base_res["grant_error"])
+                claims_res = {"ok": False, "error": str(e)}
+            if not claims_res.get("ok"):
+                warnings.append("观点表没写成功：%s" % claims_res.get("error", ""))
+            elif claims_res.get("grant_error") and not base_res.get("grant_error"):
+                warnings.append("观点表授权失败：%s" % claims_res["grant_error"])
 
         state = STATE_OK
         if not doc_ok:
@@ -336,13 +432,13 @@ def _publish(sid: str, *, bot=None, conn: sqlite3.Connection | None = None,
         elif warnings:
             state = STATE_PARTIAL
         latency_ms = int((time.monotonic() - started) * 1000)
-        old_meta = row.get("meta") or {}
         meta = {
             "doc_state": doc["state"],
             "base_url": base_res.get("base_url") or old_meta.get("base_url") or "",
             "record_url": (base_res.get("record_url")
                            or old_meta.get("record_url") or ""),
             "base_skipped": bool(base_res.get("skipped")),
+            "base_ok": bool(base_res.get("ok")),
         }
         row = store.upsert_publish(
             conn, sid, KIND_SESSION, state=state, version=version,
@@ -492,33 +588,36 @@ def _opt_property(spec: dict):
         for o in opts]).build())
 
 
-def _create_table(client, app_token: str) -> dict:
+def _create_table(client, app_token: str, table_name: str = TABLE_NAME,
+                  field_defs: list[dict[str, Any]] | None = None,
+                  default_view_name: str = "最近场次") -> dict:
     from lark_oapi.api.bitable.v1 import (
         AppTableCreateHeader, CreateAppTableRequest, CreateAppTableRequestBody,
         ReqTable)
+    defs = FIELD_DEFS if field_defs is None else field_defs
     headers = []
-    for spec in FIELD_DEFS:
+    for spec in defs:
         b = (AppTableCreateHeader.builder()
              .field_name(spec["field_name"]).type(int(spec["type"])))
         prop = _opt_property(spec)
         if prop is not None:
             b = b.property(prop)
         headers.append(b.build())
-    table = (ReqTable.builder().name(TABLE_NAME)
-             .default_view_name("最近场次").fields(headers).build())
+    table = (ReqTable.builder().name(table_name)
+             .default_view_name(default_view_name).fields(headers).build())
     body = CreateAppTableRequestBody.builder().table(table).build()
     resp = client.bitable.v1.app_table.create(
         CreateAppTableRequest.builder().app_token(app_token)
         .request_body(body).build())
     if not resp.success():
-        return {"ok": False, "error": "建场次表失败：" + _err(resp)}
+        return {"ok": False, "error": "建%s表失败：%s" % (table_name, _err(resp))}
     table_id = str(getattr(resp.data, "table_id", "") or "")
     if not table_id:
-        return {"ok": False, "error": "建场次表没返回 table_id"}
+        return {"ok": False, "error": "建%s表没返回 table_id" % table_name}
     return {"ok": True, "table_id": table_id}
 
 
-def _find_table(client, app_token: str) -> str:
+def _find_table(client, app_token: str, table_name: str = TABLE_NAME) -> str:
     from lark_oapi.api.bitable.v1 import ListAppTableRequest
     token = ""
     for _ in range(10):
@@ -530,7 +629,7 @@ def _find_table(client, app_token: str) -> str:
             return ""
         data = resp.data
         for item in (getattr(data, "items", None) or []):
-            if str(getattr(item, "name", "")) == TABLE_NAME:
+            if str(getattr(item, "name", "")) == table_name:
                 return str(getattr(item, "table_id", "") or "")
         token = str(getattr(data, "page_token", "") or "")
         if not getattr(data, "has_more", False) or not token:
@@ -538,21 +637,23 @@ def _find_table(client, app_token: str) -> str:
     return ""
 
 
-def _ensure_fields(client, app_token: str, table_id: str) -> str:
-    """老表补字段：用户在飞书里删了「观点数」，发布不该静默丢这一列。"""
+def _ensure_fields(client, app_token: str, table_id: str,
+                   field_defs: list[dict[str, Any]] | None = None) -> str:
+    """老表补字段：用户在飞书里删了某列，发布不该静默丢这一列。"""
     key = (app_token, table_id)
     if key in _BASE_READY:
         return ""
+    defs = FIELD_DEFS if field_defs is None else field_defs
     from lark_oapi.api.bitable.v1 import (
         AppTableField, CreateAppTableFieldRequest, ListAppTableFieldRequest)
     resp = client.bitable.v1.app_table_field.list(
         ListAppTableFieldRequest.builder().app_token(app_token)
         .table_id(table_id).page_size(100).build())
     if not resp.success():
-        return "读场次表字段失败：" + _err(resp)
+        return "读多维表格字段失败：" + _err(resp)
     names = {str(getattr(f, "field_name", ""))
              for f in (getattr(resp.data, "items", None) or [])}
-    for spec in FIELD_DEFS:
+    for spec in defs:
         if spec["field_name"] in names:
             continue
         b = (AppTableField.builder()
@@ -569,6 +670,21 @@ def _ensure_fields(client, app_token: str, table_id: str) -> str:
     return ""
 
 
+def _ensure_base_grant(bot, app_token: str) -> str:
+    """Base 级授权（覆盖表内所有表）。复用已有 Base 时也走一次，确保 owner 可见。"""
+    owner = _owner(bot)
+    if not app_token or not owner:
+        return ""
+    key = (app_token, owner)
+    if key in _BASE_GRANTED:
+        return ""
+    grant = bot._grant_doc(app_token, owner, doc_type="bitable")
+    if grant.get("ok"):
+        _BASE_GRANTED.add(key)
+        return ""
+    return str(grant.get("error") or "")
+
+
 def ensure_base(conn: sqlite3.Connection, bot) -> dict:
     """拿到（必要时创建）场次表。token 记进 index_meta，进程重启也不重建。"""
     cfg = _cfg(bot)
@@ -579,6 +695,7 @@ def ensure_base(conn: sqlite3.Connection, bot) -> dict:
     base_url = str(cfg.get("base_url_base")
                    or store.get_kv(conn, "feishu_base_url") or "")
     client = bot.client
+    created_base = False
 
     if not app_token:
         from lark_oapi.api.bitable.v1 import CreateAppRequest, ReqApp
@@ -598,30 +715,57 @@ def ensure_base(conn: sqlite3.Connection, bot) -> dict:
         store.set_kv(conn, "feishu_base_app_token", app_token)
         if base_url:
             store.set_kv(conn, "feishu_base_url", base_url)
-        grant_error = ""
-        owner = _owner(bot)
-        if owner:
-            grant = bot._grant_doc(app_token, owner, doc_type="bitable")
-            if not grant.get("ok"):
-                grant_error = str(grant.get("error") or "")
+        created_base = True
+
+    grant_error = _ensure_base_grant(bot, app_token)
+    if created_base:
         logs.log_event("feishu.base_created", app_token=app_token,
                        shared=not grant_error)
 
     if not table_id:
-        table_id = _find_table(client, app_token)
+        table_id = _find_table(client, app_token, TABLE_NAME)
         if not table_id:
-            made = _create_table(client, app_token)
+            made = _create_table(client, app_token, TABLE_NAME, FIELD_DEFS,
+                                 "最近场次")
             if not made.get("ok"):
                 return made
             table_id = made["table_id"]
         store.set_kv(conn, "feishu_base_table_id", table_id)
 
-    bad = _ensure_fields(client, app_token, table_id)
+    bad = _ensure_fields(client, app_token, table_id, FIELD_DEFS)
     if bad:
         return {"ok": False, "error": bad}
     return {"ok": True, "app_token": app_token, "table_id": table_id,
-            "base_url": base_url,
-            "grant_error": locals().get("grant_error", "")}
+            "base_url": base_url, "grant_error": grant_error}
+
+
+def ensure_claims_table(conn: sqlite3.Connection, bot) -> dict:
+    """在已有 Base 里拿到（必要时创建）「观点」表。失败返回 ok=False，不外抛。"""
+    base = ensure_base(conn, bot)
+    if not base.get("ok"):
+        return base
+    app_token = base["app_token"]
+    cfg = _cfg(bot)
+    table_id = str(os.environ.get("FEISHU_BASE_CLAIMS_TABLE_ID")
+                   or cfg.get("base_claims_table_id")
+                   or store.get_kv(conn, "feishu_base_claims_table_id") or "")
+    client = bot.client
+    if not table_id:
+        table_id = _find_table(client, app_token, TABLE_CLAIMS)
+        if not table_id:
+            made = _create_table(client, app_token, TABLE_CLAIMS,
+                                 CLAIMS_FIELD_DEFS, CLAIMS_DEFAULT_VIEW)
+            if not made.get("ok"):
+                return made
+            table_id = made["table_id"]
+        store.set_kv(conn, "feishu_base_claims_table_id", table_id)
+
+    bad = _ensure_fields(client, app_token, table_id, CLAIMS_FIELD_DEFS)
+    if bad:
+        return {"ok": False, "error": bad}
+    return {"ok": True, "app_token": app_token, "table_id": table_id,
+            "base_url": base.get("base_url") or "",
+            "grant_error": base.get("grant_error") or ""}
 
 
 def _find_record(client, app_token: str, table_id: str, sid: str) -> str:
@@ -720,6 +864,301 @@ def _upsert_session_row(conn: sqlite3.Connection, bot, doc: dict, doc_ok: bool,
     return {"ok": True, "record_id": rid, "record_url": record_url,
             "base_url": base.get("base_url") or "",
             "grant_error": base.get("grant_error") or ""}
+
+
+# ---------------------------------------------------------------- 观点表（Base）
+
+def _persons_map(conn: sqlite3.Connection, person_ids: set[str]) -> dict[str, str]:
+    pids = sorted(p for p in person_ids if p)
+    if not pids:
+        return {}
+    ph = ",".join("?" * len(pids))
+    return {
+        str(r["person_id"]): str(r["name"] or "").strip()
+        for r in conn.execute(
+            "SELECT person_id, name FROM persons WHERE person_id IN (" + ph + ")",
+            pids)
+        if str(r["name"] or "").strip()
+    }
+
+
+def _claim_who(row: dict, persons_map: dict[str, str], roster_map: dict) -> str:
+    """观点表「谁」显示名：person_id 查 persons.name；否则 claims.who；
+    未命名退回本场槽位名「本场第 N 位上麦者」，宁可显示槽位名也不要猜。
+    """
+    pid = str(row.get("person_id") or "").strip()
+    if pid and persons_map.get(pid):
+        return persons_map[pid]
+    who = str(row.get("who") or "").strip()
+    if who and not identity.is_positional(who):
+        return who
+    ref = identity.claim_ref(row, roster_map)
+    return str(ref.get("who") or who or "一位上麦者")
+
+
+def _claim_status(conn: sqlite3.Connection, sid: str, started_at: str,
+                  row: dict) -> str:
+    """派生单条观点状态：新提出 / 重申 / 修正。
+
+    只和更早场次里同 person_key、同 topic 的最近一条比；同场内多条不互相比较，
+    避免把一场里的正常发言判成改口。不做「被反驳」（现有只有词面判断，无归属）。
+
+    已知局限：状态相对更早场次算；补发更早历史场次后，已发布场次的状态不会
+    自动重算，除非对该场再 /发布。
+    """
+    pid = str(row.get("person_id") or "").strip()
+    who = str(row.get("who") or "").strip()
+    key = claims.person_key(pid, who)
+    topic = str(row.get("topic") or "").strip()
+    cur_stance = str(row.get("stance") or row.get("gist") or "").strip()
+    if not key or not topic or not started_at or not cur_stance:
+        return "新提出"
+    if key.startswith("name:"):
+        prev = conn.execute(
+            "SELECT c.stance, c.gist FROM claims c "
+            "INNER JOIN sessions s ON s.id=c.session_id "
+            "WHERE c.session_id<>? AND c.person_id='' AND c.who=? AND c.topic=? "
+            "AND (s.deleted_at IS NULL OR s.deleted_at='') "
+            "AND COALESCE(s.started_at,'')<>'' AND s.started_at<? "
+            "ORDER BY s.started_at DESC, COALESCE(c.t, -1) DESC, c.claim_id DESC "
+            "LIMIT 1",
+            (sid, key[len("name:"):], topic, started_at)).fetchone()
+    else:
+        prev = conn.execute(
+            "SELECT c.stance, c.gist FROM claims c "
+            "INNER JOIN sessions s ON s.id=c.session_id "
+            "WHERE c.session_id<>? AND c.person_id=? AND c.topic=? "
+            "AND (s.deleted_at IS NULL OR s.deleted_at='') "
+            "AND COALESCE(s.started_at,'')<>'' AND s.started_at<? "
+            "ORDER BY s.started_at DESC, COALESCE(c.t, -1) DESC, c.claim_id DESC "
+            "LIMIT 1",
+            (sid, key, topic, started_at)).fetchone()
+    if not prev:
+        return "新提出"
+    prev_stance = str(prev["stance"] or prev["gist"] or "").strip()
+    if not prev_stance:
+        return "新提出"
+    ratio = claims.similarity(cur_stance, prev_stance)
+    if ratio >= claims.SAME_RATIO:
+        return "重申"
+    if ratio < claims.REVISION_RATIO:
+        return "修正"
+    return "新提出"
+
+
+def _claims_records(conn: sqlite3.Connection, sid: str,
+                    doc_url: str = "") -> tuple[list[dict[str, Any]], str]:
+    """把本场 claims 投影成多维表格行列表 + 幂等签名（sha1 前 16 位）。"""
+    rows = claims.rows_for(conn, session_id=sid, limit=1000)
+    s = store.get_session(conn, sid) or {}
+    session_title = str(s.get("title") or "")
+    started_at = str(s.get("started_at") or "")
+    _, _, started_ms = export._pub_start(started_at)
+    persons_map = _persons_map(
+        conn, {str(r.get("person_id") or "").strip() for r in rows})
+    need_roster = any(
+        not (str(r.get("person_id") or "").strip() in persons_map)
+        and (not str(r.get("who") or "").strip()
+             or identity.is_positional(str(r.get("who") or "")))
+        for r in rows)
+    roster_map = identity.roster(conn, sid) if need_roster else {}
+
+    records: list[dict[str, Any]] = []
+    sig_lines: list[str] = []
+    clean_url = str(doc_url or "").strip()
+    for c in rows:
+        claim_id = str(c.get("claim_id") or "")
+        person_id = str(c.get("person_id") or "").strip()
+        who_display = _claim_who(c, persons_map, roster_map)
+        topic = str(c.get("topic") or "").strip()
+        stance = str(c.get("stance") or "").strip()
+        gist = str(c.get("gist") or "").strip()
+        quote = str(c.get("quote") or "").strip()[:300]
+        viewpoint = stance or gist or quote[:80]
+        kind_raw = str(c.get("kind") or "claim").strip()
+        kind_label = "问题" if kind_raw == "question" else "主张"
+        status = _claim_status(conn, sid, started_at, c)
+        raw_t = c.get("t")
+        t_str = (timefmt.offset(raw_t)
+                 if raw_t is not None and raw_t != "" else "")
+        fields: dict[str, Any] = {
+            "观点": viewpoint,
+            "谁": who_display,
+            "主题": topic,
+            "类别": kind_label,
+            "状态": status,
+            "场次": session_title or str(c.get("session_title") or ""),
+            "时间码": t_str,
+            "原话": quote,
+            "claim_id": claim_id,
+            "session_id": str(sid),
+            "person_id": person_id,
+        }
+        if started_ms:
+            fields["日期"] = int(started_ms)
+        if clean_url:
+            fields["场次文档链接"] = {"link": clean_url, "text": "打开场次文档"}
+        records.append(fields)
+        sig_lines.append("|".join([
+            claim_id, person_id, who_display, topic, viewpoint,
+            kind_raw, quote, t_str, status,
+        ]))
+    raw_sig = "\n".join(sig_lines + ["doc_url=" + clean_url])
+    sig = hashlib.sha1(raw_sig.encode("utf-8")).hexdigest()[:16]
+    return records, sig
+
+
+def _search_session_records(client, app_token: str, table_id: str,
+                            sid: str) -> tuple[list[str], str]:
+    """按 session_id 翻页查出本场全部 record_id（每页 100 条直到 has_more=false）。"""
+    from lark_oapi.api.bitable.v1 import (
+        Condition, FilterInfo, SearchAppTableRecordRequest,
+        SearchAppTableRecordRequestBody)
+    body = (SearchAppTableRecordRequestBody.builder()
+            .filter(FilterInfo.builder().conjunction("and").conditions([
+                Condition.builder().field_name("session_id").operator("is")
+                .value([str(sid)]).build()]).build())
+            .automatic_fields(False).build())
+    ids: list[str] = []
+    token = ""
+    for _ in range(200):
+        b = (SearchAppTableRecordRequest.builder()
+             .app_token(app_token).table_id(table_id)
+             .page_size(100).request_body(body))
+        if token:
+            b = b.page_token(token)
+        resp = client.bitable.v1.app_table_record.search(b.build())
+        if not resp.success():
+            return [], "查询观点表旧行失败：" + _err(resp)
+        data = resp.data
+        for r in (getattr(data, "items", None) or []):
+            rid = str(getattr(r, "record_id", "") or "")
+            if rid:
+                ids.append(rid)
+        token = str(getattr(data, "page_token", "") or "")
+        if not getattr(data, "has_more", False) or not token:
+            break
+    return ids, ""
+
+
+def _upsert_claims(conn: sqlite3.Connection, bot, sid: str,
+                   doc_url: str | None = None,
+                   force: bool = False) -> dict:
+    """按场次整体替换观点表记录：先按 session_id 删旧行，再批量建新行。
+
+    为什么不逐条 update：claim_id 随要点序号生成，重跑总结要点数量会变，
+    逐条 update 会留下孤儿旧行。先删后写；若删成功建失败则台账记 failed，
+    下次重试仍是「搜（空）→ 建」，不会重复。
+    """
+    started = time.monotonic()
+    if doc_url is None:
+        sess_pub = store.get_publish(conn, sid, KIND_SESSION)
+        if sess_pub and sess_pub.get("state") in (STATE_OK, STATE_PARTIAL):
+            doc_url = str(sess_pub.get("doc_url") or "")
+        else:
+            doc_url = ""
+    else:
+        doc_url = str(doc_url or "")
+
+    records, sig = _claims_records(conn, sid, doc_url)
+    prev = store.get_publish(conn, sid, KIND_CLAIMS)
+
+    # 没有观点且台账从未写过：跳过，不建空表也不发请求。
+    if not records and prev is None:
+        logs.log_event("feishu.claims_upsert", session_id=sid, records=0,
+                       deleted=0, created=0, action="skipped")
+        return {"ok": True, "skipped": True, "records": 0,
+                "deleted": 0, "created": 0, "action": "skipped"}
+
+    # 签名没变且上次成功（非 force）：不发任何删/写请求。
+    if (not force and prev and prev.get("state") == STATE_OK
+            and prev.get("version") == sig):
+        logs.log_event("feishu.claims_upsert", session_id=sid,
+                       records=len(records), deleted=0, created=0,
+                       action="skipped")
+        return {"ok": True, "skipped": True, "records": len(records),
+                "deleted": 0, "created": 0, "action": "skipped"}
+
+    attempts = int((prev or {}).get("attempts") or 0) + 1
+
+    def _fail(err: str, deleted: int = 0, created: int = 0) -> dict:
+        latency_ms = int((time.monotonic() - started) * 1000)
+        store.upsert_publish(
+            conn, sid, KIND_CLAIMS, state=STATE_FAILED, version=sig,
+            doc_url=doc_url, error=str(err)[:1000],
+            meta={"records": len(records), "deleted": deleted,
+                  "created": created},
+            latency_ms=latency_ms, attempts=attempts)
+        logs.log_event("feishu.claims_upsert", level="warn", session_id=sid,
+                       records=len(records), deleted=deleted, created=created,
+                       action="failed", error=str(err)[:200])
+        return {"ok": False, "error": str(err), "records": len(records),
+                "deleted": deleted, "created": created}
+
+    tbl = ensure_claims_table(conn, bot)
+    if not tbl.get("ok"):
+        return _fail(str(tbl.get("error") or "建观点表失败"))
+
+    app_token = tbl["app_token"]
+    table_id = tbl["table_id"]
+    client = bot.client
+
+    old_ids, search_err = _search_session_records(client, app_token, table_id, sid)
+    if search_err:
+        return _fail(search_err)
+
+    deleted = 0
+    if old_ids:
+        from lark_oapi.api.bitable.v1 import (
+            BatchDeleteAppTableRecordRequest,
+            BatchDeleteAppTableRecordRequestBody)
+        for i in range(0, len(old_ids), 500):
+            chunk = old_ids[i:i + 500]
+            body = (BatchDeleteAppTableRecordRequestBody.builder()
+                    .records(chunk).build())
+            resp = client.bitable.v1.app_table_record.batch_delete(
+                BatchDeleteAppTableRecordRequest.builder()
+                .app_token(app_token).table_id(table_id)
+                .request_body(body).build())
+            if not resp.success():
+                return _fail("删除观点表旧行失败：" + _err(resp),
+                             deleted=deleted)
+            deleted += len(chunk)
+
+    created = 0
+    if records:
+        from lark_oapi.api.bitable.v1 import (
+            AppTableRecord, BatchCreateAppTableRecordRequest,
+            BatchCreateAppTableRecordRequestBody)
+        for i in range(0, len(records), 500):
+            chunk = records[i:i + 500]
+            rec_objs = [AppTableRecord.builder().fields(f).build()
+                        for f in chunk]
+            body = (BatchCreateAppTableRecordRequestBody.builder()
+                    .records(rec_objs).build())
+            resp = client.bitable.v1.app_table_record.batch_create(
+                BatchCreateAppTableRecordRequest.builder()
+                .app_token(app_token).table_id(table_id)
+                .request_body(body).build())
+            if not resp.success():
+                return _fail("写入观点表失败：" + _err(resp),
+                             deleted=deleted, created=created)
+            created += len(chunk)
+
+    latency_ms = int((time.monotonic() - started) * 1000)
+    store.upsert_publish(
+        conn, sid, KIND_CLAIMS, state=STATE_OK, version=sig,
+        doc_url=doc_url, error="",
+        meta={"table_id": table_id, "records": len(records),
+              "deleted": deleted, "created": created},
+        latency_ms=latency_ms, attempts=attempts,
+        published_at=store.now())
+    logs.log_event("feishu.claims_upsert", session_id=sid,
+                   records=len(records), deleted=deleted,
+                   created=created, action="created")
+    return {"ok": True, "skipped": False, "records": len(records),
+            "deleted": deleted, "created": created, "action": "created",
+            "table_id": table_id, "grant_error": tbl.get("grant_error") or ""}
 
 
 # ---------------------------------------------------------------- 收尾卡

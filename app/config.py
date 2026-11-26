@@ -51,6 +51,7 @@ OFFLINE_ASR_FINALIZE_RETRY_S = float(os.environ.get(
 # 凭证和开关都可由 data/feishu.json 覆盖（环境变量优先）。
 FEISHU_PUBLISH_ENABLED = os.environ.get(
     "FEISHU_PUBLISH_ENABLED", "0").lower() in ("1", "true", "yes", "on")
+FEISHU_BASE_CLAIMS_TABLE_ID = os.environ.get("FEISHU_BASE_CLAIMS_TABLE_ID", "")
 
 
 def _lan_ip() -> str:
