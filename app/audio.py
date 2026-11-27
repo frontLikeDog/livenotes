@@ -159,6 +159,101 @@ def to_m4a(src: Path | str, dst: Path | str, bitrate: str | None = None) -> tupl
             pass
 
 
+# ---------------------------------------------------------------- 切片
+
+# 飞书云空间单文件上限实测恰好 20MB（2026-11-27：20,971,521 被拒、
+# 20,971,520 成功，prepare/part/finish 分片上传也一样被挡）。
+# 长场次只能按时间轴切片，每段都落在上限内。
+SPLIT_SAFETY = 0.9
+
+
+def _parse_hms(text: str) -> float:
+    """``01:02:03.45`` / ``123.4`` -> 秒。解析失败返回 0。"""
+    raw = str(text or "").strip()
+    if not raw:
+        return 0.0
+    try:
+        parts = raw.split(":")
+        if len(parts) == 3:
+            return (float(parts[0]) * 3600 + float(parts[1]) * 60
+                    + float(parts[2]))
+        return float(raw)
+    except ValueError:
+        return 0.0
+
+
+def audio_duration(path: Path | str) -> float:
+    """读音频时长（秒）：优先 ffprobe，没有就解析 ffmpeg 的 stderr。"""
+    src = Path(path)
+    ff = ffmpeg_path()
+    if not ff:
+        return 0.0
+    probe = shutil.which("ffprobe") or ""
+    if not probe:
+        cand = Path(ff).with_name("ffprobe" + (".exe" if os.name == "nt" else ""))
+        probe = str(cand) if cand.is_file() else ""
+    try:
+        if probe:
+            p = subprocess.run(
+                [probe, "-v", "error", "-show_entries", "format=duration",
+                 "-of", "default=noprint_wrappers=1:nokey=1", str(src)],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                timeout=60, creationflags=_CREATE_NO_WINDOW)
+            return _parse_hms((p.stdout or b"").decode("utf-8", "replace"))
+        p = subprocess.run([ff, "-hide_banner", "-i", str(src)],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                           timeout=60, creationflags=_CREATE_NO_WINDOW)
+        for line in (p.stderr or b"").decode("utf-8", "replace").splitlines():
+            line = line.strip()
+            if line.startswith("Duration:"):
+                return _parse_hms(line.split("Duration:", 1)[1].split(",")[0])
+        return 0.0
+    except (OSError, subprocess.TimeoutExpired):
+        return 0.0
+
+
+def split_m4a(src: Path | str, limit_bytes: int,
+              out_dir: Path | str | None = None) -> tuple[list[Path], str]:
+    """按大小把 m4a 切成若干段，每段不超过 ``limit_bytes``。
+
+    飞书云空间单文件上限 20MB，分片上传也绕不过；长场次只能切片。
+    用 ``-c copy`` 按时间轴切，不重新编码，音质不变。
+    返回 ``(parts, error)``；任何一段失败都返回空列表，已生成的文件由调用方清理。
+    """
+    src = Path(src)
+    if src.suffix.lower() not in (".m4a", ".mp4"):
+        # .aac 通常是裸 ADTS，没有 moov，切出来也不是可校验的 MP4；先转 m4a。
+        return [], "只有 m4a/mp4 能切片（当前 %s）" % (src.suffix or "无后缀")
+    if not src.is_file() or src.stat().st_size <= 0:
+        return [], "音频文件不存在或为空"
+    size = src.stat().st_size
+    target = max(1, int(int(limit_bytes) * SPLIT_SAFETY))
+    n = max(2, (size + target - 1) // target)
+    total = audio_duration(src)
+    if total <= 0:
+        return [], "读不出音频时长，无法切片"
+    out = Path(out_dir) if out_dir else src.parent
+    out.mkdir(parents=True, exist_ok=True)
+    seg = total / n
+    parts: list[Path] = []
+    for i in range(n):
+        part = out / ("%s_%02d%s" % (src.stem, i + 1, src.suffix))
+        args = (["-hide_banner", "-loglevel", "error", "-y",
+                 "-ss", "%.3f" % (i * seg), "-i", str(src),
+                 "-t", "%.3f" % seg, "-map", "0:a:0", "-c", "copy",
+                 "-avoid_negative_ts", "make_zero", str(part)])
+        ok, err = _run(args, timeout=600)
+        if not ok or not part.is_file() or part.stat().st_size <= 0:
+            return [], "第 %d 段切片失败：%s" % (i + 1, err or "没有输出")
+        if part.stat().st_size > int(limit_bytes):
+            return [], "第 %d 段 %d MB 仍超过上限" % (
+                i + 1, part.stat().st_size // (1024 * 1024))
+        if not mp4_has_moov(part):
+            return [], "第 %d 段不完整（缺少 moov）" % (i + 1)
+        parts.append(part)
+    return parts, ""
+
+
 def to_opus(src: Path | str, dst: Path | str, bitrate: str | None = None) -> tuple[bool, str]:
     """转 Ogg Opus，给飞书语音消息用。短片段才走这里，不做整场归档。"""
     src, dst = Path(src), Path(dst)

@@ -7,7 +7,8 @@
 不做接收人选择器。
 
 两条硬约束：
-  - ``upload_all`` 单文件上限 20 MB，超过必须走 prepare/part/finish 分片；
+  - ``upload_all`` 单文件上限 20 MB，分片上传也绕不过（2026-11-27 实测），
+    更长的场次按时间轴切成多段分别上传；
   - 应用上传的文件归应用所有，不授权的话用户点开只有「无权限」。
 
 本地仍是真相源：上传失败只影响「云端有没有副本」，不影响录音与回听。
@@ -16,14 +17,16 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
 import os
 import re
+import shutil
 import tempfile
 import traceback
 from datetime import datetime
 from pathlib import Path
 
-from . import feishu_http, logs, store
+from . import audio, feishu_http, logs, store
 from .config import AUDIO_DIR
 
 # upload_all 的硬上限；超过走分片。放到模块级是为了测试能改小。
@@ -466,6 +469,97 @@ def move_file(client, file_token: str, folder_token: str,
         return {"ok": False, "error": "移动文件异常：%s" % e}
 
 
+# ---------------------------------------------------------------- 切片归档
+
+def _parts_from(session: dict) -> list[dict]:
+    """读 ``drive_parts_json``；坏数据当空列表，不让它拖垮归档。"""
+    raw = str(session.get("drive_parts_json") or "")
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return []
+    if not isinstance(data, list):
+        return []
+    return [dict(x) for x in data if isinstance(x, dict)]
+
+
+def _archive_sliced(conn, session: dict, bot, path: Path, target: dict) -> dict:
+    """超过单文件上限的录音：切段上传到同一场次文件夹，库里记 parts。
+
+    文档和场次表的「录音」链接指向场次文件夹（一段一个文件，按名字排序），
+    文件夹本身也授权给操作者，手机上点进去能逐段播放。
+    """
+    sid = str(session.get("id") or "")
+    folder = str(target.get("token") or "")
+    folder_url = str(target.get("url") or "")
+    cfg = getattr(bot, "cfg", {}) or {}
+    owner = str(getattr(bot, "owner_open_id", "")
+                or cfg.get("owner_open_id") or "")
+    work = Path(tempfile.mkdtemp(prefix="lnsplit-", dir=str(path.parent)))
+    try:
+        parts, err = audio.split_m4a(path, MAX_SINGLE_UPLOAD, work)
+        if not parts:
+            return {"ok": False, "error": err or "切片失败"}
+        title = safe_name(str(session.get("title") or sid))
+        uploaded: list[dict] = []
+        for i, part in enumerate(parts, 1):
+            name = "%s_%02d%s" % (title, i, path.suffix)
+            out = upload_file(bot.client, part, folder, name)
+            if not out.get("ok"):
+                for u in uploaded:
+                    _delete_file(bot.client, str(u.get("token") or ""))
+                return {"ok": False,
+                        "error": "第 %d/%d 段上传失败：%s" % (
+                            i, len(parts), out.get("error") or "")}
+            token = str(out.get("file_token") or "")
+            url = out.get("url") or file_url(
+                token, str(cfg.get("drive_url_base") or ""))
+            share = grant_member(bot.client, token, owner) if owner else {
+                "ok": False, "error": "没有可授权的操作者"}
+            uploaded.append({"token": token, "url": url, "name": name,
+                             "size": int(out.get("size")
+                                         or part.stat().st_size),
+                             "shared": bool(share.get("ok"))})
+
+        # 文件夹链接要能点开，文件夹本身也得授权给操作者。
+        folder_shared = False
+        if owner and folder:
+            folder_shared = bool(grant_member(
+                bot.client, folder, owner, doc_type="folder").get("ok"))
+
+        # 新副本全部成功后再删旧副本（单个文件或旧分段）。
+        old = [str(session.get("drive_token") or "")]
+        old += [str(p.get("token") or "") for p in _parts_from(session)]
+        keep = {u["token"] for u in uploaded}
+        for tok in dict.fromkeys(t for t in old if t and t not in keep):
+            _delete_file(bot.client, tok)
+
+        url = folder_url or str(uploaded[0].get("url") or "")
+        store.set_audio_meta(
+            conn, sid, drive_token=None, drive_url=url or None,
+            drive_uploaded_at=store.now(),
+            drive_parts_json=json.dumps(uploaded, ensure_ascii=False),
+            audio_media_token=None)
+        logs.log_event("feishu.drive_archived", session_id=sid,
+                       size=path.stat().st_size, parts=len(uploaded),
+                       folder_token=folder[:12], sliced=True,
+                       folder_shared=folder_shared)
+        res = {"ok": True, "session_id": sid, "file_token": "", "url": url,
+               "size": path.stat().st_size, "chunks": len(uploaded),
+               "parts": len(uploaded), "part_list": uploaded, "sliced": True,
+               "shared": all(u["shared"] for u in uploaded),
+               "folder_token": folder, "folder_url": folder_url,
+               "folder_created": bool(target.get("created")),
+               "folder_shared": folder_shared, "replaced": False}
+        if target.get("fallback"):
+            res["folder_error"] = str(target.get("error") or "")
+        return res
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
 # ---------------------------------------------------------------- Base 附件素材
 
 def _media_upload_all(client, path: Path, name: str, parent_node: str,
@@ -719,6 +813,16 @@ def _do_archive(conn, session: dict, bot, path: Path) -> dict:
         return target
     folder = str(target["token"])
 
+    size = path.stat().st_size
+    if size > MAX_SINGLE_UPLOAD:
+        # 飞书单文件上限 20MB，分片上传也绕不过：m4a 切片，别的格式先转码。
+        if path.suffix.lower() in (".m4a", ".mp4"):
+            return _archive_sliced(conn, session, bot, path, target)
+        return {"ok": False,
+                "error": "文件 %.1f MB 超过飞书单文件上限，且 %s 不能切片，"
+                         "先转成 m4a 再归档"
+                         % (size / 1048576.0, path.suffix or "无后缀")}
+
     title = str(session.get("title") or sid)
     name = safe_name(title + path.suffix, (sid or "recording") + path.suffix)
     out = _replace_file(bot.client, folder, name, path,
@@ -735,15 +839,23 @@ def _do_archive(conn, session: dict, bot, path: Path) -> dict:
 
     # 没有可信链接时写 NULL：文档里的「## 录音」据此决定出不出现。
     # audio_media_token 清空：音频换代后，Base 附件必须重新上传。
+    # drive_parts_json 清空：这一版是整文件，旧的切片副本已经作废。
+    old_parts = _parts_from(session)
     store.set_audio_meta(conn, sid, drive_token=token, drive_url=url or None,
                          drive_uploaded_at=store.now(),
+                         drive_parts_json=None,
                          audio_media_token=None)
+    for p in old_parts:
+        tok = str(p.get("token") or "")
+        if tok and tok != token:
+            _delete_file(bot.client, tok)
     logs.log_event("feishu.drive_archived", session_id=sid,
                    size=out.get("size"), chunks=out.get("chunks"),
                    shared=bool(share.get("ok")),
                    folder_token=folder[:12], created=bool(target.get("created")))
     res = {"ok": True, "session_id": sid, "file_token": token, "url": url,
            "size": out.get("size", 0), "chunks": out.get("chunks", 1),
+           "parts": 0,
            "shared": bool(share.get("ok")),
            "share_error": "" if share.get("ok") else share.get("error", ""),
            "folder_token": folder, "folder_url": str(target.get("url") or ""),
@@ -797,11 +909,13 @@ def ensure_archived(conn, session: dict, bot=None) -> dict:
                          % (path.stat().st_size // (1024 * 1024))}
 
     old_token = str(session.get("drive_token") or "")
+    old_parts = _parts_from(session)
     uploaded_at = str(session.get("drive_uploaded_at") or "")
     transcoded_at = str(session.get("audio_transcoded_at") or "")
-    if old_token and uploaded_at >= transcoded_at:
+    if (old_token or old_parts) and uploaded_at >= transcoded_at:
         return {"ok": True, "skipped": True, "file_token": old_token,
                 "url": str(session.get("drive_url") or ""),
+                "parts": len(old_parts),
                 "replaced": False, "error": ""}
 
     try:
@@ -820,6 +934,7 @@ def ensure_archived(conn, session: dict, bot=None) -> dict:
         token = str(out.get("file_token") or "")
         return {"ok": True, "skipped": False, "file_token": token,
                 "url": str(out.get("url") or ""),
+                "parts": int(out.get("parts") or 0),
                 "replaced": bool(out.get("replaced")),
                 "folder_token": str(out.get("folder_token") or ""),
                 "folder_url": str(out.get("folder_url") or ""),
