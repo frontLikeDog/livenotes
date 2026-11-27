@@ -47,7 +47,8 @@ OFFLINE_ASR_FINALIZE_RETRY_S = float(os.environ.get(
     "LIVENOTES_OFFLINE_ASR_FINALIZE_RETRY", "600"))
 
 # 飞书原生阅读面（docs/47）：总结完成后把场次发布成一篇云文档 + 多维表格
-# 里的一行。默认关 —— 没配飞书凭证的机器不应该因为发布失败而受影响。
+# 里的一行。feishu.load_config() 在没有显式配置时按凭证判断默认开关；
+# 这里保留常量只给「没有 feishu.json 的纯桌面场景」兜底。
 # 凭证和开关都可由 data/feishu.json 覆盖（环境变量优先）。
 FEISHU_PUBLISH_ENABLED = os.environ.get(
     "FEISHU_PUBLISH_ENABLED", "0").lower() in ("1", "true", "yes", "on")

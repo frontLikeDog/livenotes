@@ -43,6 +43,9 @@ def load_config() -> dict:
     owner = (os.environ.get("FEISHU_OWNER_OPEN_ID")
              or str(raw.get("owner_open_id") or "")
              or open_id)
+    app_id = os.environ.get("FEISHU_APP_ID") or str(raw.get("app_id") or "")
+    app_secret = (os.environ.get("FEISHU_APP_SECRET")
+                  or str(raw.get("app_secret") or ""))
     raw_ids = raw.get("chat_ids") or []
     if isinstance(raw_ids, str):
         raw_ids = re.split(r"[,，\s]+", raw_ids)
@@ -56,14 +59,26 @@ def load_config() -> dict:
     audio_folder = (os.environ.get("FEISHU_AUDIO_FOLDER_TOKEN")
                     or str(raw.get("audio_folder_token") or "")
                     or doc_folder)
-    # 发布器（app/feishu_publish.py）：默认关，桌面用户不配就不自动建文档。
-    # 文件里的值可能是 true/1/"1"，统一按真假字符串判断。
+    # 发布器（app/feishu_publish.py）：显式配置优先；没配时「有飞书凭证就开」，
+    # 让云端配好 app_id/app_secret 后不用再记一个开关；没凭证的桌面用户仍然
+    # 静默跳过（enabled() 还会再检查一次凭证）。
     def _on(v) -> bool:
         return str(v).strip().lower() in ("1", "true", "yes", "on")
 
+    def _default_on(env_name: str, file_value) -> bool:
+        env_val = os.environ.get(env_name)
+        if env_val is not None:
+            return _on(env_val)
+        return True if file_value is None else _on(file_value)
+
     publish_env = os.environ.get("FEISHU_PUBLISH_ENABLED")
     publish_raw = raw.get("publish_enabled")
-    publish_enabled = _on(publish_env if publish_env is not None else publish_raw)
+    if publish_env is not None:
+        publish_enabled = _on(publish_env)
+    elif publish_raw is not None:
+        publish_enabled = _on(publish_raw)
+    else:
+        publish_enabled = bool(app_id and app_secret)
     # 场次文档与 Base 可以有自己的文件夹；没单独配就复用云文档文件夹。
     publish_folder = (os.environ.get("FEISHU_PUBLISH_FOLDER_TOKEN")
                       or str(raw.get("publish_folder_token") or "")
@@ -79,8 +94,8 @@ def load_config() -> dict:
                      or str(raw.get("publish_owner_open_id") or "")
                      or owner)
     return {
-        "app_id": os.environ.get("FEISHU_APP_ID") or str(raw.get("app_id") or ""),
-        "app_secret": os.environ.get("FEISHU_APP_SECRET") or str(raw.get("app_secret") or ""),
+        "app_id": app_id,
+        "app_secret": app_secret,
         "open_id": open_id,
         "owner_open_id": owner,
         "chat_ids": chat_ids,
@@ -97,6 +112,19 @@ def load_config() -> dict:
         # 发布时自动把整场录音归档到云空间；0 = 只保留手动「存入云空间」。
         "archive_on_publish": (os.environ.get("FEISHU_ARCHIVE_ON_PUBLISH", "1")
                                .strip().lower() not in ("0", "false", "no", "off")),
+        # 归档时一并把逐字稿写成 txt 放进场次文件夹，并作为 Base 附件。
+        "archive_transcript": _default_on(
+            "FEISHU_ARCHIVE_TRANSCRIPT", raw.get("archive_transcript")),
+        # 场次文件夹授权给哪个群；不填取 chat_ids 第一个，都为空就跳过。
+        "archive_chat_id": (os.environ.get("FEISHU_ARCHIVE_CHAT_ID")
+                            or str(raw.get("archive_chat_id") or "")
+                            or (chat_ids[0] if chat_ids else "")),
+        "archive_chat_perm": (os.environ.get("FEISHU_ARCHIVE_CHAT_PERM")
+                              or str(raw.get("archive_chat_perm") or "")
+                              or "view"),
+        # Base 的「录音」「逐字稿」附件字段；0 = 只写链接字段，不传附件。
+        "base_attachments": _default_on(
+            "FEISHU_BASE_ATTACHMENTS", raw.get("base_attachments")),
         # 发布器：场次文档 + 场次表（Base）。app/table 留空时首次发布会自动
         # 建一个 Base，并把 token 记进 index_meta，下次直接复用。
         "publish_enabled": publish_enabled,
@@ -344,12 +372,14 @@ class Bot:
         return {"ok": False, "error": err}
 
     def _grant_doc(self, document_id: str, open_id: str,
-                   perm: str = "full_access", doc_type: str = "docx") -> dict:
-        """把文档/多维表格授权给指定用户。失败不抛异常，由调用方决定怎么提示。
+                   perm: str = "full_access", doc_type: str = "docx",
+                   member_type: str = "openid") -> dict:
+        """把文档/多维表格授权给指定用户或群。失败不抛异常，由调用方决定怎么提示。
 
         应用用 tenant_access_token 建的文档归应用所有，默认不在任何人的
         「我的空间」里；不调这一步，用户点链接只会看到无权限。``doc_type``
-        是飞书的资源类型：docx / bitable / file / sheet ...
+        是飞书的资源类型：docx / bitable / file / folder / sheet ...，
+        ``member_type`` 是接收方类型：openid / openchat。
         """
         if not document_id or not open_id:
             return {"ok": False, "error": "缺少 document_id 或 open_id"}
@@ -357,7 +387,8 @@ class Bot:
             from lark_oapi.api.drive.v1 import (
                 BaseMember, CreatePermissionMemberRequest)
             body = (BaseMember.builder()
-                    .member_type("openid").member_id(str(open_id))
+                    .member_type(str(member_type or "openid"))
+                    .member_id(str(open_id))
                     .perm(perm or "full_access").build())
             req = (CreatePermissionMemberRequest.builder()
                    .token(str(document_id)).type(doc_type or "docx")

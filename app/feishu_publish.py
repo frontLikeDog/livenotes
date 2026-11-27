@@ -15,13 +15,14 @@
 
 配置（环境变量优先，其次 data/feishu.json）：
 
-    FEISHU_PUBLISH_ENABLED=1        总开关；默认关，桌面用户可不开
+    FEISHU_PUBLISH_ENABLED           总开关；有 app_id/secret 时默认开，显式 0 关
     FEISHU_PUBLISH_FOLDER_TOKEN     场次文档文件夹；不填复用 doc_folder_token
     FEISHU_BASE_FOLDER_TOKEN        场次表文件夹；不填复用文档文件夹
     FEISHU_BASE_APP_TOKEN           可选：预建 Base；不填首次发布自动建
     FEISHU_BASE_TABLE_ID            可选：预建场次表；不填自动建
     FEISHU_BASE_CLAIMS_TABLE_ID     可选：预建观点表；不填自动建
     FEISHU_PUBLISH_BASE=0           只发文档、不写场次表与观点表
+    FEISHU_BASE_ATTACHMENTS=0       只写链接列，不传「录音」「逐字稿」附件
 """
 from __future__ import annotations
 
@@ -69,6 +70,11 @@ FIELD_DEFS: list[dict[str, Any]] = [
      "options": ["待转写", "待总结", "已发布", "发布失败"]},
     {"field_name": "文档链接", "type": 15},
     {"field_name": "录音链接", "type": 15},
+    {"field_name": "逐字稿链接", "type": 15},
+    # 附件字段（docs/50 §3.2）：Base 附件要 media token；飞书租户/版本不支持
+    # type 17 时这两个字段是「可选」的，建不出来就退回上面的 URL 字段。
+    {"field_name": "录音", "type": 17, "optional": True},
+    {"field_name": "逐字稿", "type": 17, "optional": True},
     {"field_name": "session_id", "type": 1},
     # 主题词是自由文本，做成多选会因为「选项不存在」写不进去；先用文本存，
     # Base 里仍能用「包含」筛选，P1 再统一管理选项后迁移。
@@ -98,6 +104,8 @@ CLAIMS_FIELD_DEFS: list[dict[str, Any]] = [
 
 _BASE_READY: set[tuple[str, str]] = set()
 _BASE_GRANTED: set[tuple[str, str]] = set()
+# 租户不支持附件字段（type 17）时记在这里，后续行不再带附件值。
+_NO_ATTACH: set[tuple[str, str]] = set()
 
 
 _LOCKS: dict[str, threading.Lock] = {}
@@ -150,6 +158,10 @@ def config() -> dict:
         "base_claims_table_id": str(raw.get("base_claims_table_id") or ""),
         "base_folder_token": str(raw.get("base_folder_token") or ""),
         "base_url_base": str(raw.get("base_url_base") or ""),
+        "archive_transcript": bool(raw.get("archive_transcript", True)),
+        "archive_chat_id": str(raw.get("archive_chat_id") or ""),
+        "archive_chat_perm": str(raw.get("archive_chat_perm") or "view"),
+        "base_attachments": bool(raw.get("base_attachments", True)),
     }
 
 
@@ -486,6 +498,10 @@ def _publish(sid: str, *, bot=None, conn: sqlite3.Connection | None = None,
                            or old_meta.get("record_url") or ""),
             "base_skipped": bool(base_res.get("skipped")),
             "base_ok": bool(base_res.get("ok")) and not bool(base_res.get("grant_error")),
+            # 附件是加分项：失败只进 meta，不让整场变成 partial。
+            "base_attach_error": str(base_res.get("attach_error") or ""),
+            "folder_url": (str(archive.get("folder_url") or "")
+                           or str(old_meta.get("folder_url") or "")),
             # 归档失败不改发布状态：文档没有录音链接仍然是一篇完整文档。
             "archive_skipped": bool(archive.get("skipped")),
             "archive_error": ("" if archive.get("ok")
@@ -515,6 +531,7 @@ def _publish(sid: str, *, bot=None, conn: sqlite3.Connection | None = None,
             "overview": doc.get("overview") or "",
             "counts": doc.get("counts") or {},
             "base_skipped": bool(base_res.get("skipped")),
+            "attach_error": str(base_res.get("attach_error") or ""),
         }
         if notify:
             # 失败也发卡：云端无人值守时，红卡是用户知道「该重试了」的唯一入口。
@@ -646,25 +663,37 @@ def _create_table(client, app_token: str, table_name: str = TABLE_NAME,
         AppTableCreateHeader, CreateAppTableRequest, CreateAppTableRequestBody,
         ReqTable)
     defs = FIELD_DEFS if field_defs is None else field_defs
-    headers = []
-    for spec in defs:
-        b = (AppTableCreateHeader.builder()
-             .field_name(spec["field_name"]).type(int(spec["type"])))
-        prop = _opt_property(spec)
-        if prop is not None:
-            b = b.property(prop)
-        headers.append(b.build())
-    table = (ReqTable.builder().name(table_name)
-             .default_view_name(default_view_name).fields(headers).build())
-    body = CreateAppTableRequestBody.builder().table(table).build()
-    resp = client.bitable.v1.app_table.create(
-        CreateAppTableRequest.builder().app_token(app_token)
-        .request_body(body).build())
+
+    def _attempt(specs: list[dict[str, Any]]):
+        headers = []
+        for spec in specs:
+            b = (AppTableCreateHeader.builder()
+                 .field_name(spec["field_name"]).type(int(spec["type"])))
+            prop = _opt_property(spec)
+            if prop is not None:
+                b = b.property(prop)
+            headers.append(b.build())
+        table = (ReqTable.builder().name(table_name)
+                 .default_view_name(default_view_name).fields(headers).build())
+        body = CreateAppTableRequestBody.builder().table(table).build()
+        return client.bitable.v1.app_table.create(
+            CreateAppTableRequest.builder().app_token(app_token)
+            .request_body(body).build())
+
+    resp = _attempt(defs)
+    skipped_optional = False
+    # 附件字段是可选加分项：整个建表被 type 17 拒掉时，去掉可选字段再建一次。
+    optional = [s for s in defs if s.get("optional")]
+    if not resp.success() and optional:
+        resp = _attempt([s for s in defs if not s.get("optional")])
+        skipped_optional = True
     if not resp.success():
         return {"ok": False, "error": "建%s表失败：%s" % (table_name, _err(resp))}
     table_id = str(getattr(resp.data, "table_id", "") or "")
     if not table_id:
         return {"ok": False, "error": "建%s表没返回 table_id" % table_name}
+    if skipped_optional:
+        _NO_ATTACH.add((app_token, table_id))
     return {"ok": True, "table_id": table_id}
 
 
@@ -704,8 +733,11 @@ def _ensure_fields(client, app_token: str, table_id: str,
         return "读多维表格字段失败：" + _err(resp)
     names = {str(getattr(f, "field_name", ""))
              for f in (getattr(resp.data, "items", None) or [])}
+    no_attach = key in _NO_ATTACH
     for spec in defs:
         if spec["field_name"] in names:
+            continue
+        if spec.get("optional") and no_attach:
             continue
         b = (AppTableField.builder()
              .field_name(spec["field_name"]).type(int(spec["type"])))
@@ -716,6 +748,13 @@ def _ensure_fields(client, app_token: str, table_id: str,
             CreateAppTableFieldRequest.builder().app_token(app_token)
             .table_id(table_id).request_body(b.build()).build())
         if not created.success():
+            if spec.get("optional"):
+                # 老表/老租户不支持附件字段：记下来，退回 URL 链接字段。
+                _NO_ATTACH.add(key)
+                no_attach = True
+                logs.log_event("feishu.base_field_skipped", level="warn",
+                               field=spec["field_name"], error=_err(created))
+                continue
             return "补字段「%s」失败：%s" % (spec["field_name"], _err(created))
     _BASE_READY.add(key)
     return ""
@@ -841,7 +880,9 @@ def _find_record(client, app_token: str, table_id: str, sid: str) -> str:
     return ""
 
 
-def _record_fields(doc: dict, doc_ok: bool, doc_url: str) -> dict:
+def _record_fields(doc: dict, doc_ok: bool, doc_url: str,
+                   attachments: dict | None = None,
+                   allow_attachments: bool = True) -> dict:
     state = str(doc.get("state") or "")
     if state == DOC_PENDING_TRANSCRIPT:
         status = "待转写"
@@ -870,6 +911,16 @@ def _record_fields(doc: dict, doc_ok: bool, doc_url: str) -> dict:
         fields["文档链接"] = {"link": doc_url, "text": "打开场次文档"}
     if doc.get("audio_url"):
         fields["录音链接"] = {"link": doc["audio_url"], "text": "打开录音"}
+    att = attachments or {}
+    if att.get("transcript_url"):
+        fields["逐字稿链接"] = {"link": att["transcript_url"],
+                                "text": "打开逐字稿"}
+    if allow_attachments:
+        # Base 附件字段的值是 [{file_token: media_token}]，不是单个字符串。
+        if att.get("audio_token"):
+            fields["录音"] = [{"file_token": str(att["audio_token"])}]
+        if att.get("transcript_token"):
+            fields["逐字稿"] = [{"file_token": str(att["transcript_token"])}]
     topics = [str(t).strip() for t in (doc.get("topics") or []) if str(t).strip()]
     if topics:
         fields["标签"] = "、".join(topics[:10])
@@ -878,43 +929,96 @@ def _record_fields(doc: dict, doc_ok: bool, doc_url: str) -> dict:
 
 def _upsert_session_row(conn: sqlite3.Connection, bot, doc: dict, doc_ok: bool,
                         doc_url: str, known_record: str = "") -> dict:
-    """按 session_id upsert 场次表一行；不会因为重复发布多出一行。"""
+    """按 session_id upsert 场次表一行；不会因为重复发布多出一行。
+
+    附件（录音 / 逐字稿）是可选加分项：素材上传失败只记 ``attach_error``，
+    行照写；附件字段写不进去时去掉这两个键重试一次，链接字段仍保留。
+    """
     base = ensure_base(conn, bot)
     if not base.get("ok"):
         return base
     app_token = base["app_token"]
     table_id = base["table_id"]
     client = bot.client
-    fields = _record_fields(doc, doc_ok, doc_url)
+    key = (app_token, table_id)
+    allow_attachments = key not in _NO_ATTACH
+    attachments: dict = {}
+    attach_error = ""
+    cfg = _cfg(bot)
+    if allow_attachments and cfg.get("base_attachments", True):
+        sid = str(doc.get("session_id") or "")
+        session = store.get_session(conn, sid) or {}
+        try:
+            attachments = feishu_drive.prepare_attachments(
+                conn, session, bot, app_token)
+            if not attachments.get("ok"):
+                attach_error = "；".join(attachments.get("errors") or [])
+        except Exception as e:
+            traceback.print_exc()
+            attach_error = "附件准备失败：%s" % e
+            attachments = {}
+        if attach_error:
+            logs.log_event("feishu.base_attach_failed", level="warn",
+                           session_id=sid, error=attach_error[:200])
+    else:
+        # 不传附件不等于不写链接列：FEISHU_BASE_ATTACHMENTS=0 时仍要
+        # 把逐字稿传进云空间、把「逐字稿链接」写进表。
+        sid = str(doc.get("session_id") or "")
+        session = store.get_session(conn, sid) or {}
+        if sid and session and cfg.get("archive_transcript", True):
+            try:
+                tr = feishu_drive.ensure_transcript(conn, session, bot)
+                if tr.get("ok"):
+                    attachments = {"transcript_url": str(tr.get("url") or "")}
+            except Exception:
+                traceback.print_exc()
+    fields = _record_fields(doc, doc_ok, doc_url, attachments=attachments,
+                            allow_attachments=allow_attachments)
     record_id = str(known_record or "")
     if not record_id:
         record_id = _find_record(client, app_token, table_id,
                                  str(doc.get("session_id") or ""))
     from lark_oapi.api.bitable.v1 import (
         AppTableRecord, CreateAppTableRecordRequest, UpdateAppTableRecordRequest)
-    record_body = AppTableRecord.builder().fields(fields).build()
-    if record_id:
-        resp = client.bitable.v1.app_table_record.update(
-            UpdateAppTableRecordRequest.builder().app_token(app_token)
-            .table_id(table_id).record_id(record_id)
-            .request_body(record_body).build())
-        created = False
-    else:
-        resp = client.bitable.v1.app_table_record.create(
+
+    def _write(values: dict):
+        record_body = AppTableRecord.builder().fields(values).build()
+        if record_id:
+            return client.bitable.v1.app_table_record.update(
+                UpdateAppTableRecordRequest.builder().app_token(app_token)
+                .table_id(table_id).record_id(record_id)
+                .request_body(record_body).build()), False
+        return client.bitable.v1.app_table_record.create(
             CreateAppTableRecordRequest.builder().app_token(app_token)
-            .table_id(table_id).request_body(record_body).build())
-        created = True
+            .table_id(table_id).request_body(record_body).build()), True
+
+    resp, created = _write(fields)
+    if not resp.success() and allow_attachments and (
+            "录音" in fields or "逐字稿" in fields):
+        # 附件字段可能被租户策略拒绝：去掉附件重试，不让整行失败。
+        first_err = _err(resp)
+        _NO_ATTACH.add(key)
+        allow_attachments = False
+        retry = {k: v for k, v in fields.items() if k not in ("录音", "逐字稿")}
+        resp, created = _write(retry)
+        if resp.success():
+            attach_error = attach_error or "附件字段不可用，已退回链接字段"
+            logs.log_event("feishu.base_attach_skipped", level="warn",
+                           session_id=doc.get("session_id"), error=first_err[:200])
     if not resp.success():
-        return {"ok": False, "error": "写场次表失败：" + _err(resp)}
+        return {"ok": False, "error": "写场次表失败：" + _err(resp),
+                "attach_error": attach_error}
     record = getattr(resp.data, "record", None)
     rid = str(getattr(record, "record_id", "") or record_id)
     record_url = str(getattr(record, "record_url", "") or "")
     logs.log_event("feishu.base_upsert", session_id=doc.get("session_id"),
                    table="session", record_id=rid,
-                   action="created" if created else "updated")
+                   action="created" if created else "updated",
+                   attachments=bool(fields.get("录音") or fields.get("逐字稿")))
     return {"ok": True, "record_id": rid, "record_url": record_url,
             "base_url": base.get("base_url") or "",
-            "grant_error": base.get("grant_error") or ""}
+            "grant_error": base.get("grant_error") or "",
+            "attach_error": attach_error}
 
 
 # ---------------------------------------------------------------- 观点表（Base）

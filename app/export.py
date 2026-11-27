@@ -114,6 +114,34 @@ def to_txt(conn: sqlite3.Connection, sid: str) -> str:
     return "\n".join(out)
 
 
+def to_archive_txt(conn: sqlite3.Connection, sid: str) -> str:
+    """给云空间归档用的逐字稿：自带抬头，脱离系统也能看懂。
+
+    和 ``to_txt`` 的区别只在于抬头；正文完全复用，避免两个版本的逐字稿
+    对不上。没有逐字稿时返回空串，调用方据此跳过上传。
+    """
+    s = store.get_session(conn, sid) or {}
+    rows = store.session_transcript(conn, sid)
+    if not rows:
+        return ""
+    title = str(s.get("title") or sid)
+    start_full, _, _ = _pub_start(s.get("started_at"))
+    dur_s = float(s.get("duration_s") or 0)
+    speakers = {str(r.get("speaker_label") or "") for r in rows}
+    speakers.discard("")
+    head = ["# %s%s" % (start_full or "未定",
+                        " ·「%s」" % title if title else ""),
+            "场次：%s" % sid,
+            "时长：%s · 上麦 %d 人 · %d 句" % (
+                _pub_dur(dur_s), len(speakers), len(rows)),
+            "导出：%s" % datetime.now().strftime("%Y-%m-%d %H:%M"),
+            ""]
+    body = to_txt(conn, sid)
+    if body:
+        head.append(body)
+    return "\n".join(head).rstrip() + "\n"
+
+
 def to_note_md(conn: sqlite3.Connection, sid: str) -> str:
     """一篇「笔记」的 Markdown：默认不带逐字稿（逐字稿用 md/srt 单独导出）。"""
     from . import notes as _notes

@@ -90,7 +90,11 @@ def test_old_db_gets_all_new_columns(tmp_path):
     conn = _old_db(tmp_path)
     store.init_db(conn)
     assert {"deleted_at", "ai_topics_json", "started_utc", "tz_offset_min",
-            "title_source", "title_alts_json", "title_updated_at"} <= _cols(conn, "sessions")
+            "title_source", "title_alts_json", "title_updated_at",
+            "drive_folder_token", "drive_folder_url",
+            "drive_folder_granted_at", "transcript_token", "transcript_url",
+            "transcript_hash", "transcript_uploaded_at", "audio_media_token",
+            "transcript_media_token"} <= _cols(conn, "sessions")
     assert {"category_rule", "value_tag_rule", "features_json", "ai_fp",
             "edited_at"} <= _cols(conn, "utterances")
     assert {"person_id", "person_score", "person_bg", "person_state"} <= _cols(conn, "speakers")

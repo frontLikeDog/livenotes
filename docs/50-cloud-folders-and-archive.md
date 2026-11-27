@@ -3,6 +3,9 @@
 > 面向：实现
 > 依据：只读审查结论（HEAD `2f93fda`，2026-11-26）。相关：[docs/37](37-cloud-storage-and-feishu-share.md) §12、[docs/47](47-feishu-native-reading-surface.md) §3.2、[docs/48](48-验收清单.md) §2
 > 结论时间：2026-11-27
+> **实施状态（2026-11-27）**：阶段 0/1/2/3 已全部落地，`bitable:app` 已开通。
+> 代码入口见 [docs/47 §15](47-feishu-native-reading-surface.md#15-云空间按场次归档--附件挂载实施记录2026-11-27)；
+> 本文保留设计与理由，实际行为以代码和 §15 为准。
 
 ## 0. 先说清楚顺序和理由
 
@@ -18,12 +21,9 @@
 | 所有场次共用一个 `audio_folder_token`，文件名 = 标题 | [feishu_drive.py:232-238](../app/feishu_drive.py:232) |
 | 重复存同场会「同名并存」，不做去重 | [feishu_drive.py:216](../app/feishu_drive.py:216) |
 
-**一处调整**：阶段 2（挂 Base 附件）排在阶段 3（文件夹授权）之前的原顺序保留，但阶段 2 依赖一个当前**不可用**的前提——云端租户没有 `bitable:app`，场次表根本建不出来（[48:99-107](48-验收清单.md)）。所以：
-
-- 阶段 0 / 1 / 3 今天就能做，不依赖 Base。
-- 阶段 2 只能在权限下来后做；权限没下来之前，用阶段 2 的「降级方案」先给两个 URL 字段。
-
-阶段 3 只有一个函数，可随时插在阶段 1 之后，不必等阶段 2。
+**一处调整（已过时，留作记录）**：原计划里阶段 2 依赖 `bitable:app`，权限没下来时
+只能走 2b URL 字段。2026-11-27 权限已在开放平台开通并发布，所以阶段 2 直接按 2a
+（附件字段）落地；代码仍保留 URL 字段作为租户/版本不支持 type 17 时的降级。
 
 ---
 
@@ -240,6 +240,13 @@ def to_archive_txt(conn, sid) -> str:
 
 ### 3.2 挂到 Base：先做 15 分钟探针
 
+> **实施记录（2026-11-27）**：已按 2a 落地——`feishu_drive.upload_media()` 走
+> `drive/v1/medias/upload_all`（`parent_type=bitable_file`、`parent_node=app_token`，
+> >20 MB 自动分片），场次表新增「录音」「逐字稿」两个 type 17 字段，同时保留
+> 「录音链接」「逐字稿链接」URL 字段。实现没有在开发机跑真租户探针（本地无凭证），
+> 首次云端发布会完成这次验证；字段建不出来或写入被拒时自动退回 URL 字段，不会
+> 让整行失败。详细降级见 [docs/47 §15](47-feishu-native-reading-surface.md#15-云空间按场次归档--附件挂载实施记录2026-11-27)。
+
 **这一步有技术不确定性，不要直接写实现。** Base 附件字段（type 17）要的不是 `drive/v1/files/upload_all` 返回的 file_token，而是 `drive/v1/medias/upload_all` 的 media token（`parent_type` 指向 Base）。SDK 里两条上传路径都在（`media.py:136`、`file.py:546`），但"file token 能不能塞进附件字段"这件事**本仓库没验证过**。
 
 按仓库既有习惯写一个探针：`tools/spike_base_attachment.py`，只做一次真租户实验：
@@ -251,6 +258,11 @@ def to_archive_txt(conn, sid) -> str:
 5. 删掉临时字段和行。
 
 **探针结论决定走 2a 还是 2b。**
+
+> 状态（2026-11-27）：探针已写好（`tools/spike_base_attachment.py`，`--keep` 可留现场），
+> 但本机没有租户凭证，**还没跑过真租户**。因此代码按 2a 实现并保留 2b 的自动降级：
+> 附件字段建不出来/写不进去时退回链接列（详见 [docs/47 §15](47-feishu-native-reading-surface.md#15-云空间按场次归档--附件挂载实施记录2026-11-27)）。
+> 第一次云端发布会顺带验证；想单独先验证就跑探针，退出码 0 = 2a 成立。
 
 #### 2a：附件字段可用（探针通过）
 
@@ -374,7 +386,7 @@ def grant_folder_to_chat(client, folder_token: str, chat_id: str,
 | `app/feishu.py` | `load_config` 读新配置；`_grant_doc` 加 `member_type` |
 | `app/config.py` 或 `feishu.load_config` | `FEISHU_ARCHIVE_ON_PUBLISH`、`FEISHU_ARCHIVE_CHAT_ID`、`FEISHU_ARCHIVE_CHAT_PERM`、`FEISHU_ARCHIVE_TRANSCRIPT`（是否传逐字稿，默认 1） |
 | `tools/backfill_drive_folders.py` | 新建：历史场次移进各自文件夹 |
-| `tools/spike_base_attachment.py` | 新建：附件字段探针（阶段 2 前置） |
+| `tools/spike_base_attachment.py` | 新建：附件字段探针（真租户一次验证，临时字段/行跑完自清理） |
 | `README.md` | 环境变量表加三行；「整场录音可以存进飞书云空间」那段改成「发布时自动存」 |
 | `docs/37` | §12.4 的「不要默认全量上传」与本文阶段 0 冲突，加一行指向本文件说明取舍 |
 | `docs/48` | 加一节本轮的验收项 |

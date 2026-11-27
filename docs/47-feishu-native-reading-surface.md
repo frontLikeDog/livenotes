@@ -512,7 +512,7 @@ SQLite（唯一真相源）
 
 | 配置 | 用途 |
 |---|---|
-| `FEISHU_PUBLISH_ENABLED=1` | 总开关；默认关，桌面用户可不开 |
+| `FEISHU_PUBLISH_ENABLED` | 总开关；有 `app_id`/`app_secret` 时默认开，显式 `0` 关闭 |
 | `FEISHU_PUBLISH_FOLDER_TOKEN` | 场次/人物文档的云空间文件夹；不填复用 `doc_folder_token` |
 | `FEISHU_PUBLISH_OWNER` | 默认授权给 owner；不填用机器人配置里的 `owner_open_id` |
 | `FEISHU_BASE_FOLDER_TOKEN` | 多维表格存放文件夹；不填复用文档文件夹 |
@@ -520,6 +520,10 @@ SQLite（唯一真相源）
 | `FEISHU_BASE_TABLE_ID` | 可选：预建数据表；不填自动建 |
 | `FEISHU_PUBLISH_BASE=0` | 只发文档、不写场次表 |
 | `FEISHU_BASE_URL_BASE` | 可选：Base 链接前缀；不填用飞书返回的 `app.url` |
+| `FEISHU_ARCHIVE_TRANSCRIPT=0` | 不传逐字稿 txt、不写「逐字稿」附件 |
+| `FEISHU_ARCHIVE_CHAT_ID` | 场次文件夹授权给哪个群；不填取 `FEISHU_CHAT_IDS` 第一个 |
+| `FEISHU_ARCHIVE_CHAT_PERM` | 群权限，默认 `view` |
+| `FEISHU_BASE_ATTACHMENTS=0` | 只写链接列，不传「录音」「逐字稿」附件 |
 
 授权对象优先用 `FEISHU_PUBLISH_OWNER`，没配就沿用现有 `open_id` /
 `owner_open_id`：建文档/建 Base 后都用 `permission_member` 授权给这位用户
@@ -562,7 +566,7 @@ SQLite（唯一真相源）
 - **文档**：`export.to_publish_md()` 生成手机阅读稿（一句话、观点地图、值得回听、人物、相关场次、录音）。仅采集下播先发「待补转写」骨架，补完字后同一篇原地升级；最新总结若是筛选口径，拒绝发布（避免筛选稿冒充整场）。
 - **场次表**：配了 `FEISHU_BASE_APP_TOKEN` 才写；没有 `FEISHU_BASE_TABLE_ID` 时自动建「场次」表（文本/数字/日期/链接字段），按 `session_id` upsert。文档权限授权给 `FEISHU_PUBLISH_OWNER`。
 - **卡片与命令**：完成卡片只在首次「有完整总结」的发布时发，骨架和重试不重复刷屏；`/发布 [CH]` 手动重发，`/文档 [CH]` 看链接和状态。
-- **失败隔离**：发布失败只写 `feishu_publish.state` 和日志，不影响采集/总结；`FEISHU_PUBLISH_ENABLED` 默认关。
+- **失败隔离**：发布失败只写 `feishu_publish.state` 和日志，不影响采集/总结；`FEISHU_PUBLISH_ENABLED` 有凭证时默认开、显式 `0` 关。
 - **验收**：`tests/test_feishu_publish.py` 覆盖幂等/失败降级/骨架升级/筛选稿拒绝；`tests/test_cloud_chain.py` 用真实 PCM/WAV + 真实 HTTP + 真实调度器（模型与飞书换替身）跑通「仅采集 → 补转写 → 自动收尾 → 发布 → 飞书 `/总结`」。
 
 ### P1（8~13 人日）：补名 + 人物 + 观点 + 搜/问
@@ -695,8 +699,8 @@ SQLite（唯一真相源）
 | `feishu_publish` 表 | `(session_id, kind)` 唯一；`state=ok/partial/failed`、版本 hash、doc/record token、错误、耗时、尝试次数、`meta_json`（doc_state/base_url/record_url） |
 | `app/feishu_publish.py` | `publish()` / `publish_session_async()` / `status()` / `wrapup_card()` / `ensure_base()`；不加载模型 |
 | docx 覆盖写 | `feishu.Bot.overwrite_docx()`：列根块 → `batch_delete(start=0,end=count)` → `block_descendant.create(index=0)` → 尽力 patch 标题；正文写失败也保留 `document_id`，重试只补正文 |
-| 场次表 | 自动建 Base +「场次」表（16 字段，默认视图「最近场次」）；按 `session_id` 文本字段 search 后 update/create；老表缺字段自动补；「采集」列区分完整采集/仅采集 |
-| 发布触发 | `tasks._run_summary` 的 auto finalize 成功后异步发布（`FEISHU_PUBLISH_ENABLED` 默认关）；`POST /api/publish` 显式发布（`force=true`），`GET /api/publish` 读状态 |
+| 场次表 | 自动建 Base +「场次」表（P0 时 16 字段，默认视图「最近场次」；2026-11-27 起 19 字段，新增「逐字稿链接」「录音」「逐字稿」）；按 `session_id` 文本字段 search 后 update/create；老表缺字段自动补；「采集」列区分完整采集/仅采集 |
+| 发布触发 | `tasks._run_summary` 的 auto finalize 成功后异步发布（有飞书凭证时默认开、显式 `0` 关）；`POST /api/publish` 显式发布（`force=true`），`GET /api/publish` 读状态 |
 | 补名回写 | `/api/speakers/name` 成功后，若这场已发布则后台重发布；文档人物表跟着更新 |
 | 收尾卡 | 看文档 / 补名 / 重试发布；文档失败红色、表格失败橙色；`/文档` 是按钮失效时的文本兜底 |
 | 机器人命令 | `/发布 [CH]`、`/文档 [CH]`、`/补名 [CH] 1 阿哲 2 小北`；卡片回调 `publish_retry`、`publish_name` |
@@ -707,7 +711,8 @@ SQLite（唯一真相源）
   `app_table.view` 的筛选条件 API 未在本仓库验证，先不引入未验证调用。
 - 「标签」用文本（顿号分隔）而不是多选：主题词是自由文本，多选字段写不存在的
   选项会被飞书拒绝，整行会变成 `partial`；文本字段仍可在 Base 里用「包含」筛选。
-- 「逐字稿附件」字段没建：P0 不把逐字稿放进 Base，文档正文也只留结论和原话。
+- 「逐字稿附件」字段当时没建：P0 不把逐字稿放进 Base，文档正文也只留结论和原话。
+  **2026-11-27 已补**：见 §15。
 - 补名 P0 只做「列名单 + 文本补名 + 卡片入口」，没有做表单卡和 3 秒试听
   （那是 P1）；名单按 `top_speakers` 的前 5 位编号，顺序在总结后稳定。
 - 「发布：最近成功时间 / 待重试数」还没进 `/状态` 卡片；发布状态目前从
@@ -851,3 +856,53 @@ import 发布器，发布器换实现不会让 `/搜` `/找人` 挂掉。
 - 状态相对更早场次计算：补发更早历史场次后，已发布场次的状态不会自动重算，除非对该场再执行 `/发布`。
 - 默认只建「最近观点」视图，不加筛选视图（`app_table.view` 筛选请求体未验证）。
 - `claims.topic` 为本场标注自由词，跨场尚未归一化，筛选以文本包含为主。
+
+---
+
+## 15. 云空间按场次归档 + 附件挂载实施记录（2026-11-27）
+
+**范围**：落实 [docs/50](50-cloud-folders-and-archive.md) 的阶段 1~3——一场一个云空间
+文件夹、逐字稿 txt 跟着场次落盘、场次表挂「录音」「逐字稿」附件、文件夹授权给群。
+权限前提（`bitable:app`）已于 2026-11-27 在开放平台开通并发布。
+
+**数据与文件**
+
+| 项 | 落地 |
+|---|---|
+| `sessions` 新列 | `drive_folder_token/url/granted_at`、`transcript_token/url/hash/uploaded_at`、`audio_media_token`、`transcript_media_token`；老库启动时自动补列 |
+| 场次文件夹 | `feishu_drive.folder_name()` = `YYYY-MM-DD_HHMM_<房间名或标题前 20 字>`，创建时用可读名，落库后用 token 索引；同名冲突自动 `list_folder` 复用 |
+| 父文件夹 | `FEISHU_AUDIO_FOLDER_TOKEN` 从「所有音频放这里」变成「场次文件夹建在这里」；语义向后兼容 |
+| 逐字稿 txt | `export.to_archive_txt()` = 抬头 + `to_txt()` 正文；内容 hash 没变就不重传；新内容先传后删旧文件 |
+| 附件素材 | `feishu_drive.upload_media()` 走 `drive/v1/medias/upload_all`（>20 MB 自动分片），`parent_type=bitable_file`、`parent_node=app_token`；token 缓存在 `sessions.*_media_token`，音频换代/逐字稿改写时清空重传 |
+| 附件字段 | 场次表新增「录音」「逐字稿」两个 type 17 字段；同时保留「录音链接」「逐字稿链接」URL 字段作为可靠降级 |
+| 文件夹授权 | `grant_folder_to_chat()` 用 `type=folder` + `member_type=openchat`；成功写 `drive_folder_granted_at`，失败下次重试；`need_notification=False` |
+| 发布开关 | `FEISHU_PUBLISH_ENABLED` 未显式配置时，有 `app_id`/`app_secret` 就默认开；显式 `0` 仍可关 |
+
+**降级纪律**
+
+1. 建场次文件夹失败 → 退回父文件夹照常上传，`meta.folder_url` 为空、日志
+   `feishu.drive_folder_fallback`；不把整场归档拖失败。
+2. 附件素材上传失败 → 行照写，`feishu_publish.meta_json.base_attach_error` 记原因，
+   `state` 仍是 `ok`；「逐字稿链接」仍可用。
+3. 附件字段建不出来 / 写入被拒 → `_NO_ATTACH` 记下并去掉附件值重试一次；本次及
+   后续行退回链接列，日志 `feishu.base_field_skipped` / `feishu.base_attach_skipped`。
+4. 逐字稿上传失败不影响文档正文和场次表行；补出字或修好权限后再发布即可。
+
+**历史场次**
+
+- `python tools/backfill_drive_folders.py --dry` 先看会建哪些目录；
+  `--limit 5` 小批试跑；`--all` 全量。只处理 `drive_token` 非空的场次，用
+  `drive/v1/files/:token/move` 移动，原 file_token 和链接不变。
+- 老场次的附件：再执行一次 `/发布` 即可（机器人命令默认 `force=True`，会重写正文并
+  刷新场次行；附件 token 有缓存，不重传大文件）。
+- 附件字段能不能用，可用 `tools/spike_base_attachment.py` 在真租户单独验证：
+  建临时 type 17 字段 → 传 media → 写一行 → 读回 → 清理。退出码 0 = 2a 可用。
+
+**测试**
+
+- `tests/test_feishu_drive.py` 新增 11 例：目录命名、创建/复用/同名冲突、授权给群、
+  归档进专属目录、文件夹失败退回父目录、逐字稿抬头与幂等、附件素材上传与缓存、
+  素材失败只收集错误、移动文件。
+- `tests/test_feishu_publish.py` 新增 4 例：附件字段值、附件失败状态不变、附件字段
+  被拒退回链接列、发布开关默认值。
+- 全量 `932 passed`（2026-11-27）。

@@ -130,6 +130,7 @@ class FakeRecords:
         self.search_fail = False
         self.batch_delete_fail = False
         self.batch_create_fail = False
+        self.reject_fields: set[str] = set()
         self._next = 0
 
     def _table_rows(self, table_id: str) -> dict[str, dict]:
@@ -161,6 +162,8 @@ class FakeRecords:
         return Resp(Obj(items=chunk, has_more=has_more, page_token=next_token))
 
     def create(self, req):
+        if self.reject_fields & set(dict(req.request_body.fields)):
+            return Resp(code=400, msg="attachment field not supported")
         self._next += 1
         rid = "rec_%d" % self._next
         fields = dict(req.request_body.fields)
@@ -174,6 +177,8 @@ class FakeRecords:
                                    record_url="https://x.feishu.cn/base/app_1?table=%s&record=%s" % (tid or "tbl_1", rid))))
 
     def update(self, req):
+        if self.reject_fields & set(dict(req.request_body.fields)):
+            return Resp(code=400, msg="attachment field not supported")
         rid = str(req.record_id)
         fields = dict(req.request_body.fields)
         self.rows[rid] = fields
@@ -223,6 +228,9 @@ class FakeDriveFiles:
     def __init__(self):
         self.all_calls = []
         self.delete_calls = []
+        self.create_folder_calls = []
+        self.list_calls = []
+        self.move_calls = []
 
     def upload_all(self, req):
         self.all_calls.append(req)
@@ -231,6 +239,31 @@ class FakeDriveFiles:
     def delete(self, req):
         self.delete_calls.append(req)
         return Resp(Obj())
+
+    def create_folder(self, req):
+        self.create_folder_calls.append(req)
+        return Resp(Obj(token="fld_session",
+                        url="https://x.feishu.cn/drive/folder/fld_session"))
+
+    def list(self, req):
+        self.list_calls.append(req)
+        return Resp(Obj(files=[], has_more=False, next_page_token=""))
+
+    def move(self, req):
+        self.move_calls.append(req)
+        return Resp(Obj())
+
+
+class FakeDriveMedia:
+    def __init__(self):
+        self.all_calls = []
+        self.fail = False
+
+    def upload_all(self, req):
+        self.all_calls.append(req)
+        if self.fail:
+            return Resp(code=400, msg="media upload denied")
+        return Resp(Obj(file_token="media_%d" % len(self.all_calls)))
 
 
 class FakeDriveMembers:
@@ -245,7 +278,9 @@ class FakeDriveMembers:
 class FakeClient:
     def __init__(self, app_fail=False):
         self.bitable = Obj(v1=FakeBitable(app_fail=app_fail))
+        self.media = FakeDriveMedia()
         self.drive = Obj(v1=Obj(file=FakeDriveFiles(),
+                                media=self.media,
                                 permission_member=FakeDriveMembers()))
 
 
@@ -258,6 +293,10 @@ class FakeBot:
             "base_enabled": True, "base_app_token": "", "base_table_id": "",
             "base_folder_token": "", "base_url_base": "",
             "doc_folder_token": "fld_doc", "publish_folder_token": "fld_pub",
+            "audio_folder_token": "fld_audio", "drive_url_base": "",
+            "archive_on_publish": True, "archive_transcript": True,
+            "archive_chat_id": "", "archive_chat_perm": "view",
+            "base_attachments": True,
         }
         self.owner_open_id = "ou_owner"
         self.client = FakeClient(app_fail=app_fail)
@@ -892,3 +931,98 @@ def test_publish_ready_doc_has_audio_section(db):
     assert doc["ok"] and doc["state"] == "ready"
     assert "## 录音" in doc["markdown"]
     assert "https://x.feishu.cn/file/ft_ready" in doc["markdown"]
+
+
+# ---------------------------------------------------------------- 附件挂载
+
+def test_publish_writes_attachment_fields_and_transcript_link(
+        db, isolated_paths, monkeypatch):
+    sid = _ready_session(db)
+    monkeypatch.setattr(feishu_drive, "AUDIO_DIR", isolated_paths / "audio")
+    (isolated_paths / "audio" / (sid + ".m4a")).write_bytes(b"x" * 8)
+    bot = FakeBot()
+
+    out = feishu_publish.publish(sid, bot=bot, conn=db, notify=False)
+
+    assert out["ok"] and out["state"] == "ok"
+    fields = list(bot.client.bitable.v1.app_table_record.rows.values())[0]
+    assert fields["逐字稿链接"]["link"].startswith("https://x.feishu.cn/file/")
+    assert fields["逐字稿"] == [{"file_token": "media_2"}]
+    assert fields["录音"] == [{"file_token": "media_1"}]
+    row = store.get_publish(db, sid)
+    assert row["meta"]["base_attach_error"] == ""
+    assert row["meta"]["folder_url"].endswith("fld_session")
+    session = store.get_session(db, sid)
+    assert session["transcript_token"] == "ft_pub"
+    assert session["audio_media_token"] == "media_1"
+    assert session["transcript_media_token"] == "media_2"
+
+
+def test_publish_attachment_failure_keeps_state_ok(db, isolated_paths,
+                                                   monkeypatch):
+    sid = _ready_session(db)
+    monkeypatch.setattr(feishu_drive, "AUDIO_DIR", isolated_paths / "audio")
+    (isolated_paths / "audio" / (sid + ".m4a")).write_bytes(b"x" * 8)
+    bot = FakeBot()
+    bot.client.media.fail = True
+
+    out = feishu_publish.publish(sid, bot=bot, conn=db, notify=False)
+
+    assert out["ok"] and out["state"] == "ok"
+    assert out["attach_error"]
+    fields = list(bot.client.bitable.v1.app_table_record.rows.values())[0]
+    assert "录音" not in fields and "逐字稿" not in fields
+    assert fields["逐字稿链接"]          # 链接字段仍可靠
+    row = store.get_publish(db, sid)
+    assert row["meta"]["base_attach_error"]
+
+
+def test_publish_rejected_attachment_field_falls_back_to_links(
+        db, isolated_paths, monkeypatch):
+    sid = _ready_session(db)
+    monkeypatch.setattr(feishu_drive, "AUDIO_DIR", isolated_paths / "audio")
+    (isolated_paths / "audio" / (sid + ".m4a")).write_bytes(b"x" * 8)
+    bot = FakeBot()
+    bot.client.bitable.v1.app_table_record.reject_fields = {"录音", "逐字稿"}
+
+    out = feishu_publish.publish(sid, bot=bot, conn=db, notify=False)
+
+    assert out["ok"] and out["state"] == "ok"
+    assert out["attach_error"]
+    fields = list(bot.client.bitable.v1.app_table_record.rows.values())[0]
+    assert "录音" not in fields and "逐字稿" not in fields
+    assert fields["逐字稿链接"] and fields["录音链接"]
+
+
+def test_publish_without_attachments_still_writes_transcript_link(
+        db, isolated_paths, monkeypatch):
+    """FEISHU_BASE_ATTACHMENTS=0：不传附件，但「逐字稿链接」要照写。"""
+    sid = _ready_session(db)
+    monkeypatch.setattr(feishu_drive, "AUDIO_DIR", isolated_paths / "audio")
+    (isolated_paths / "audio" / (sid + ".m4a")).write_bytes(b"x" * 8)
+    bot = FakeBot()
+    bot.cfg["base_attachments"] = False
+
+    out = feishu_publish.publish(sid, bot=bot, conn=db, notify=False)
+
+    assert out["ok"] and out["state"] == "ok"
+    fields = list(bot.client.bitable.v1.app_table_record.rows.values())[0]
+    assert "录音" not in fields and "逐字稿" not in fields
+    assert fields["逐字稿链接"]["link"].startswith("https://x.feishu.cn/file/")
+    session = store.get_session(db, sid)
+    assert session["transcript_token"] == "ft_pub"
+    assert not session["audio_media_token"]
+
+
+def test_publish_switch_defaults_on_when_credentials_present(isolated_paths):
+    feishu.CFG_PATH.write_text(json.dumps({
+        "app_id": "cli_x", "app_secret": "s"}), encoding="utf-8")
+    assert feishu.load_config()["publish_enabled"] is True
+
+    feishu.CFG_PATH.write_text("{}", encoding="utf-8")
+    assert feishu.load_config()["publish_enabled"] is False
+
+    feishu.CFG_PATH.write_text(json.dumps({
+        "app_id": "cli_x", "app_secret": "s", "publish_enabled": False}),
+        encoding="utf-8")
+    assert feishu.load_config()["publish_enabled"] is False

@@ -10,7 +10,7 @@ import urllib.request
 import pytest
 
 from app import feishu_drive, live, server, store
-from helpers import add_session
+from helpers import add_rows, add_session, utt_row
 
 
 class Obj:
@@ -35,6 +35,12 @@ class FakeFile:
         self.parts: list = []
         self.finish_calls: list = []
         self.delete_calls: list = []
+        self.create_folder_calls: list = []
+        self.list_calls: list = []
+        self.move_calls: list = []
+        self.folder_files: list = []
+        self.create_folder_fail = False
+        self.folder_token = "fld_session"
         self.block_size = 4
 
     def upload_all(self, req):
@@ -59,6 +65,55 @@ class FakeFile:
         self.delete_calls.append(req)
         return Resp(Obj())
 
+    def create_folder(self, req):
+        self.create_folder_calls.append(req.request_body)
+        if self.create_folder_fail:
+            return Resp(code=400, msg="folder name exists")
+        return Resp(Obj(token=self.folder_token,
+                        url="https://x.feishu.cn/drive/folder/" + self.folder_token))
+
+    def list(self, req):
+        self.list_calls.append(req)
+        return Resp(Obj(files=list(self.folder_files), has_more=False,
+                        next_page_token=""))
+
+    def move(self, req):
+        self.move_calls.append(req)
+        return Resp(Obj())
+
+
+class FakeMedia:
+    """Base 附件素材上传：小文件走 upload_all，大文件走分片。"""
+
+    def __init__(self) -> None:
+        self.all_calls: list = []
+        self.prepare_calls: list = []
+        self.parts: list = []
+        self.finish_calls: list = []
+        self.block_size = 4
+        self.fail = False
+
+    def upload_all(self, req):
+        self.all_calls.append(req.request_body)
+        if self.fail:
+            return Resp(code=400, msg="media upload denied")
+        return Resp(Obj(file_token="media_all"))
+
+    def upload_prepare(self, req):
+        body = req.request_body
+        self.prepare_calls.append(body)
+        n = max(1, (int(body.size) + self.block_size - 1) // self.block_size)
+        return Resp(Obj(upload_id="mup1", block_size=self.block_size,
+                        block_num=n))
+
+    def upload_part(self, req):
+        self.parts.append(req.request_body)
+        return Resp(Obj())
+
+    def upload_finish(self, req):
+        self.finish_calls.append(req.request_body)
+        return Resp(Obj(file_token="media_fin"))
+
 
 class FakeMembers:
     def __init__(self) -> None:
@@ -72,13 +127,17 @@ class FakeMembers:
 class FakeClient:
     def __init__(self) -> None:
         self.file = FakeFile()
+        self.media = FakeMedia()
         self.members = FakeMembers()
-        self.drive = Obj(v1=Obj(file=self.file, permission_member=self.members))
+        self.drive = Obj(v1=Obj(file=self.file, media=self.media,
+                                permission_member=self.members))
 
 
 class FakeBot:
     def __init__(self, folder="fld_1", owner="ou_owner") -> None:
-        self.cfg = {"audio_folder_token": folder, "drive_url_base": ""}
+        self.cfg = {"audio_folder_token": folder, "drive_url_base": "",
+                    "archive_chat_id": "", "archive_chat_perm": "view",
+                    "archive_transcript": True, "base_attachments": True}
         self.client = FakeClient()
         self.owner_open_id = owner
 
@@ -346,3 +405,182 @@ def test_cloud_save_route_404_and_trash(http_base, db, monkeypatch):
     store.trash_session(db, "S10")
     status, out = _post(http_base, "/api/cloud/save", {"session_id": "S10"})
     assert status == 400 and "回收站" in out["error"]
+
+
+# ---------------------------------------------------------------- 场次文件夹
+
+def test_folder_name_uses_start_and_title(db):
+    add_session(db, "S30", title="开源AI聊天室",
+                started_at="2026-11-25T21:30:00")
+    s = store.get_session(db, "S30")
+    assert feishu_drive.folder_name(s) == "2026-11-25_2130_开源AI聊天室"
+
+    add_session(db, "S30b", title="A/B:C?", started_at="不是时间")
+    assert feishu_drive.folder_name(store.get_session(db, "S30b")).endswith(
+        "_A_B_C")
+
+
+def test_ensure_session_folder_creates_and_grants_to_chat(db):
+    add_session(db, "S31", title="周三复盘", started_at="2026-11-25T21:30:00")
+    bot = FakeBot()
+    bot.cfg["archive_chat_id"] = "oc_chat"
+
+    out = feishu_drive.ensure_session_folder(
+        db, store.get_session(db, "S31"), bot)
+
+    assert out["ok"] and out["created"] and out["token"] == "fld_session"
+    body = bot.client.file.create_folder_calls[0]
+    assert body.name.startswith("2026-11-25_2130_")
+    assert body.folder_token == "fld_1"
+    row = store.get_session(db, "S31")
+    assert row["drive_folder_token"] == "fld_session"
+    assert row["drive_folder_url"].endswith("fld_session")
+    assert row["drive_folder_granted_at"]
+    req = bot.client.members.calls[-1]
+    assert req.type == "folder"
+    assert req.request_body.member_type == "openchat"
+    assert req.request_body.member_id == "oc_chat"
+    assert req.request_body.perm == "view"
+    assert req.need_notification is False
+
+
+def test_ensure_session_folder_reuses_existing_token(db):
+    add_session(db, "S32", title="复用")
+    store.set_audio_meta(db, "S32", drive_folder_token="fld_keep",
+                         drive_folder_url="https://x/drive/folder/fld_keep")
+    bot = FakeBot()
+
+    out = feishu_drive.ensure_session_folder(
+        db, store.get_session(db, "S32"), bot)
+
+    assert out["ok"] and not out["created"] and out["token"] == "fld_keep"
+    assert bot.client.file.create_folder_calls == []
+    assert bot.client.file.list_calls == []
+
+
+def test_ensure_session_folder_reuses_same_name_on_conflict(db):
+    add_session(db, "S33", title="同名", started_at="2026-11-25T21:30:00")
+    bot = FakeBot()
+    bot.client.file.create_folder_fail = True
+    name = feishu_drive.folder_name(store.get_session(db, "S33"))
+    bot.client.file.folder_files = [
+        Obj(token="fld_old", name=name, type="folder", url="https://x/fld_old")]
+
+    out = feishu_drive.ensure_session_folder(
+        db, store.get_session(db, "S33"), bot)
+
+    assert out["ok"] and out["token"] == "fld_old" and not out["created"]
+    assert store.get_session(db, "S33")["drive_folder_token"] == "fld_old"
+
+
+def test_archive_uploads_into_session_folder(db, tmp_path):
+    p = _write(tmp_path, name="S34.m4a", size=8)
+    add_session(db, "S34", audio_path=str(p), title="进专属目录",
+                started_at="2026-11-25T21:30:00")
+    bot = FakeBot()
+
+    out = feishu_drive.archive_session(db, store.get_session(db, "S34"),
+                                       bot=bot)
+
+    assert out["ok"] and out["folder_token"] == "fld_session"
+    assert bot.client.file.all_calls[0].parent_node == "fld_session"
+    assert store.get_session(db, "S34")["drive_folder_token"] == "fld_session"
+
+
+def test_archive_falls_back_to_parent_when_folder_fails(db, tmp_path):
+    p = _write(tmp_path, name="S35.m4a", size=8)
+    add_session(db, "S35", audio_path=str(p), title="退回父目录",
+                started_at="2026-11-25T21:30:00")
+    bot = FakeBot()
+    bot.client.file.create_folder_fail = True
+    bot.client.file.folder_files = []
+
+    out = feishu_drive.archive_session(db, store.get_session(db, "S35"),
+                                       bot=bot)
+
+    assert out["ok"] and out.get("folder_error")
+    assert bot.client.file.all_calls[0].parent_node == "fld_1"
+    assert not store.get_session(db, "S35")["drive_folder_token"]
+
+
+# ---------------------------------------------------------------- 逐字稿 / 附件
+
+def test_ensure_transcript_writes_header_and_skips_when_unchanged(db):
+    add_session(db, "S36", title="周三复盘",
+                started_at="2026-11-25T21:30:00", duration_s=3600)
+    add_rows(db, "S36", [utt_row(0, "明年 OPC 会被平台收紧")])
+    bot = FakeBot()
+
+    out = feishu_drive.ensure_transcript(
+        db, store.get_session(db, "S36"), bot)
+
+    assert out["ok"] and not out["skipped"]
+    assert out["token"] == "ft_all"
+    assert out["text"].startswith("# 2026-11-25 21:30 ·「周三复盘」")
+    assert "场次：S36" in out["text"]
+    assert "[00:00:00] 主播：明年 OPC 会被平台收紧" in out["text"]
+    body = bot.client.file.all_calls[0]
+    assert body.file_name.endswith(".txt")
+    assert body.parent_node == "fld_session"
+    row = store.get_session(db, "S36")
+    assert row["transcript_token"] == "ft_all"
+    assert row["transcript_hash"]
+
+    calls = len(bot.client.file.all_calls)
+    again = feishu_drive.ensure_transcript(
+        db, store.get_session(db, "S36"), bot)
+    assert again["ok"] and again["skipped"]
+    assert len(bot.client.file.all_calls) == calls
+
+
+def test_prepare_attachments_uploads_media_and_caches_tokens(db, tmp_path):
+    p = _write(tmp_path, name="S37.m4a", size=8)
+    add_session(db, "S37", audio_path=str(p), title="附件",
+                started_at="2026-11-25T21:30:00", duration_s=600)
+    add_rows(db, "S37", [utt_row(0, "一句逐字稿")])
+    bot = FakeBot()
+
+    out = feishu_drive.prepare_attachments(
+        db, store.get_session(db, "S37"), bot, "app_1")
+
+    assert out["ok"]
+    assert out["audio_token"] == "media_all"
+    assert out["transcript_token"] == "media_all"
+    assert out["transcript_url"]
+    assert len(bot.client.media.all_calls) == 2
+    first = bot.client.media.all_calls[0]
+    assert first.parent_type == "bitable_file"
+    assert first.parent_node == "app_1"
+    row = store.get_session(db, "S37")
+    assert row["audio_media_token"] == "media_all"
+    assert row["transcript_media_token"] == "media_all"
+
+    again = feishu_drive.prepare_attachments(
+        db, store.get_session(db, "S37"), bot, "app_1")
+    assert again["ok"]
+    assert len(bot.client.media.all_calls) == 2      # 缓存的 token 直接复用
+
+
+def test_prepare_attachments_collects_errors_without_raising(db, tmp_path):
+    p = _write(tmp_path, name="S38.m4a", size=8)
+    add_session(db, "S38", audio_path=str(p), title="附件失败",
+                started_at="2026-11-25T21:30:00")
+    add_rows(db, "S38", [utt_row(0, "一句逐字稿")])
+    bot = FakeBot()
+    bot.client.media.fail = True
+
+    out = feishu_drive.prepare_attachments(
+        db, store.get_session(db, "S38"), bot, "app_1")
+
+    assert not out["ok"] and out["errors"]
+    assert out["audio_token"] == "" and out["transcript_token"] == ""
+
+
+def test_move_file_uses_move_endpoint(db):
+    bot = FakeBot()
+    out = feishu_drive.move_file(bot.client, "ft_1", "fld_target")
+    assert out["ok"]
+    req = bot.client.file.move_calls[0]
+    assert req.file_token == "ft_1"
+    assert req.request_body.type == "file"
+    assert req.request_body.folder_token == "fld_target"
