@@ -36,6 +36,15 @@ CREATE TABLE IF NOT EXISTS sessions (
     drive_token           TEXT,               -- 飞书云空间 file_token（整场归档）
     drive_url             TEXT,               -- 云空间文件链接
     drive_uploaded_at     TEXT,               -- 最近一次上传成功时间
+    drive_folder_token    TEXT,               -- 这场专属云空间文件夹 token
+    drive_folder_url      TEXT,               -- 场次文件夹链接
+    drive_folder_granted_at TEXT,             -- 文件夹授权给群的时间
+    transcript_token      TEXT,               -- 逐字稿 txt 在云空间的 file_token
+    transcript_url        TEXT,               -- 逐字稿 txt 链接
+    transcript_hash       TEXT,               -- 逐字稿内容 hash，判断要不要重传
+    transcript_uploaded_at TEXT,              -- 逐字稿最近上传时间
+    audio_media_token     TEXT,               -- Base 附件字段用的录音 media token
+    transcript_media_token TEXT,              -- Base 附件字段用的逐字稿 media token
     overlap_seconds       REAL DEFAULT 0,     -- 被判定为重叠、未转写的时长
     untranscribed_seconds REAL DEFAULT 0,     -- 冷场/BGM/丢帧等无人声时长
     warnings_json         TEXT DEFAULT '[]',
@@ -555,7 +564,16 @@ def _migrate(conn: sqlite3.Connection) -> None:
     for name, typ in (("audio_format", "TEXT"), ("audio_original_path", "TEXT"),
                       ("audio_bytes", "INTEGER"), ("audio_transcoded_at", "TEXT"),
                       ("minutes_url", "TEXT"), ("drive_token", "TEXT"),
-                      ("drive_url", "TEXT"), ("drive_uploaded_at", "TEXT")):
+                      ("drive_url", "TEXT"), ("drive_uploaded_at", "TEXT"),
+                      ("drive_folder_token", "TEXT"),
+                      ("drive_folder_url", "TEXT"),
+                      ("drive_folder_granted_at", "TEXT"),
+                      ("transcript_token", "TEXT"),
+                      ("transcript_url", "TEXT"),
+                      ("transcript_hash", "TEXT"),
+                      ("transcript_uploaded_at", "TEXT"),
+                      ("audio_media_token", "TEXT"),
+                      ("transcript_media_token", "TEXT")):
         if name not in cols:
             conn.execute("ALTER TABLE sessions ADD COLUMN %s %s" % (name, typ))
     ucols = {r["name"] for r in conn.execute("PRAGMA table_info(utterances)")}
@@ -979,7 +997,11 @@ def list_offline_finalize(conn: sqlite3.Connection, *,
 
 _AUDIO_META_COLS = ("audio_path", "audio_format", "audio_original_path",
                     "audio_bytes", "audio_transcoded_at", "minutes_url",
-                    "drive_token", "drive_url", "drive_uploaded_at")
+                    "drive_token", "drive_url", "drive_uploaded_at",
+                    "drive_folder_token", "drive_folder_url",
+                    "drive_folder_granted_at", "transcript_token",
+                    "transcript_url", "transcript_hash", "transcript_uploaded_at",
+                    "audio_media_token", "transcript_media_token")
 
 
 def set_audio_meta(conn: sqlite3.Connection, sid: str, **fields: Any) -> int:
