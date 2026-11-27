@@ -936,6 +936,20 @@ def test_publish_ready_doc_has_audio_section(db):
     assert "https://x.feishu.cn/file/ft_ready" in doc["markdown"]
 
 
+def test_publish_ready_doc_marks_sliced_audio(db):
+    sid = _ready_session(db)
+    store.set_audio_meta(
+        db, sid, drive_url="https://x.feishu.cn/drive/folder/fld_s",
+        drive_parts_json=json.dumps(
+            [{"token": "a"}, {"token": "b"}, {"token": "c"}]))
+
+    doc = export.build_publish(db, sid)
+
+    assert doc["ok"] and doc["audio_parts"] == 3
+    assert ("整场录音（3 段）：https://x.feishu.cn/drive/folder/fld_s"
+            in doc["markdown"])
+
+
 # ---------------------------------------------------------------- 附件挂载
 
 def test_publish_writes_attachment_fields_and_transcript_link(

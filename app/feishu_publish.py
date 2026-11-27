@@ -504,6 +504,7 @@ def _publish(sid: str, *, bot=None, conn: sqlite3.Connection | None = None,
                            or str(old_meta.get("folder_url") or "")),
             # 归档失败不改发布状态：文档没有录音链接仍然是一篇完整文档。
             "archive_skipped": bool(archive.get("skipped")),
+            "archive_parts": int(archive.get("parts") or 0),
             "archive_error": ("" if archive.get("ok")
                               else str(archive.get("error") or "")),
         }
@@ -899,7 +900,10 @@ def _record_fields(doc: dict, doc_ok: bool, doc_url: str,
     if doc_url:
         fields["文档链接"] = {"link": doc_url, "text": "打开场次文档"}
     if doc.get("audio_url"):
-        fields["录音链接"] = {"link": doc["audio_url"], "text": "打开录音"}
+        n_parts = int(doc.get("audio_parts") or 0)
+        fields["录音链接"] = {
+            "link": doc["audio_url"],
+            "text": ("打开录音（%d 段）" % n_parts) if n_parts > 1 else "打开录音"}
     att = attachments or {}
     if att.get("transcript_url"):
         fields["逐字稿链接"] = {"link": att["transcript_url"],

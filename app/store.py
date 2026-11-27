@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     drive_token           TEXT,               -- 飞书云空间 file_token（整场归档）
     drive_url             TEXT,               -- 云空间文件链接
     drive_uploaded_at     TEXT,               -- 最近一次上传成功时间
+    drive_parts_json      TEXT,               -- 超过 20MB 切片后的分段 [{token,url,name,size}]
     drive_folder_token    TEXT,               -- 这场专属云空间文件夹 token
     drive_folder_url      TEXT,               -- 场次文件夹链接
     drive_folder_granted_at TEXT,             -- 文件夹授权给群的时间
@@ -565,6 +566,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
                       ("audio_bytes", "INTEGER"), ("audio_transcoded_at", "TEXT"),
                       ("minutes_url", "TEXT"), ("drive_token", "TEXT"),
                       ("drive_url", "TEXT"), ("drive_uploaded_at", "TEXT"),
+                      ("drive_parts_json", "TEXT"),
                       ("drive_folder_token", "TEXT"),
                       ("drive_folder_url", "TEXT"),
                       ("drive_folder_granted_at", "TEXT"),
@@ -998,6 +1000,7 @@ def list_offline_finalize(conn: sqlite3.Connection, *,
 _AUDIO_META_COLS = ("audio_path", "audio_format", "audio_original_path",
                     "audio_bytes", "audio_transcoded_at", "minutes_url",
                     "drive_token", "drive_url", "drive_uploaded_at",
+                    "drive_parts_json",
                     "drive_folder_token", "drive_folder_url",
                     "drive_folder_granted_at", "transcript_token",
                     "transcript_url", "transcript_hash", "transcript_uploaded_at",

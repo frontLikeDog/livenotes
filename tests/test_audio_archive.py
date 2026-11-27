@@ -246,6 +246,47 @@ def test_extract_opus_from_pcm(isolated_paths):
     assert audio.content_type(out) == "audio/ogg"
 
 
+# ---------------------------------------------------------------- 大小切片
+#
+# 飞书云空间单文件 20 MB（分片上传也绕不过），长场次的 m4a 只能按时间轴切。
+
+
+def test_parse_hms():
+    assert audio._parse_hms("01:02:03.5") == 3723.5
+    assert audio._parse_hms("123.4") == 123.4
+    assert audio._parse_hms("") == 0.0
+    assert audio._parse_hms("garbage") == 0.0
+
+
+def test_split_m4a_rejects_non_sliceable_suffix(tmp_path):
+    for name in ("x.wav", "x.aac"):
+        p = tmp_path / name
+        p.write_bytes(b"x" * 100)
+        parts, err = audio.split_m4a(p, 10, tmp_path / "out")
+        assert parts == [] and "只有 m4a" in err
+
+
+@pytest.mark.skipif(not audio.ffmpeg_path(), reason="没有 ffmpeg")
+def test_split_m4a_parts_stay_under_limit(isolated_paths):
+    wav = isolated_paths / "audio" / "S_TEST.wav"
+    _write_wav(wav, 6.0)
+    m4a = isolated_paths / "audio" / "S_TEST.m4a"
+    ok, err = audio.to_m4a(wav, m4a)
+    assert ok, err
+    total = audio.audio_duration(m4a)
+    assert 5.5 < total < 6.5
+
+    # limit = 0.6 * 文件大小 -> 目标每段 0.54 倍，恰好切两段
+    limit = max(4096, int(m4a.stat().st_size * 0.6))
+    parts, err = audio.split_m4a(m4a, limit, isolated_paths / "parts")
+
+    assert err == ""
+    assert [p.name for p in parts] == ["S_TEST_01.m4a", "S_TEST_02.m4a"]
+    assert all(p.stat().st_size <= limit for p in parts)
+    assert all(audio.mp4_has_moov(p) for p in parts)
+    assert abs(sum(audio.audio_duration(p) for p in parts) - total) < 1.0
+
+
 # ---------------------------------------------------------------- 转码后补发
 
 def _transcode_with_fake_m4a(db, isolated_paths, monkeypatch):

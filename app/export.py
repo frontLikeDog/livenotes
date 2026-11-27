@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import json
 import re
 import sqlite3
 from datetime import datetime
@@ -262,6 +263,11 @@ def _pub_start(s) -> tuple[str, str, int]:
             int(dt.timestamp() * 1000))
 
 
+def _pub_audio_label(parts: int) -> str:
+    """录音链接的说明：切片归档时标出段数，用户点开文件夹不会意外。"""
+    return "整场录音（%d 段）" % int(parts) if int(parts) > 1 else "整场录音"
+
+
 def _pub_dur(seconds) -> str:
     try:
         sec = max(0, int(round(float(seconds or 0))))
@@ -401,6 +407,13 @@ def build_publish(conn: sqlite3.Connection, sid: str) -> dict:
     status_label = _DOC_STATUS.get(state, state)
     topics = [str(t) for t in (summary.get("topics") or []) if str(t).strip()]
     audio_url = str(s.get("drive_url") or s.get("minutes_url") or "")
+    audio_parts = 0
+    if s.get("drive_url") and s.get("drive_parts_json"):
+        try:
+            _parts = json.loads(str(s.get("drive_parts_json") or "[]"))
+            audio_parts = len(_parts) if isinstance(_parts, list) else 0
+        except ValueError:
+            audio_parts = 0
     mode = _mode_name(str(s.get("source_mode") or ""))
     if s.get("capture_only"):
         mode = "云端仅采集" if mode in ("", "未知") else ("%s · 仅采集" % mode)
@@ -496,7 +509,8 @@ def build_publish(conn: sqlite3.Connection, sid: str) -> dict:
         if related:
             lines += ["## 相关场次", ""] + related + [""]
         if audio_url:
-            lines += ["## 录音", "", "- 整场录音：%s" % audio_url, ""]
+            lines += ["## 录音", "",
+                      "- %s：%s" % (_pub_audio_label(audio_parts), audio_url), ""]
         lines += ["---",
                   "由 LiveNotes 生成。逐字稿与完整时间轴在桌面端；"
                   "本页只保留结论与可引用的原话。"]
@@ -511,7 +525,8 @@ def build_publish(conn: sqlite3.Connection, sid: str) -> dict:
                       % _pub_clean(offline.get("error"), 80))
         lines += [detail, ""]
         if audio_url:
-            lines += ["## 录音", "", "- 整场录音：%s" % audio_url, ""]
+            lines += ["## 录音", "",
+                      "- %s：%s" % (_pub_audio_label(audio_parts), audio_url), ""]
         elif s.get("minutes_url"):
             lines += ["## 录音", "", "- 妙记：%s" % s["minutes_url"], ""]
         lines += ["---",
@@ -549,7 +564,8 @@ def build_publish(conn: sqlite3.Connection, sid: str) -> dict:
         "topics": topics, "counts": {"points": int(counts.get("points") or 0),
                                      "highlights": int(counts.get("highlights") or 0),
                                      "speakers": len(roster)},
-        "audio_url": audio_url, "error": note_error,
+        "audio_url": audio_url, "audio_parts": audio_parts,
+        "error": note_error,
         "n_utterances": n_utt,
         "capture_only": bool(s.get("capture_only")),
         "mode": mode,
