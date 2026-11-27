@@ -525,6 +525,9 @@ def test_wrapup_card_links_doc_and_offers_name_fix(db):
     assert len(bot.cards) == 1
     acts = [b.get("value", {}).get("act") for e in bot.cards[0]["elements"]
             if e.get("tag") == "action" for b in e["actions"]]
+    btn_texts = [b.get("text", {}).get("content") for e in bot.cards[0]["elements"]
+                 if e.get("tag") == "action" for b in e["actions"]]
+    assert "看文档" in btn_texts and "场次表" in btn_texts
     assert "publish_name" in acts
     assert "publish_retry" not in acts          # 成功时不显示重试
     text = feishu_publish.wrapup_text(out, {})

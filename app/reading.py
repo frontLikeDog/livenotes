@@ -489,18 +489,11 @@ def _raw_rewrite(bot: Any, token: str, markdown: str) -> dict:
     if client is None:
         return {"ok": False, "error": "当前机器人不支持覆盖写"}
     try:
-        from lark_oapi.api.docx.v1 import (
-            BatchDeleteDocumentBlockChildrenRequest,
-            BatchDeleteDocumentBlockChildrenRequestBody,
-            CreateDocumentBlockDescendantRequest,
-            CreateDocumentBlockDescendantRequestBody,
-            ConvertDocumentRequest, ConvertDocumentRequestBody,
-            GetDocumentBlockChildrenRequest)
+        from . import feishu_http
 
-        conv = (ConvertDocumentRequestBody.builder()
-                .content_type("markdown").content(str(markdown)).build())
+        conv = feishu_http.obj(content_type="markdown", content=str(markdown))
         resp = client.docx.v1.document.convert(
-            ConvertDocumentRequest.builder().request_body(conv).build())
+            feishu_http.obj(request_body=conv))
         if not resp.success():
             return {"ok": False, "error": "Markdown 转换失败：code=%s %s"
                     % (resp.code, resp.msg)}
@@ -511,12 +504,11 @@ def _raw_rewrite(bot: Any, token: str, markdown: str) -> dict:
             return {"ok": False, "error": "Markdown 转换没返回内容"}
         total, page_token = 0, ""
         for _ in range(50):
-            builder = (GetDocumentBlockChildrenRequest.builder()
-                       .document_id(str(token)).block_id(str(token))
-                       .page_size(500))
-            if page_token:
-                builder = builder.page_token(page_token)
-            child = client.docx.v1.document_block_children.list(builder.build())
+            req = feishu_http.obj(
+                document_id=str(token), block_id=str(token),
+                page_size=500, page_token=page_token or None,
+            )
+            child = client.docx.v1.document_block_children.list(req)
             if not child.success():
                 return {"ok": False, "error": "读取文档块失败：code=%s %s"
                         % (child.code, child.msg)}
@@ -525,21 +517,17 @@ def _raw_rewrite(bot: Any, token: str, markdown: str) -> dict:
             if not getattr(child.data, "has_more", False) or not page_token:
                 break
         if total:
-            body = (BatchDeleteDocumentBlockChildrenRequestBody.builder()
-                    .start_index(0).end_index(total).build())
+            body = feishu_http.obj(start_index=0, end_index=total)
             cleared = client.docx.v1.document_block_children.batch_delete(
-                BatchDeleteDocumentBlockChildrenRequest.builder()
-                .document_id(str(token)).block_id(str(token))
-                .request_body(body).build())
+                feishu_http.obj(document_id=str(token), block_id=str(token),
+                                request_body=body))
             if not cleared.success():
                 return {"ok": False, "error": "清空旧正文失败：code=%s %s"
                         % (cleared.code, cleared.msg)}
-        desc = (CreateDocumentBlockDescendantRequestBody.builder()
-                .children_id(first).index(0).descendants(blocks).build())
+        desc = feishu_http.obj(children_id=first, index=0, descendants=blocks)
         added = client.docx.v1.document_block_descendant.create(
-            CreateDocumentBlockDescendantRequest.builder()
-            .document_id(str(token)).block_id(str(token))
-            .request_body(desc).build())
+            feishu_http.obj(document_id=str(token), block_id=str(token),
+                            request_body=desc))
         if not added.success():
             return {"ok": False, "error": "写入正文失败：code=%s %s"
                     % (added.code, added.msg)}

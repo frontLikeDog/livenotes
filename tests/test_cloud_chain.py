@@ -27,14 +27,6 @@ from app import (feishu_publish, live, livebrief, llm, offline_asr, scheduler,
 from test_feishu_publish import FakeBot
 from test_offline_asr import FakeEngine, FakeVad, _pcm
 
-# 发布器按需 import lark（仅采集节点可以不装）。测试里第一次导入发生在
-# 后台发布线程，Windows 上首次导入要十几秒，会把「等发布完成」的窗口吃光；
-# 这里在主线程预热，避免测试与真实耗时混淆。
-try:                                  # pragma: no cover - 环境相关
-    import lark_oapi.api.bitable.v1  # noqa: F401
-except Exception:
-    pass
-
 SID = "LIVE_CLOUD_E2E"
 
 

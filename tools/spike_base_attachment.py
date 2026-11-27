@@ -53,12 +53,11 @@ def _resolve(conn, args) -> tuple[str, str]:
 
 
 def _add_field(client, app_token: str, table_id: str, name: str) -> dict:
-    from lark_oapi.api.bitable.v1 import (
-        AppTableField, CreateAppTableFieldRequest)
-    field = AppTableField.builder().field_name(name).type(17).build()
+    from app import feishu_http
+    field = feishu_http.obj(field_name=name, type=17)
     resp = client.bitable.v1.app_table_field.create(
-        CreateAppTableFieldRequest.builder().app_token(app_token)
-        .table_id(table_id).request_body(field).build())
+        feishu_http.obj(app_token=app_token, table_id=table_id,
+                        request_body=field))
     if not _ok(resp):
         return {"ok": False, "error": "建附件字段失败：" + _err(resp)}
     data = getattr(resp, "data", None)
@@ -69,23 +68,22 @@ def _add_field(client, app_token: str, table_id: str, name: str) -> dict:
 
 
 def _drop_field(client, app_token: str, table_id: str, field_id: str) -> None:
-    from lark_oapi.api.bitable.v1 import DeleteAppTableFieldRequest
+    from app import feishu_http
     try:
         client.bitable.v1.app_table_field.delete(
-            DeleteAppTableFieldRequest.builder().app_token(app_token)
-            .table_id(table_id).field_id(field_id).build())
+            feishu_http.obj(app_token=app_token, table_id=table_id,
+                            field_id=field_id))
     except Exception as e:
         print("  ! 删临时字段失败：%s" % e)
 
 
 def _add_record(client, app_token: str, table_id: str,
                 values: dict) -> dict:
-    from lark_oapi.api.bitable.v1 import (
-        AppTableRecord, CreateAppTableRecordRequest)
-    body = AppTableRecord.builder().fields(values).build()
+    from app import feishu_http
+    body = feishu_http.obj(fields=values)
     resp = client.bitable.v1.app_table_record.create(
-        CreateAppTableRecordRequest.builder().app_token(app_token)
-        .table_id(table_id).request_body(body).build())
+        feishu_http.obj(app_token=app_token, table_id=table_id,
+                        request_body=body))
     if not _ok(resp):
         return {"ok": False, "error": "写临时行失败：" + _err(resp)}
     rec = getattr(getattr(resp, "data", None), "record", None)
@@ -94,10 +92,10 @@ def _add_record(client, app_token: str, table_id: str,
 
 def _get_record(client, app_token: str, table_id: str,
                 record_id: str) -> dict:
-    from lark_oapi.api.bitable.v1 import GetAppTableRecordRequest
+    from app import feishu_http
     resp = client.bitable.v1.app_table_record.get(
-        GetAppTableRecordRequest.builder().app_token(app_token)
-        .table_id(table_id).record_id(record_id).build())
+        feishu_http.obj(app_token=app_token, table_id=table_id,
+                        record_id=record_id))
     if not _ok(resp):
         return {"ok": False, "error": "读回记录失败：" + _err(resp)}
     rec = getattr(getattr(resp, "data", None), "record", None)
@@ -107,11 +105,11 @@ def _get_record(client, app_token: str, table_id: str,
 def _drop_record(client, app_token: str, table_id: str, record_id: str) -> None:
     if not record_id:
         return
-    from lark_oapi.api.bitable.v1 import DeleteAppTableRecordRequest
+    from app import feishu_http
     try:
         client.bitable.v1.app_table_record.delete(
-            DeleteAppTableRecordRequest.builder().app_token(app_token)
-            .table_id(table_id).record_id(record_id).build())
+            feishu_http.obj(app_token=app_token, table_id=table_id,
+                            record_id=record_id))
     except Exception as e:
         print("  ! 删临时行失败：%s" % e)
 
@@ -195,15 +193,13 @@ def main(argv: list[str] | None = None) -> int:
                                         "spike_" + stamp + ".txt")
                if folder else {"ok": False, "error": "没配云空间文件夹"})
         if fup.get("ok"):
+            from app import feishu_http
             ft = str(fup.get("file_token") or "")
-            from lark_oapi.api.bitable.v1 import (
-                AppTableRecord, UpdateAppTableRecordRequest)
-            body = AppTableRecord.builder().fields(
-                {"spike_附件_" + stamp: [{"file_token": ft}]}).build()
+            body = feishu_http.obj(
+                fields={"spike_附件_" + stamp: [{"file_token": ft}]})
             resp = bot.client.bitable.v1.app_table_record.update(
-                UpdateAppTableRecordRequest.builder().app_token(app_token)
-                .table_id(table_id).record_id(record_id)
-                .request_body(body).build())
+                feishu_http.obj(app_token=app_token, table_id=table_id,
+                                record_id=record_id, request_body=body))
             print("  普通 file token 写入：%s"
                   % ("接受" if _ok(resp) else "被拒（" + _err(resp) + "）"))
             feishu_drive._delete_file(bot.client, ft)
