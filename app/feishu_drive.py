@@ -23,7 +23,7 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 
-from . import logs, store
+from . import feishu_http, logs, store
 from .config import AUDIO_DIR
 
 # upload_all 的硬上限；超过走分片。放到模块级是为了测试能改小。
@@ -119,12 +119,9 @@ def create_folder(client, parent_token: str, name: str) -> dict:
     if not parent_token:
         return {"ok": False, "error": "没有配置父文件夹 token"}
     try:
-        from lark_oapi.api.drive.v1 import (
-            CreateFolderFileRequest, CreateFolderFileRequestBody)
-        body = (CreateFolderFileRequestBody.builder()
-                .name(safe_name(name)).folder_token(str(parent_token)).build())
+        body = feishu_http.obj(name=safe_name(name), folder_token=str(parent_token))
         resp = client.drive.v1.file.create_folder(
-            CreateFolderFileRequest.builder().request_body(body).build())
+            feishu_http.obj(request_body=body))
         if not _ok(resp):
             return {"ok": False, "error": "建文件夹失败：" + _err(resp)}
         data = getattr(resp, "data", None)
@@ -143,15 +140,15 @@ def list_folder(client, folder_token: str) -> list[dict]:
     if not folder_token:
         return []
     try:
-        from lark_oapi.api.drive.v1 import ListFileRequest
         out: list[dict] = []
         token = ""
         for _ in range(50):
-            b = (ListFileRequest.builder()
-                 .folder_token(str(folder_token)).page_size(200))
-            if token:
-                b = b.page_token(token)
-            resp = client.drive.v1.file.list(b.build())
+            req = feishu_http.obj(
+                folder_token=str(folder_token),
+                page_size=200,
+                page_token=token or None,
+            )
+            resp = client.drive.v1.file.list(req)
             if not _ok(resp):
                 return out
             data = getattr(resp, "data", None)
@@ -287,26 +284,22 @@ def _result(resp, size: int, chunks: int = 1) -> dict:
 
 
 def _upload_all(client, path: Path, name: str, folder: str, size: int) -> dict:
-    from lark_oapi.api.drive.v1 import UploadAllFileRequest, UploadAllFileRequestBody
     with open(path, "rb") as f:
-        body = (UploadAllFileRequestBody.builder()
-                .file_name(name).parent_type("explorer").parent_node(folder)
-                .size(size).file(f).build())
-        req = UploadAllFileRequest.builder().request_body(body).build()
+        body = feishu_http.obj(
+            file_name=name, parent_type="explorer", parent_node=folder,
+            size=size, file=f,
+        )
+        req = feishu_http.obj(request_body=body)
         resp = client.drive.v1.file.upload_all(req)
     return _result(resp, size, 1)
 
 
 def _upload_chunked(client, path: Path, name: str, folder: str, size: int) -> dict:
-    from lark_oapi.api.drive.v1 import (
-        FileUploadInfo, UploadFinishFileRequest, UploadFinishFileRequestBody,
-        UploadPartFileRequest, UploadPartFileRequestBody, UploadPrepareFileRequest)
-
-    info = (FileUploadInfo.builder()
-            .file_name(name).parent_type("explorer").parent_node(folder)
-            .size(size).build())
+    info = feishu_http.obj(
+        file_name=name, parent_type="explorer", parent_node=folder, size=size,
+    )
     prep = client.drive.v1.file.upload_prepare(
-        UploadPrepareFileRequest.builder().request_body(info).build())
+        feishu_http.obj(request_body=info))
     if not _ok(prep):
         return {"ok": False, "error": "分片初始化失败：" + _err(prep)}
     data = getattr(prep, "data", None)
@@ -324,11 +317,12 @@ def _upload_chunked(client, path: Path, name: str, folder: str, size: int) -> di
             chunk = f.read(block_size)
             if not chunk:
                 break
-            body = (UploadPartFileRequestBody.builder()
-                    .upload_id(upload_id).seq(seq).size(len(chunk))
-                    .file(io.BytesIO(chunk)).build())
+            body = feishu_http.obj(
+                upload_id=upload_id, seq=seq, size=len(chunk),
+                file=io.BytesIO(chunk),
+            )
             resp = client.drive.v1.file.upload_part(
-                UploadPartFileRequest.builder().request_body(body).build())
+                feishu_http.obj(request_body=body))
             if not _ok(resp):
                 return {"ok": False,
                         "error": "第 %d 片上传失败：%s" % (seq, _err(resp))}
@@ -338,9 +332,8 @@ def _upload_chunked(client, path: Path, name: str, folder: str, size: int) -> di
                 "error": "分片数不符：应传 %d 片，实际 %d 片" % (block_num, seq)}
 
     fin = client.drive.v1.file.upload_finish(
-        UploadFinishFileRequest.builder().request_body(
-            UploadFinishFileRequestBody.builder()
-            .upload_id(upload_id).block_num(block_num).build()).build())
+        feishu_http.obj(
+            request_body=feishu_http.obj(upload_id=upload_id, block_num=block_num)))
     return _result(fin, size, block_num)
 
 
@@ -381,14 +374,17 @@ def grant_member(client, file_token: str, open_id: str,
     if not file_token or not open_id:
         return {"ok": False, "error": "缺少 file_token 或 open_id"}
     try:
-        from lark_oapi.api.drive.v1 import BaseMember, CreatePermissionMemberRequest
-        body = (BaseMember.builder()
-                .member_type(str(member_type or "openid"))
-                .member_id(str(open_id))
-                .perm(perm or "full_access").build())
-        req = (CreatePermissionMemberRequest.builder()
-               .token(str(file_token)).type(str(doc_type or "file"))
-               .need_notification(False).request_body(body).build())
+        body = feishu_http.obj(
+            member_type=str(member_type or "openid"),
+            member_id=str(open_id),
+            perm=perm or "full_access",
+        )
+        req = feishu_http.obj(
+            token=str(file_token),
+            type=str(doc_type or "file"),
+            need_notification=False,
+            request_body=body,
+        )
         resp = client.drive.v1.permission_member.create(req)
         if _ok(resp):
             logs.log_event("feishu.drive_shared", file_token=file_token[:12],
@@ -422,9 +418,8 @@ def _default_bot():
 def _delete_file(client, token: str) -> bool:
     """删掉被替换掉的旧云端副本。失败只记 warn，多一个孤儿文件不影响结果。"""
     try:
-        from lark_oapi.api.drive.v1 import DeleteFileRequest
         resp = client.drive.v1.file.delete(
-            DeleteFileRequest.builder().file_token(str(token)).type("file").build())
+            feishu_http.obj(file_token=str(token), type="file"))
         if _ok(resp):
             return True
         err = _err(resp)
@@ -457,13 +452,12 @@ def move_file(client, file_token: str, folder_token: str,
     if not file_token or not folder_token:
         return {"ok": False, "error": "缺少 file_token 或 folder_token"}
     try:
-        from lark_oapi.api.drive.v1 import MoveFileRequest, MoveFileRequestBody
-        body = (MoveFileRequestBody.builder()
-                .type(str(file_type or "file"))
-                .folder_token(str(folder_token)).build())
+        body = feishu_http.obj(
+            type=str(file_type or "file"),
+            folder_token=str(folder_token),
+        )
         resp = client.drive.v1.file.move(
-            MoveFileRequest.builder().file_token(str(file_token))
-            .request_body(body).build())
+            feishu_http.obj(file_token=str(file_token), request_body=body))
         if not _ok(resp):
             return {"ok": False, "error": "移动文件失败：" + _err(resp)}
         return {"ok": True}
@@ -476,29 +470,24 @@ def move_file(client, file_token: str, folder_token: str,
 
 def _media_upload_all(client, path: Path, name: str, parent_node: str,
                       parent_type: str, size: int) -> dict:
-    from lark_oapi.api.drive.v1 import (
-        UploadAllMediaRequest, UploadAllMediaRequestBody)
     with open(path, "rb") as f:
-        body = (UploadAllMediaRequestBody.builder()
-                .file_name(name).parent_type(parent_type)
-                .parent_node(parent_node).size(size).file(f).build())
+        body = feishu_http.obj(
+            file_name=name, parent_type=parent_type, parent_node=parent_node,
+            size=size, file=f,
+        )
         resp = client.drive.v1.media.upload_all(
-            UploadAllMediaRequest.builder().request_body(body).build())
+            feishu_http.obj(request_body=body))
     return _result(resp, size, 1)
 
 
 def _media_upload_chunked(client, path: Path, name: str, parent_node: str,
                           parent_type: str, size: int) -> dict:
-    from lark_oapi.api.drive.v1 import (
-        MediaUploadInfo, UploadFinishMediaRequest, UploadFinishMediaRequestBody,
-        UploadPartMediaRequest, UploadPartMediaRequestBody,
-        UploadPrepareMediaRequest)
-
-    info = (MediaUploadInfo.builder()
-            .file_name(name).parent_type(parent_type)
-            .parent_node(parent_node).size(size).build())
+    info = feishu_http.obj(
+        file_name=name, parent_type=parent_type, parent_node=parent_node,
+        size=size,
+    )
     prep = client.drive.v1.media.upload_prepare(
-        UploadPrepareMediaRequest.builder().request_body(info).build())
+        feishu_http.obj(request_body=info))
     if not _ok(prep):
         return {"ok": False, "error": "素材分片初始化失败：" + _err(prep)}
     data = getattr(prep, "data", None)
@@ -516,11 +505,12 @@ def _media_upload_chunked(client, path: Path, name: str, parent_node: str,
             chunk = f.read(block_size)
             if not chunk:
                 break
-            body = (UploadPartMediaRequestBody.builder()
-                    .upload_id(upload_id).seq(seq).size(len(chunk))
-                    .file(io.BytesIO(chunk)).build())
+            body = feishu_http.obj(
+                upload_id=upload_id, seq=seq, size=len(chunk),
+                file=io.BytesIO(chunk),
+            )
             resp = client.drive.v1.media.upload_part(
-                UploadPartMediaRequest.builder().request_body(body).build())
+                feishu_http.obj(request_body=body))
             if not _ok(resp):
                 return {"ok": False,
                         "error": "素材第 %d 片上传失败：%s" % (seq, _err(resp))}
@@ -530,9 +520,8 @@ def _media_upload_chunked(client, path: Path, name: str, parent_node: str,
                 "error": "素材分片数不符：应传 %d 片，实际 %d 片"
                          % (block_num, seq)}
     fin = client.drive.v1.media.upload_finish(
-        UploadFinishMediaRequest.builder().request_body(
-            UploadFinishMediaRequestBody.builder()
-            .upload_id(upload_id).block_num(block_num).build()).build())
+        feishu_http.obj(
+            request_body=feishu_http.obj(upload_id=upload_id, block_num=block_num)))
     return _result(fin, size, block_num)
 
 

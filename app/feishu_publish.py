@@ -34,7 +34,7 @@ import time
 import traceback
 from typing import Any
 
-from . import claims, export, feishu, feishu_drive, identity, logs, store, timefmt
+from . import claims, export, feishu, feishu_drive, feishu_http, identity, logs, store, timefmt
 
 KIND_SESSION = "session"
 KIND_CLAIMS = "claims"
@@ -646,39 +646,35 @@ def _err(resp) -> str:
 
 
 def _opt_property(spec: dict):
-    from lark_oapi.api.bitable.v1 import (
-        AppTableFieldProperty, AppTableFieldPropertyOption)
     opts = spec.get("options") or []
     if not opts:
         return None
-    return (AppTableFieldProperty.builder().options([
-        AppTableFieldPropertyOption.builder().name(str(o)).build()
-        for o in opts]).build())
+    return feishu_http.obj(
+        options=[feishu_http.obj(name=str(o)) for o in opts]
+    )
 
 
 def _create_table(client, app_token: str, table_name: str = TABLE_NAME,
                   field_defs: list[dict[str, Any]] | None = None,
                   default_view_name: str = "最近场次") -> dict:
-    from lark_oapi.api.bitable.v1 import (
-        AppTableCreateHeader, CreateAppTableRequest, CreateAppTableRequestBody,
-        ReqTable)
     defs = FIELD_DEFS if field_defs is None else field_defs
 
     def _attempt(specs: list[dict[str, Any]]):
         headers = []
         for spec in specs:
-            b = (AppTableCreateHeader.builder()
-                 .field_name(spec["field_name"]).type(int(spec["type"])))
-            prop = _opt_property(spec)
-            if prop is not None:
-                b = b.property(prop)
-            headers.append(b.build())
-        table = (ReqTable.builder().name(table_name)
-                 .default_view_name(default_view_name).fields(headers).build())
-        body = CreateAppTableRequestBody.builder().table(table).build()
+            headers.append(feishu_http.obj(
+                field_name=spec["field_name"],
+                type=int(spec["type"]),
+                property=_opt_property(spec),
+            ))
+        table = feishu_http.obj(
+            name=table_name,
+            default_view_name=default_view_name,
+            fields=headers,
+        )
+        body = feishu_http.obj(table=table)
         return client.bitable.v1.app_table.create(
-            CreateAppTableRequest.builder().app_token(app_token)
-            .request_body(body).build())
+            feishu_http.obj(app_token=app_token, request_body=body))
 
     resp = _attempt(defs)
     skipped_optional = False
@@ -698,13 +694,11 @@ def _create_table(client, app_token: str, table_name: str = TABLE_NAME,
 
 
 def _find_table(client, app_token: str, table_name: str = TABLE_NAME) -> str:
-    from lark_oapi.api.bitable.v1 import ListAppTableRequest
     token = ""
     for _ in range(10):
-        b = ListAppTableRequest.builder().app_token(app_token).page_size(100)
-        if token:
-            b = b.page_token(token)
-        resp = client.bitable.v1.app_table.list(b.build())
+        req = feishu_http.obj(
+            app_token=app_token, page_size=100, page_token=token or None)
+        resp = client.bitable.v1.app_table.list(req)
         if not resp.success():
             return ""
         data = resp.data
@@ -724,11 +718,8 @@ def _ensure_fields(client, app_token: str, table_id: str,
     if key in _BASE_READY:
         return ""
     defs = FIELD_DEFS if field_defs is None else field_defs
-    from lark_oapi.api.bitable.v1 import (
-        AppTableField, CreateAppTableFieldRequest, ListAppTableFieldRequest)
     resp = client.bitable.v1.app_table_field.list(
-        ListAppTableFieldRequest.builder().app_token(app_token)
-        .table_id(table_id).page_size(100).build())
+        feishu_http.obj(app_token=app_token, table_id=table_id, page_size=100))
     if not resp.success():
         return "读多维表格字段失败：" + _err(resp)
     names = {str(getattr(f, "field_name", ""))
@@ -739,14 +730,14 @@ def _ensure_fields(client, app_token: str, table_id: str,
             continue
         if spec.get("optional") and no_attach:
             continue
-        b = (AppTableField.builder()
-             .field_name(spec["field_name"]).type(int(spec["type"])))
-        prop = _opt_property(spec)
-        if prop is not None:
-            b = b.property(prop)
+        field_body = feishu_http.obj(
+            field_name=spec["field_name"],
+            type=int(spec["type"]),
+            property=_opt_property(spec),
+        )
         created = client.bitable.v1.app_table_field.create(
-            CreateAppTableFieldRequest.builder().app_token(app_token)
-            .table_id(table_id).request_body(b.build()).build())
+            feishu_http.obj(app_token=app_token, table_id=table_id,
+                            request_body=field_body))
         if not created.success():
             if spec.get("optional"):
                 # 老表/老租户不支持附件字段：记下来，退回 URL 链接字段。
@@ -788,13 +779,10 @@ def ensure_base(conn: sqlite3.Connection, bot) -> dict:
     created_base = False
 
     if not app_token:
-        from lark_oapi.api.bitable.v1 import CreateAppRequest, ReqApp
-        b = ReqApp.builder().name(BASE_NAME)
         folder = str(cfg.get("base_folder_token") or "").strip()
-        if folder:
-            b = b.folder_token(folder)
+        req_app = feishu_http.obj(name=BASE_NAME, folder_token=folder or None)
         resp = client.bitable.v1.app.create(
-            CreateAppRequest.builder().request_body(b.build()).build())
+            feishu_http.obj(request_body=req_app))
         if not resp.success():
             return {"ok": False, "error": "建场次表失败：" + _err(resp)}
         app = getattr(resp.data, "app", None)
@@ -859,17 +847,18 @@ def ensure_claims_table(conn: sqlite3.Connection, bot) -> dict:
 
 
 def _find_record(client, app_token: str, table_id: str, sid: str) -> str:
-    from lark_oapi.api.bitable.v1 import (
-        Condition, FilterInfo, SearchAppTableRecordRequest,
-        SearchAppTableRecordRequestBody)
-    body = (SearchAppTableRecordRequestBody.builder()
-            .filter(FilterInfo.builder().conjunction("and").conditions([
-                Condition.builder().field_name("session_id").operator("is")
-                .value([str(sid)]).build()]).build())
-            .automatic_fields(False).build())
+    body = feishu_http.obj(
+        filter=feishu_http.obj(
+            conjunction="and",
+            conditions=[feishu_http.obj(
+                field_name="session_id", operator="is", value=[str(sid)]
+            )],
+        ),
+        automatic_fields=False,
+    )
     resp = client.bitable.v1.app_table_record.search(
-        SearchAppTableRecordRequest.builder().app_token(app_token)
-        .table_id(table_id).request_body(body).build())
+        feishu_http.obj(app_token=app_token, table_id=table_id,
+                        request_body=body))
     if not resp.success():
         return ""
     items = getattr(resp.data, "items", None) or []
@@ -978,19 +967,16 @@ def _upsert_session_row(conn: sqlite3.Connection, bot, doc: dict, doc_ok: bool,
     if not record_id:
         record_id = _find_record(client, app_token, table_id,
                                  str(doc.get("session_id") or ""))
-    from lark_oapi.api.bitable.v1 import (
-        AppTableRecord, CreateAppTableRecordRequest, UpdateAppTableRecordRequest)
-
     def _write(values: dict):
-        record_body = AppTableRecord.builder().fields(values).build()
+        record_body = feishu_http.obj(fields=values)
         if record_id:
             return client.bitable.v1.app_table_record.update(
-                UpdateAppTableRecordRequest.builder().app_token(app_token)
-                .table_id(table_id).record_id(record_id)
-                .request_body(record_body).build()), False
+                feishu_http.obj(app_token=app_token, table_id=table_id,
+                                record_id=record_id,
+                                request_body=record_body)), False
         return client.bitable.v1.app_table_record.create(
-            CreateAppTableRecordRequest.builder().app_token(app_token)
-            .table_id(table_id).request_body(record_body).build()), True
+            feishu_http.obj(app_token=app_token, table_id=table_id,
+                            request_body=record_body)), True
 
     resp, created = _write(fields)
     if not resp.success() and allow_attachments and (
@@ -1166,23 +1152,23 @@ def _claims_records(conn: sqlite3.Connection, sid: str,
 def _search_session_records(client, app_token: str, table_id: str,
                             sid: str) -> tuple[list[str], str]:
     """按 session_id 翻页查出本场全部 record_id（每页 100 条直到 has_more=false）。"""
-    from lark_oapi.api.bitable.v1 import (
-        Condition, FilterInfo, SearchAppTableRecordRequest,
-        SearchAppTableRecordRequestBody)
-    body = (SearchAppTableRecordRequestBody.builder()
-            .filter(FilterInfo.builder().conjunction("and").conditions([
-                Condition.builder().field_name("session_id").operator("is")
-                .value([str(sid)]).build()]).build())
-            .automatic_fields(False).build())
+    body = feishu_http.obj(
+        filter=feishu_http.obj(
+            conjunction="and",
+            conditions=[feishu_http.obj(
+                field_name="session_id", operator="is", value=[str(sid)]
+            )],
+        ),
+        automatic_fields=False,
+    )
     ids: list[str] = []
     token = ""
     for _ in range(200):
-        b = (SearchAppTableRecordRequest.builder()
-             .app_token(app_token).table_id(table_id)
-             .page_size(100).request_body(body))
-        if token:
-            b = b.page_token(token)
-        resp = client.bitable.v1.app_table_record.search(b.build())
+        req = feishu_http.obj(
+            app_token=app_token, table_id=table_id,
+            page_size=100, page_token=token or None, request_body=body,
+        )
+        resp = client.bitable.v1.app_table_record.search(req)
         if not resp.success():
             return [], "查询观点表旧行失败：" + _err(resp)
         data = resp.data
@@ -1264,17 +1250,12 @@ def _upsert_claims(conn: sqlite3.Connection, bot, sid: str,
 
     deleted = 0
     if old_ids:
-        from lark_oapi.api.bitable.v1 import (
-            BatchDeleteAppTableRecordRequest,
-            BatchDeleteAppTableRecordRequestBody)
         for i in range(0, len(old_ids), 500):
             chunk = old_ids[i:i + 500]
-            body = (BatchDeleteAppTableRecordRequestBody.builder()
-                    .records(chunk).build())
+            body = feishu_http.obj(records=chunk)
             resp = client.bitable.v1.app_table_record.batch_delete(
-                BatchDeleteAppTableRecordRequest.builder()
-                .app_token(app_token).table_id(table_id)
-                .request_body(body).build())
+                feishu_http.obj(app_token=app_token, table_id=table_id,
+                                request_body=body))
             if not resp.success():
                 return _fail("删除观点表旧行失败：" + _err(resp),
                              deleted=deleted)
@@ -1282,19 +1263,13 @@ def _upsert_claims(conn: sqlite3.Connection, bot, sid: str,
 
     created = 0
     if records:
-        from lark_oapi.api.bitable.v1 import (
-            AppTableRecord, BatchCreateAppTableRecordRequest,
-            BatchCreateAppTableRecordRequestBody)
         for i in range(0, len(records), 500):
             chunk = records[i:i + 500]
-            rec_objs = [AppTableRecord.builder().fields(f).build()
-                        for f in chunk]
-            body = (BatchCreateAppTableRecordRequestBody.builder()
-                    .records(rec_objs).build())
+            rec_objs = [feishu_http.obj(fields=f) for f in chunk]
+            body = feishu_http.obj(records=rec_objs)
             resp = client.bitable.v1.app_table_record.batch_create(
-                BatchCreateAppTableRecordRequest.builder()
-                .app_token(app_token).table_id(table_id)
-                .request_body(body).build())
+                feishu_http.obj(app_token=app_token, table_id=table_id,
+                                request_body=body))
             if not resp.success():
                 return _fail("写入观点表失败：" + _err(resp),
                              deleted=deleted, created=created)
@@ -1347,10 +1322,14 @@ def wrapup_card(result: dict, doc: dict) -> dict:
         template = "orange"
         body = ("这场只录了音。补转写出字后，文档会自动更新；"
                 "现在先不要把它当总结看。")
-    elif doc_state in (DOC_PENDING_SUMMARY, DOC_FAILED_SUMMARY):
+    elif doc_state == DOC_PENDING_SUMMARY:
         head = "📄《%s》已建档 · 待总结" % short
         template = "orange"
-        body = "逐字稿已就绪，总结还没成功。总结出来后文档会自动更新。"
+        body = "逐字稿已就绪，正在等待整场总结；总结出来后会自动更新到同一篇文档。"
+    elif doc_state == DOC_FAILED_SUMMARY:
+        head = "📄《%s》已建档 · 待总结" % short
+        template = "orange"
+        body = "逐字稿已就绪，刚才总结没成功；可稍后点「重试发布」或发 /总结。"
     elif ok and state == STATE_PARTIAL:
         head = "📄《%s》已发布（场次表待补）" % short
         template = "orange"
@@ -1366,9 +1345,12 @@ def wrapup_card(result: dict, doc: dict) -> dict:
         body = str(result.get("error") or "文档没建出来。内容还在本地，可重试。")
 
     doc_url = str(result.get("doc_url") or "")
+    table_url = str(result.get("record_url") or result.get("base_url") or "")
     actions: list[dict] = []
     if doc_url:
         actions.append(_btn("看文档", primary=True, url=doc_url))
+    if table_url:
+        actions.append(_btn("场次表", url=table_url))
     if doc_state != DOC_PENDING_TRANSCRIPT:
         actions.append(_btn("补名", {"act": "publish_name",
                                      "session_id": sid}))
@@ -1393,9 +1375,10 @@ def wrapup_card(result: dict, doc: dict) -> dict:
                   "content": "**高光**\n%d 条" % int(counts.get("highlights") or 0)}},
     ]})
     elements.append({"tag": "action", "actions": actions})
-    elements.append({"tag": "note", "elements": [{"tag": "plain_text", "content":
-        "按钮没反应就发 /文档 或 /发布。重新发布会重写正文，旧评论可能失锚；"
-        "逐字稿与时间轴在桌面端。"}]})
+    note_text = "本场已自动建档；点「看文档」看详情，点「场次表」看全部场次与观点总表。逐字稿与时间轴在桌面端。"
+    if not ok or state == STATE_PARTIAL:
+        note_text = "按钮没反应可发 /发布 重试。" + note_text
+    elements.append({"tag": "note", "elements": [{"tag": "plain_text", "content": note_text}]})
     return {"config": {"wide_screen_mode": True},
             "header": {"template": template,
                        "title": {"tag": "plain_text", "content": head}},

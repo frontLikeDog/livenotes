@@ -19,7 +19,7 @@ import traceback
 from collections import OrderedDict
 from pathlib import Path
 
-from . import logs
+from . import feishu_http, logs
 from .config import DATA_DIR
 
 CFG_PATH = DATA_DIR / "feishu.json"
@@ -220,14 +220,10 @@ class Bot:
         self.last_error = ""
         if not self.app_id or not self.app_secret:
             raise RuntimeError("缺少飞书凭证：在 data/feishu.json 里填 app_id / app_secret")
-        import lark_oapi as lark
-        self._lark = lark
-        self.client = (lark.Client.builder()
-                       .app_id(self.app_id)
-                       .app_secret(self.app_secret)
-                       # 默认 30 秒；文件上传在弱网下容易踩线，放宽到 60 秒。
-                       .timeout(60)
-                       .build())
+        # REST 调用走纯标准库轻量 HTTP 客户端，不导入 lark_oapi（省掉十几秒冷启动）。
+        # 长连接仅在 run() 里按需 import lark_oapi。
+        self.client = feishu_http.FeishuClient(
+            self.app_id, self.app_secret, timeout=60)
 
     def admit(self, open_id: str) -> bool:
         """只有 owner 能发命令。还没配置 owner 时，第一个发消息的人成为 owner。
@@ -255,15 +251,11 @@ class Bot:
     def _send(self, msg_type: str, content: str, open_id: str = "",
               *, receive_id_type: str = "open_id") -> bool:
         """发一条消息的公共部分：凭证、收件人、错误日志只写一次。"""
-        from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody
         rid = open_id or self.open_id
         if not rid:
             raise RuntimeError("还不知道发给谁：先在飞书里给机器人发一句话")
-        body = (CreateMessageRequestBody.builder()
-                .receive_id(rid).msg_type(msg_type).content(content)
-                .build())
-        req = (CreateMessageRequest.builder()
-               .receive_id_type(receive_id_type).request_body(body).build())
+        body = feishu_http.obj(receive_id=rid, msg_type=msg_type, content=content)
+        req = feishu_http.obj(receive_id_type=receive_id_type, request_body=body)
         resp = self.client.im.v1.message.create(req)
         ok = bool(resp.success())
         if not ok:
@@ -296,18 +288,18 @@ class Bot:
     # ---------------------------------------------------------- 文件 / 语音
     def _upload_file(self, path, file_type: str, duration_ms: int = 0) -> str:
         """上传文件拿 file_key。弱网重试 2 次；业务错误不重试。失败返回空串。"""
-        from lark_oapi.api.im.v1 import CreateFileRequest, CreateFileRequestBody
         err = ""
         self.last_error = ""
         for attempt in range(3):
             try:
                 with open(path, "rb") as f:
-                    body = (CreateFileRequestBody.builder()
-                            .file_type(file_type)
-                            .file_name(Path(path).name)
-                            .duration(int(duration_ms))
-                            .file(f).build())
-                    req = CreateFileRequest.builder().request_body(body).build()
+                    body = feishu_http.obj(
+                        file_type=file_type,
+                        file_name=Path(path).name,
+                        duration=int(duration_ms),
+                        file=f,
+                    )
+                    req = feishu_http.obj(request_body=body)
                     resp = self.client.im.v1.file.create(req)
                 if resp.success():
                     return str(getattr(resp.data, "file_key", "") or "")
@@ -384,15 +376,17 @@ class Bot:
         if not document_id or not open_id:
             return {"ok": False, "error": "缺少 document_id 或 open_id"}
         try:
-            from lark_oapi.api.drive.v1 import (
-                BaseMember, CreatePermissionMemberRequest)
-            body = (BaseMember.builder()
-                    .member_type(str(member_type or "openid"))
-                    .member_id(str(open_id))
-                    .perm(perm or "full_access").build())
-            req = (CreatePermissionMemberRequest.builder()
-                   .token(str(document_id)).type(doc_type or "docx")
-                   .need_notification(False).request_body(body).build())
+            body = feishu_http.obj(
+                member_type=str(member_type or "openid"),
+                member_id=str(open_id),
+                perm=perm or "full_access",
+            )
+            req = feishu_http.obj(
+                token=str(document_id),
+                type=doc_type or "docx",
+                need_notification=False,
+                request_body=body,
+            )
             resp = self.client.drive.v1.permission_member.create(req)
             if resp.success():
                 logs.log_event("feishu.docx_shared", document_id=document_id,
@@ -443,12 +437,9 @@ class Bot:
     def _md_blocks(self, markdown: str) -> tuple[list, list, dict | None]:
         """Markdown -> (blocks, first_level_block_ids, error)。"""
         try:
-            from lark_oapi.api.docx.v1 import (
-                ConvertDocumentRequest, ConvertDocumentRequestBody)
-            conv = (ConvertDocumentRequestBody.builder()
-                    .content_type("markdown").content(str(markdown)).build())
+            conv = feishu_http.obj(content_type="markdown", content=str(markdown))
             resp = self.client.docx.v1.document.convert(
-                ConvertDocumentRequest.builder().request_body(conv).build())
+                feishu_http.obj(request_body=conv))
             if not resp.success():
                 return [], [], self._doc_fail("Markdown 转换失败", resp)
             data = resp.data
@@ -479,11 +470,6 @@ class Bot:
         if not str(markdown or "").strip():
             return {"ok": False, "error": "内容为空"}
         try:
-            from lark_oapi.api.docx.v1 import (
-                CreateDocumentBlockDescendantRequest,
-                CreateDocumentBlockDescendantRequestBody,
-                CreateDocumentRequest, CreateDocumentRequestBody)
-
             blocks, first, err = self._md_blocks(markdown)
             if err:
                 return err
@@ -491,11 +477,12 @@ class Bot:
             # 发布器可以指定「场次文档」文件夹；不传就沿用旧的 doc_folder_token。
             folder = (str(folder_token) if folder_token is not None
                       else str(self.cfg.get("doc_folder_token") or "")).strip()
-            body_builder = CreateDocumentRequestBody.builder().title(str(title))
-            if folder:
-                body_builder = body_builder.folder_token(folder)
+            doc_body = feishu_http.obj(
+                title=str(title),
+                folder_token=folder or None,
+            )
             created = self.client.docx.v1.document.create(
-                CreateDocumentRequest.builder().request_body(body_builder.build()).build())
+                feishu_http.obj(request_body=doc_body))
             if not created.success():
                 return self._doc_fail("创建文档失败", created)
             doc = getattr(created.data, "document", None)
@@ -503,12 +490,10 @@ class Bot:
             if not doc_id:
                 return self._doc_fail("创建文档没返回 document_id")
 
-            desc = (CreateDocumentBlockDescendantRequestBody.builder()
-                    .children_id(first).index(0).descendants(blocks).build())
+            desc = feishu_http.obj(children_id=first, index=0, descendants=blocks)
             added = self.client.docx.v1.document_block_descendant.create(
-                CreateDocumentBlockDescendantRequest.builder()
-                .document_id(doc_id).block_id(doc_id)
-                .request_body(desc).build())
+                feishu_http.obj(
+                    document_id=doc_id, block_id=doc_id, request_body=desc))
             if not added.success():
                 # 文档已经建出来但正文没写进去：把链接带回去，至少不是"什么都没留下"。
                 # 也要授权，否则用户点开这个空文档同样会撞无权限。
@@ -527,16 +512,16 @@ class Bot:
 
     def _doc_children(self, document_id: str) -> tuple[int, str]:
         """数文档根块的子块数量（分页）。返回 (数量, 错误)。"""
-        from lark_oapi.api.docx.v1 import GetDocumentBlockChildrenRequest
         total = 0
         token = ""
         for _ in range(50):
-            builder = (GetDocumentBlockChildrenRequest.builder()
-                       .document_id(str(document_id))
-                       .block_id(str(document_id)).page_size(500))
-            if token:
-                builder = builder.page_token(token)
-            resp = self.client.docx.v1.document_block_children.get(builder.build())
+            req = feishu_http.obj(
+                document_id=str(document_id),
+                block_id=str(document_id),
+                page_size=500,
+                page_token=token or None,
+            )
+            resp = self.client.docx.v1.document_block_children.get(req)
             if not resp.success():
                 return 0, "读取文档块失败：code=%s %s" % (resp.code, resp.msg)
             data = resp.data
@@ -555,17 +540,17 @@ class Bot:
         if not str(title or "").strip():
             return
         try:
-            from lark_oapi.api.docx.v1 import (
-                PatchDocumentBlockRequest, TextElement, TextRun,
-                UpdateBlockRequest, UpdateTextElementsRequest)
-            run = TextRun.builder().content(str(title)).build()
-            upd = (UpdateBlockRequest.builder().update_text_elements(
-                UpdateTextElementsRequest.builder()
-                .elements([TextElement.builder().text_run(run).build()]).build())
-                .build())
-            req = (PatchDocumentBlockRequest.builder()
-                   .document_id(str(document_id)).block_id(str(document_id))
-                   .request_body(upd).build())
+            run = feishu_http.obj(content=str(title))
+            upd = feishu_http.obj(
+                update_text_elements=feishu_http.obj(
+                    elements=[feishu_http.obj(text_run=run)]
+                )
+            )
+            req = feishu_http.obj(
+                document_id=str(document_id),
+                block_id=str(document_id),
+                request_body=upd,
+            )
             resp = self.client.docx.v1.document_block.patch(req)
             if not resp.success():
                 logs.log_event("feishu.docx_title_failed", level="info",
@@ -590,11 +575,6 @@ class Bot:
         if not str(markdown or "").strip():
             return {"ok": False, "error": "内容为空"}
         try:
-            from lark_oapi.api.docx.v1 import (
-                BatchDeleteDocumentBlockChildrenRequest,
-                BatchDeleteDocumentBlockChildrenRequestBody,
-                CreateDocumentBlockDescendantRequest,
-                CreateDocumentBlockDescendantRequestBody)
             blocks, first, err = self._md_blocks(markdown)
             if err:
                 err["document_id"] = str(document_id)
@@ -610,11 +590,12 @@ class Bot:
                         "document_id": str(document_id),
                         "url": self._doc_url(document_id)}
             if count > 0:
-                body = (BatchDeleteDocumentBlockChildrenRequestBody.builder()
-                        .start_index(0).end_index(count).build())
-                req = (BatchDeleteDocumentBlockChildrenRequest.builder()
-                       .document_id(str(document_id)).block_id(str(document_id))
-                       .request_body(body).build())
+                body = feishu_http.obj(start_index=0, end_index=count)
+                req = feishu_http.obj(
+                    document_id=str(document_id),
+                    block_id=str(document_id),
+                    request_body=body,
+                )
                 cleared = self.client.docx.v1.document_block_children.batch_delete(req)
                 if not cleared.success():
                     msg = "清空旧正文失败：code=%s %s" % (cleared.code, cleared.msg)
@@ -625,12 +606,13 @@ class Bot:
                             "document_id": str(document_id),
                             "url": self._doc_url(document_id)}
 
-            desc = (CreateDocumentBlockDescendantRequestBody.builder()
-                    .children_id(first).index(0).descendants(blocks).build())
+            desc = feishu_http.obj(children_id=first, index=0, descendants=blocks)
             added = self.client.docx.v1.document_block_descendant.create(
-                CreateDocumentBlockDescendantRequest.builder()
-                .document_id(str(document_id)).block_id(str(document_id))
-                .request_body(desc).build())
+                feishu_http.obj(
+                    document_id=str(document_id),
+                    block_id=str(document_id),
+                    request_body=desc,
+                ))
             if not added.success():
                 msg = "写入正文失败：code=%s %s" % (added.code, added.msg)
                 self.last_error = msg
@@ -779,7 +761,7 @@ def run(bot: Bot, on_text, on_card=None, on_menu=None) -> None:
     卡片回调要求飞书后台把「卡片回传交互」也订阅到长连接上；没配的时候按钮
     静默无反应，所以每张带按钮的卡片都必须自带文字兜底（回复「确认」）。
     """
-    lark = bot._lark
+    import lark_oapi as lark
 
     def _handle(data) -> None:
         try:

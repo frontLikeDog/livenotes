@@ -749,6 +749,22 @@ def test_cmd_doc_shows_publish_status_and_links(monkeypatch):
     assert "已总结" in out and "https://x.example/doc" in out
 
 
+def test_cmd_doc_without_arg_lists_multi_room_links(monkeypatch):
+    r1 = _room(rid="rm1", ch="CH01", sid="s1")
+    r2 = _room(rid="rm2", ch="CH02", sid="s2")
+    monkeypatch.setattr(fb, "_rooms", lambda: [r1, r2])
+    monkeypatch.setattr(fb, "_api", lambda path, *a, **k: {
+        "enabled": True,
+        "doc_url": "https://x.example/doc_" + path.split("=")[-1],
+        "base_url": "https://x.example/base",
+        "doc_state": "ready",
+    })
+    out = fb.cmd_doc("", "ou")
+    assert "https://x.example/doc_s1" in out
+    assert "https://x.example/doc_s2" in out
+    assert "场次表（全部场次与观点）：https://x.example/base" in out
+
+
 def test_cmd_doc_explains_disabled_publish(monkeypatch):
     monkeypatch.setattr(fb, "_rooms", lambda: [_room()])
     monkeypatch.setattr(fb, "_api", lambda path, *a, **k: {

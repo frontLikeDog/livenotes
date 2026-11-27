@@ -3017,11 +3017,47 @@ def _doc_text(data: dict, room: dict | None) -> str:
     return "\n".join(lines)
 
 
+def _multi_doc_text(cands: list[dict]) -> str:
+    """未指定房间且有多路时，直接列出各路文档与共享场次表链接，免得用户再敲一遍。"""
+    lines = ["最近场次的文档（要看某场详情可发 /文档 CHxx）："]
+    base_url = ""
+    for r in cands[:5]:
+        label = _ch(r)
+        title = _room_name(r)
+        sid = str(r.get("session_id") or "")
+        if not sid:
+            lines.append("· %s %s（尚未建档）" % (label, title))
+            continue
+        try:
+            data = _api("/api/publish?" + urllib.parse.urlencode({"session_id": sid}))
+        except Exception:
+            lines.append("· %s %s（状态读取失败）" % (label, title))
+            continue
+        row = data.get("publish") or {}
+        meta = row.get("meta") or {}
+        doc_url = str(data.get("doc_url") or row.get("doc_url") or "")
+        doc_state = str(data.get("doc_state") or row.get("status")
+                        or meta.get("doc_state") or "")
+        if not base_url:
+            base_url = str(data.get("base_url") or meta.get("base_url")
+                           or row.get("base_url") or "")
+        state_cn = _DOC_STATE_CN.get(doc_state, doc_state) if doc_state else "未发布"
+        lines.append("· %s %s（%s）" % (label, title, state_cn))
+        if doc_url:
+            lines.append("  文档：" + doc_url)
+    if base_url:
+        lines.append("\n场次表（全部场次与观点）：" + base_url)
+    return "\n".join(lines)
+
+
 def cmd_doc(rest: str, open_id: str = "", chat_id: str = "",
             chat_type: str = "p2p") -> str:
-    room, cands, err = _pick_room_choice((rest or "").strip())
+    arg = (rest or "").strip()
+    room, cands, err = _pick_room_choice(arg)
     if not room:
         if cands:
+            if not arg:
+                return _multi_doc_text(cands)
             return _room_candidates_text(cands, "发：/文档 %s")
         return err or "现在没有可查的场次。"
     sid = str(room.get("session_id") or "")
