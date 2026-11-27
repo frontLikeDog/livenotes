@@ -19,8 +19,8 @@ for p in (str(ROOT), str(TESTS)):
         sys.path.insert(0, p)
 
 from app import audio as audio_mod  # noqa: E402
-from app import (clips, delivery, feishu, feishu_publish, glossary, live,  # noqa: E402
-                 logs, metrics, profile, report, rooms, settings, store)
+from app import (clips, delivery, feishu, feishu_publish, glossary, importer,  # noqa: E402
+                 live, logs, metrics, profile, report, rooms, settings, store)
 
 
 @pytest.fixture(autouse=True)
@@ -39,6 +39,9 @@ def isolated_paths(tmp_path, monkeypatch):
     monkeypatch.setattr(clips, "CLIPS_DIR", data / "clips")
     monkeypatch.setattr(audio_mod, "AUDIO_DIR", audio)
     monkeypatch.setattr(audio_mod, "CLIPS_DIR", data / "clips")
+    # importer 在导入时自己 `from .config import AUDIO_DIR` 拿了模块级常量，
+    # 不打这个补丁，测试的导入会写到仓库真实的 data/audio 里。
+    monkeypatch.setattr(importer, "AUDIO_DIR", audio)
     monkeypatch.setattr(live, "FINISH_LOG", data / "finalize.log")
     monkeypatch.setattr(logs, "LOG_DIR", data / "logs")
     monkeypatch.setattr(report, "REPORTS_DIR", data / "reports")

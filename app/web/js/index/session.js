@@ -7,7 +7,7 @@ import { refresh, renderFilters, renderMarksBar, renderTimePresets, updateTimeLa
 import { L } from './live.js';
 import { loadAudio } from './player.js';
 import { paintTitleBar, resumeRun, showSummary } from './summary.js';
-const MODE_NAME={tab:'标签页采集',per_uid:'分轨录制',mixed:'混音兜底',direct:'直取直播流'};
+const MODE_NAME={tab:'标签页采集',per_uid:'分轨录制',mixed:'混音兜底',direct:'直取直播流',import:'云端导入'};
 function dtShort(iso){
   const d=new Date(iso||'');if(isNaN(d))return '';
   const p=n=>String(n).padStart(2,'0');
@@ -138,7 +138,8 @@ async function loadMeta(){
     s.source_mode==='per_uid'?'分轨录制 · 身份已确定':
     s.source_mode==='tab'?'标签页实时采集 · 声纹聚类':
     s.source_mode==='direct'?'直取直播流 · 声纹聚类':
-    s.source_mode==='mixed'?'混音兜底 · 说话人为聚类标签':'演示数据';
+    s.source_mode==='mixed'?'混音兜底 · 说话人为聚类标签':
+    s.source_mode==='import'?'云端导入 · 没有说话人声纹':'演示数据';
   badge.className='badge'+(s.capture_only?'':
     s.source_mode==='mixed'?' mixed':
     (s.source_mode==='tab'||s.source_mode==='direct')?' live':'');
@@ -151,6 +152,8 @@ async function loadMeta(){
     ? '标签页实时采集：只录被选中标签页的音频；说话人由声纹在线聚类，抢话段可能归错，可在左侧改名校正。'
     : s.source_mode==='direct'
     ? '直取直播流：解析流地址后由 ffmpeg 直接拉音频，不加载播放器页面；说话人由声纹在线聚类，抢话段可能归错，可在左侧改名校正。'
+    : s.source_mode==='import'
+    ? '云端导入：文字来自云端逐字稿，没有保存声纹，不能重新分人；补名只改本场显示，不会注册声纹。'
     : '观众端只有一路混音流；重叠段已标记并剔除，说话人标签需人工校正。点右上「风险与说明」看完整评估。';
   $('#tlHint').textContent=`未转写 ${Math.round((s.untranscribed_seconds||0)/60)} 分 / 重叠 ${Math.round(s.overlap_seconds||0)} 秒`;
   // 人工标记的高价值句：刷新列表时把星标恢复出来，重算高光也不会丢。

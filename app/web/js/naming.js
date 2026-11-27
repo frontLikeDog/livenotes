@@ -102,7 +102,7 @@
           '<div class="ln-names-list">' + items + '</div>' +
           '<p class="ln-names-foot">' +
           (allNamed ? '这一场都说得出名字，直接出卡就行。'
-            : '补一次名字，声纹入库，下次自动认。跳过不影响出卡。') +
+            : (data.hint || '补一次名字，声纹入库，下次自动认。跳过不影响出卡。')) +
           '</p>';
         if (!data.has_audio) {
           box.querySelectorAll('.ln-preview').forEach(function (button) {
@@ -218,7 +218,8 @@
           if (edit) {
             var label = document.createElement('span');
             label.className = 'ln-name-source';
-            label.textContent = out.enrolled ? '已入库 · 下次自动认' : '已命名';
+            label.textContent = out.enrolled ? '已入库 · 下次自动认'
+              : (data.voiceprint === false ? '已命名 · 本场显示' : '已命名');
             edit.replaceWith(label);
           }
           var item = (data.speakers || []).filter(function (r) {
@@ -234,7 +235,9 @@
           }
           toast(out.enrolled
             ? '已记下「' + out.name + '」，声纹入库，下次自动认'
-            : '已记下「' + out.name + '」；这一簇声纹太短，下次还不能自动认');
+            : (data.voiceprint === false
+              ? '已记下「' + out.name + '」；云端导入的场次没有声纹，只改本场显示'
+              : '已记下「' + out.name + '」；这一簇声纹太短，下次还不能自动认'));
           recalc(box, data);
           if (typeof options.onNamed === 'function') options.onNamed(out);
         }).catch(function (error) {

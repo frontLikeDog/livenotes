@@ -23,7 +23,9 @@
   每条可试听 3 秒、接受声纹建议、输入一次名字。补名同时注册声纹，下次自动认；
   跳过不影响出卡。产品指标看 top 3 命名率与可分享内容产出率，不看全员标注率。
 - **文件中心仍在 `/files`**：录音、回收站、体检清理是一张表；`/library` 现在只回答
-  「我记过什么」，两套列表不挤在一页。
+  「我记过什么」，两套列表不挤在一页。同一页可以「导入场次」：把云端 `/分享包` 的
+  zip、导出的 SRT 或云空间逐字稿 txt 导成本地场次（命令行也可用
+  `tools/import_session.py`）。导入场次没有声纹：不能重新分人，补名只改本场显示。
 - **站内周报**：`/weekly` 按设置里的时间（周一 09:00 / 12:00 或周日 20:00）整理上一周
   的跨场主题、值得回看和下周可以做，支持按周翻看与 Markdown 导出。
 - **问笔记与追问**：搜索面板里直接用自然语言提问，答案只从本机笔记检索并标出可点
@@ -432,6 +434,7 @@ python tools/stress_live.py --tracks 1,3,5,10 --duration 7200 --warmup 60 \
 - [`docs/47-feishu-native-reading-surface.md`](docs/47-feishu-native-reading-surface.md) 飞书原生阅读面：云文档 + 多维表格 + 卡片，不建公网网页
 - [`docs/50-cloud-folders-and-archive.md`](docs/50-cloud-folders-and-archive.md) 云空间按场次组织：发布即归档、一场一个文件夹、逐字稿落盘与文件夹授权
 - [`docs/51-archive-on-publish-brief.md`](docs/51-archive-on-publish-brief.md) 实施提示词：发布即归档（单独给实施者，只做 docs/50 的阶段 0）
+- [`docs/52-cloud-import-package.md`](docs/52-cloud-import-package.md) 云端导入包：分享包 / SRT / 逐字稿进桌面，幂等、覆盖与「没有声纹」的边界
 
 ## 许可证
 

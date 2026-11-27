@@ -257,6 +257,10 @@ def build_scope(conn: sqlite3.Connection, sid: str, filters: dict, mode: str) ->
         caveats.append(
             "本场为混音兜底：说话人是聚类标签而非实名，重叠语音已剔除；"
             "总结只覆盖可转写片段，不代表全场完整内容。")
+    if session.get("source_mode") == "import":
+        caveats.append(
+            "本场由云端导入：文字来自云端逐字稿，没有保存声纹，说话人不能重新分人；"
+            "补名只改本场显示，不会自动认人。")
     if session.get("source_mode") == "demo":
         caveats.append("当前为演示数据，仅用于验证检索/总结/回溯链路，不是真实采集结果。")
     if overlap_s > 0:

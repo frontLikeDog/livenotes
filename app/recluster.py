@@ -153,6 +153,9 @@ def recluster_session(conn: sqlite3.Connection, sid: str, k: int | None = None) 
     """按已存声纹重新分人并写回数据库。"""
     embs = store.load_embeddings(conn, sid)
     if not embs:
+        sess = store.get_session(conn, sid) or {}
+        if str(sess.get("source_mode") or "") == "import":
+            raise ValueError("云端导入的场次只有文字、没有声纹，不能重新分人。")
         raise ValueError("本场没有保存声纹数据（旧版本采集的场次），无法重新分人。")
 
     rows = {int(r["id"]): dict(r) for r in conn.execute(
