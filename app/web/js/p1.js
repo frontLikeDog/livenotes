@@ -107,7 +107,7 @@
   function sourceName(mode) {
     return ({
       tab: '浏览器录音', direct: '直取音频', per_uid: '分轨录音',
-      mixed: '混音录音', demo: '演示数据'
+      mixed: '混音录音', import: '云端导入', demo: '演示数据'
     })[String(mode || '')] || '本机记录';
   }
   var NOTE_STATES = {

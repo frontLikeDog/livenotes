@@ -9,6 +9,7 @@ from html import escape as _esc
 import os
 import socket
 import struct
+import tempfile
 import threading
 import time
 import traceback
@@ -23,7 +24,7 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 from . import (analysis, analysis_job, audio, cards, claims, classify, coach,
                config, copy, delivery, diagnostics, export, feishu_drive,
                feishu_publish,
-               feedback, follows, glossary, highlight, identity, lan, live,
+               feedback, follows, glossary, highlight, identity, importer, lan, live,
                livebrief, liveprobe, llm, logs, metrics, naming, notes, notify,
                polish, profile, qa, qr,
                reader, rooms, roundtable, runtime, scheduler, seed_demo,
@@ -844,7 +845,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         self.send_response(204)
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Headers",
+                         "Content-Type, X-File-Name, X-Import-Audio, "
+                         "X-Import-Replace, X-Import-Session, X-Import-Title, "
+                         "X-Import-Started")
         self.send_header("Access-Control-Max-Age", "600")
         # Chromium 的 Private Network Access：从非回环页（如 tauri.localhost）
         # 请求 127.0.0.1 时会额外要求这个头，缺了预检就失败。
@@ -1988,6 +1992,8 @@ p{font-size:14px;line-height:1.75;margin:8px 0}
         try:
             if p == "/api/live/chunk":            # 裸 PCM，不走 JSON
                 return self._live_chunk()
+            if p == "/api/import/file":           # 原始文件体，不走 JSON
+                return self._import_file()
             try:
                 n = int(self.headers.get("Content-Length") or 0)
                 body = json.loads(self.rfile.read(n).decode("utf-8")) if n else {}
@@ -2039,7 +2045,104 @@ p{font-size:14px;line-height:1.75;margin:8px 0}
         except live.LiveError as e:
             return self._json({"error": str(e)}, 404)
 
+    def _import_file(self) -> None:
+        """导入云端场次：原始文件体 + 文件名放头部，不用 multipart。
+
+        浏览器用 XHR 的 ``send(File)`` 直接把文件当请求体发过来；这里边读边写
+        临时文件，超过上限立刻断开，不会把整包读进内存。
+        """
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            n = 0
+        if n <= 0:
+            return self._json({"error": "请求体是空的"}, 400)
+        if n > importer.MAX_UPLOAD_BYTES:
+            self.close_connection = True
+            return self._json({"error": "文件超过 1 GB，请先在云端切片"}, 413)
+        raw_name = unquote(self.headers.get("X-File-Name") or "").strip()
+        name = Path(raw_name).name[:120] if raw_name else "upload.bin"
+        name = name.replace("\\", "_")
+        suffix = Path(name).suffix.lower()[:8] or ".bin"
+        audio_only = _flag(self.headers.get("X-Import-Audio"))
+        replace = _flag(self.headers.get("X-Import-Replace"))
+        title = unquote(self.headers.get("X-Import-Title") or "").strip()[:60]
+        started = unquote(self.headers.get("X-Import-Started") or "").strip()[:32]
+        fd, tmp_name = tempfile.mkstemp(prefix="livenotes-upload-", suffix=suffix)
+        got = 0
+        tmp = Path(tmp_name)
+        try:
+            with open(fd, "wb", closefd=True) as out:
+                while got < n:
+                    buf = self.rfile.read(min(262144, n - got))
+                    if not buf:
+                        break
+                    got += len(buf)
+                    out.write(buf)
+            if got <= 0:
+                return self._json({"error": "请求体是空的"}, 400)
+            if got < n:
+                self.close_connection = True
+                return self._json({"error": "上传不完整，请重试"}, 400)
+            conn = store.connect()
+            try:
+                if audio_only:
+                    # 文件中心「补录音」：只把录音挂到已导入/已有的一场，不碰文字。
+                    sid = unquote(self.headers.get("X-Import-Session") or "").strip()
+                    if not sid:
+                        return self._json({"error": "缺少 X-Import-Session"}, 400)
+                    if not store.get_session(conn, sid):
+                        return self._json({"error": "场次不存在"}, 404)
+                    ok, err = importer.attach_audio(conn, sid, tmp)
+                    if not ok:
+                        return self._json({"ok": False, "error": err}, 400)
+                    return self._json({"ok": True, "session_id": sid,
+                                       "has_audio": True,
+                                       "audio_bytes": tmp.stat().st_size})
+                out = importer.import_file(
+                    conn, tmp, name=name, replace=replace, title=title,
+                    started_at=started)
+                metrics.METRICS.inc("p1.import_session", session_id=out["session_id"])
+                return self._json(out, 200 if out.get("existed") else 201)
+            finally:
+                conn.close()
+        except importer.ImportProblem as e:
+            return self._json({"error": str(e)}, 400)
+        except Exception as e:
+            traceback.print_exc()
+            return self._json({"error": "导入失败：%s" % e}, 500)
+        finally:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+
     def _post_api(self, p: str, b: dict, conn) -> None:
+        if p == "/api/import/text":
+            # 小文本直接走 JSON：从云空间复制出来的逐字稿，几十 KB 而已。
+            text = str(b.get("text") or "")
+            if not text.strip():
+                return self._json({"error": "没有可导入的文字"}, 400)
+            if len(text.encode("utf-8")) > importer.MAX_TRANSCRIPT_BYTES:
+                return self._json({"error": "逐字稿超过 32 MB，请用文件上传"}, 413)
+            fd, tmp_name = tempfile.mkstemp(prefix="livenotes-text-", suffix=".txt")
+            tmp = Path(tmp_name)
+            try:
+                with open(fd, "w", encoding="utf-8", closefd=True) as out:
+                    out.write(text)
+                out = importer.import_file(
+                    conn, tmp, name=str(b.get("name") or "逐字稿.txt"),
+                    replace=_flag(b.get("replace")), title=str(b.get("title") or ""),
+                    started_at=str(b.get("started_at") or ""))
+            except importer.ImportProblem as e:
+                return self._json({"error": str(e)}, 400)
+            finally:
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
+            metrics.METRICS.inc("p1.import_session", session_id=out["session_id"])
+            return self._json(out, 200 if out.get("existed") else 201)
         if p == "/api/follows":
             try:
                 item = follows.add(str(b.get("url") or ""),

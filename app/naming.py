@@ -22,6 +22,10 @@ from . import claims, identity, store, voiceprint
 DEFAULT_LIMIT = 5
 MAX_LIMIT = 5
 
+_HINT = "补一次名字，声纹入库，下次自动认；跳过不影响出卡。"
+_HINT_IMPORTED = "这一场是云端导入，没有声纹：补名只改本场显示，不会注册声纹、下次也不会自动认。"
+_IMPORT_REASON = "云端导入的场次没有声纹，名字只改了本场显示"
+
 
 def _named(entry: dict) -> bool:
     """有可跨场识别的名字：已确认/自动声纹，或本场真实昵称。
@@ -141,6 +145,7 @@ def top_speakers(conn: sqlite3.Connection, sid: str,
     top3 = speakers[:3]
     slots = len(top3)
     named = sum(1 for s in top3 if s["named"])
+    imported = str(sess.get("source_mode") or "") == "import"
     return {
         "ok": True,
         "session_id": sid,
@@ -153,7 +158,9 @@ def top_speakers(conn: sqlite3.Connection, sid: str,
             "rate": round(named / slots, 4) if slots else None,
         },
         "thresholds": {"candidate": voiceprint.CAND_THRESHOLD},
-        "hint": "补一次名字，声纹入库，下次自动认；跳过不影响出卡。",
+        # 导入场次没有声纹：这句提示必须和真实行为一致，不能让界面继续承诺「入库」。
+        "voiceprint": not imported,
+        "hint": _HINT_IMPORTED if imported else _HINT,
     }
 
 
@@ -173,12 +180,29 @@ def name_speaker(conn: sqlite3.Connection, sid: str, speaker_id: str,
         return {"ok": False, "error": "名字不能为空"}
     if not _usable_name(name):
         return {"ok": False, "error": "「%s」是位置标签，不是名字" % name}
-    if not store.get_session(conn, sid):
+    sess = store.get_session(conn, sid)
+    if not sess:
         return {"ok": False, "error": "场次不存在"}
     if not conn.execute(
             "SELECT 1 FROM utterances WHERE session_id=? AND speaker_id=? LIMIT 1",
             (sid, speaker_id)).fetchone():
         return {"ok": False, "error": "这一簇不存在"}
+    if str(sess.get("source_mode") or "") == "import":
+        # 导入场次没有声纹：改名只改显示。不调用 enroll（它只会回一句
+        # 「不够注册」，像出了故障），更不能碰人物底库——否则界面会显示
+        # 「已确认」，下次却认不出来。
+        store.rename_speaker(conn, sid, speaker_id, name)
+        row = conn.execute(
+            "SELECT person_state FROM speakers WHERE session_id=? AND speaker_id=?",
+            (sid, speaker_id)).fetchone()
+        if row and str(row["person_state"] or "") in ("cand", "auto"):
+            store.set_speaker_person(conn, sid, speaker_id, None, state="")
+        claims.rebuild_session(conn, sid)
+        return {
+            "ok": True, "session_id": sid, "speaker_id": speaker_id,
+            "name": name, "person_id": "", "enrolled": False,
+            "added": 0, "reason": _IMPORT_REASON,
+        }
     pid = str(person_id or "").strip()
     if pid and not store.get_person(conn, pid):
         pid = ""

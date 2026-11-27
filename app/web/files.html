@@ -116,8 +116,11 @@ td.t:hover{color:var(--accent)}
     </div>
     <input type="search" id="q" placeholder="按标题 / 日期筛选…" style="width:240px">
     <span class="grow"></span>
+    <button class="act" id="btnImport" title="导入云端的分享包 zip、SRT 字幕或逐字稿 txt">导入场次</button>
     <button class="act" id="refresh">刷新</button>
   </div>
+  <input type="file" id="importFile" accept=".zip,.srt,.txt" style="display:none">
+  <input type="file" id="importAudio" accept=".m4a,.wav,.mp3,.aac,.ogg,.opus,.mp4" style="display:none">
 
   <div class="bulk" id="bulk">
     <span id="bulkText"></span>
@@ -278,6 +281,7 @@ function renderRows(){
         (r.has_audio?(r.drive_url
           ? '<button class="act" data-a="cloud-open" data-id="'+esc(r.id)+'">云空间</button>'
           : '<button class="act" data-a="cloud" data-id="'+esc(r.id)+'">存入云空间</button>'):'')+
+        (r.source_mode==='import'&&!r.has_audio?'<button class="act" data-a="attach" data-id="'+esc(r.id)+'">补录音</button>':'')+
         '<button class="act" data-a="rename" data-id="'+esc(r.id)+'">改名</button>'+
         (r.has_audio?'<button class="act" data-a="audio" data-id="'+esc(r.id)+'">只删录音</button>':'')+
         '<button class="act danger" data-a="trash" data-id="'+esc(r.id)+'">删除</button>';
@@ -383,6 +387,12 @@ async function action(a,id){
       if(row.drive_url)window.open(row.drive_url,'_blank');
       return;
     }
+    if(a==='attach'){
+      S._attachTo=id;
+      $('#importAudio').value='';
+      $('#importAudio').click();
+      return;
+    }
   }catch(e){toast('操作失败：'+e.message)}
 }
 
@@ -409,6 +419,75 @@ function showUndo(n){
   $('#undoBar').classList.add('show');
 }
 function hideUndo(){$('#undoBar').classList.remove('show')}
+
+// ---------------------------------------------------------------- 导入
+// 大文件走请求体流式上传（XHR 的 send(File)），服务端边读边写临时文件，
+// 不经过 multipart，也不在浏览器里整包读成 ArrayBuffer。
+function uploadImport(file,headers){
+  return new Promise(function(resolve,reject){
+    var xhr=new XMLHttpRequest();
+    xhr.open('POST','/api/import/file');
+    xhr.setRequestHeader('Content-Type','application/octet-stream');
+    xhr.setRequestHeader('X-File-Name',encodeURIComponent(file.name||'upload.bin'));
+    Object.keys(headers||{}).forEach(function(k){
+      xhr.setRequestHeader(k,encodeURIComponent(headers[k]));
+    });
+    xhr.onload=function(){
+      var out={};try{out=JSON.parse(xhr.responseText||'{}')}catch(e){}
+      resolve({status:xhr.status,body:out});
+    };
+    xhr.onerror=function(){reject(new Error('网络中断'))};
+    xhr.send(file);
+  });
+}
+function importWarnNote(out){
+  var warns=(out.warnings||[]).slice(0,2).join(' ');
+  return warns?'；'+warns:'';
+}
+async function doImport(file){
+  toast('正在导入 '+file.name+'…');
+  var r=await uploadImport(file,{});
+  var out=r.body||{};
+  if(r.status>=400||out.ok===false){
+    toast('导入失败：'+(out.error||('HTTP '+r.status)));return;
+  }
+  if(out.existed){
+    if(confirm('这一场已经在库里《'+out.title+'》，共 '+out.n_utterances+' 句。\n\n'
+      +'重新导入会覆盖本机为它生成的总结、笔记和打点（已发布的飞书文档不会重建）。')){
+      toast('正在覆盖…');
+      r=await uploadImport(file,{'X-Import-Replace':'1'});
+      out=r.body||{};
+      if(r.status>=400||out.ok===false){toast('导入失败：'+(out.error||('HTTP '+r.status)));return}
+    }else{
+      await load();return;
+    }
+  }
+  toast('已导入《'+out.title+'》· '+out.n_utterances+' 句'+importWarnNote(out));
+  await load();
+}
+async function attachAudio(file){
+  var sid=S._attachTo;S._attachTo='';
+  if(!sid)return;
+  toast('正在补录音 '+file.name+'…');
+  var r=await uploadImport(file,{'X-Import-Audio':'1','X-Import-Session':sid});
+  var out=r.body||{};
+  if(r.status>=400||!out.ok){toast('补录音失败：'+(out.error||('HTTP '+r.status)));return}
+  toast('录音已补上，可以播放了');await load();
+}
+$('#btnImport').onclick=function(){
+  // 清理/回收站页没有「全部场次」的语义：先切回全部场次再选文件。
+  if(S.tab!=='live'){var b=$('#tabs button[data-v="live"]');if(b){b.click();return}}
+  $('#importFile').value='';$('#importFile').click();
+};
+$('#importFile').onchange=function(e){
+  var f=e.target.files&&e.target.files[0];if(!f)return;
+  doImport(f).catch(function(err){toast('导入失败：'+err.message)});
+};
+$('#importAudio').onchange=function(e){
+  var f=e.target.files&&e.target.files[0];if(!f)return;
+  attachAudio(f).catch(function(err){toast('补录音失败：'+err.message)});
+};
+
 async function undoTrash(){
   var ids=S.lastTrashed||[];
   if(!ids.length){hideUndo();return}

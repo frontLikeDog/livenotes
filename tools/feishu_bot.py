@@ -1094,10 +1094,12 @@ def _send_naming_flow(sid: str, title: str, data: dict, open_id: str,
         return
     pending = _naming_pending(sid, title, data, open_id, chat_id, chat_type)
     _naming_put(pending)
+    note = ("" if data.get("voiceprint") is not False else
+            "\n这是云端导入的场次：没有声纹，补名只改这一场的显示，不会自动认人。")
     _send_text_target(
         "👤《%s》还有 %d 位没名字。先听 3 段 3 秒试听，听到谁就填谁；"
-        "填完点卡片保存。\n也可以直接回：1 阿哲 2 小北"
-        % (title, len(unnamed)), open_id, chat_id, chat_type)
+        "填完点卡片保存。\n也可以直接回：1 阿哲 2 小北%s"
+        % (title, len(unnamed), note), open_id, chat_id, chat_type)
     _send_naming_previews(pending, open_id, chat_id, chat_type)
     _send_card_target(_naming_card(pending),
                       "补名卡没发出来。直接回「1 阿哲 2 小北」也行。",
@@ -1137,7 +1139,9 @@ def _naming_apply(pending: dict, names: dict[str, str], open_id: str,
         if not out.get("ok"):
             bad.append("%s：%s" % (name, out.get("error") or "没改成"))
             continue
-        tag = "声纹已入库" if out.get("enrolled") else "声纹样本不足，下次还不能自动认"
+        tag = ("声纹已入库" if out.get("enrolled")
+               else ("本场显示" if str(out.get("reason") or "").startswith("云端导入")
+                     else "声纹样本不足，下次还不能自动认"))
         done.append("%s（%s）" % (name, tag))
     lines: list[str] = []
     if done:
