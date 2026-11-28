@@ -2805,12 +2805,20 @@ def library_cards(conn: sqlite3.Connection, limit: int = 24, cursor: str = "",
         # 关键词过滤：标题 + 已索引的笔记正文（note_units），与计数共用同一谓词。
         like = ("%" + keyword.replace("\\", "\\\\").replace("%", "\\%")
                 .replace("_", "\\_") + "%")
-        where.append("(s.title LIKE ? ESCAPE '\\' "
-                     "OR EXISTS(SELECT 1 FROM note_units nu "
-                     "WHERE nu.session_id=s.id AND nu.title LIKE ? ESCAPE '\\') "
-                     "OR EXISTS(SELECT 1 FROM note_units nu "
-                     "WHERE nu.session_id=s.id AND nu.text LIKE ? ESCAPE '\\'))")
-        args.extend([like, like, like])
+        # 覆盖卡片实际展示的文字：标题、主播名、概述、主题 + 已索引笔记正文/署名。
+        # summaries.payload_json 兜底：历史总结可能还没建 note_units 索引。
+        where.append(
+            "(s.title LIKE ? ESCAPE '\\' "
+            "OR EXISTS(SELECT 1 FROM note_units nu WHERE nu.session_id=s.id AND ("
+            "     nu.title LIKE ? ESCAPE '\\' OR nu.text LIKE ? ESCAPE '\\' "
+            "     OR nu.speaker LIKE ? ESCAPE '\\')) "
+            "OR EXISTS(SELECT 1 FROM summaries su WHERE su.session_id=s.id "
+            "AND json_valid(su.payload_json) AND ("
+            "     json_extract(su.payload_json,'$.session_title') LIKE ? ESCAPE '\\' "
+            "     OR json_extract(su.payload_json,'$.overview') LIKE ? ESCAPE '\\' "
+            "     OR json_extract(su.payload_json,'$.host_speaker') LIKE ? ESCAPE '\\' "
+            "     OR json_extract(su.payload_json,'$.topics') LIKE ? ESCAPE '\\')))")
+        args.extend([like] * 8)
     # 当前筛选下的结果总数（不含翻页 cursor），用于「共 N 条」。
     total = int(conn.execute(
         "SELECT COUNT(*) AS n FROM sessions s LEFT JOIN notes n "

@@ -114,7 +114,7 @@
     empty: ['还没有笔记', 'is-empty'],
     insufficient: ['内容太少', 'is-empty'],
     queued: ['排队中', 'is-running'],
-    running: ['整理中', 'is-running'],
+    running: ['生成中', 'is-running'],
     ready: ['已生成', ''],
     partial: ['部分完成', ''],
     failed: ['没能生成', 'is-failed'],

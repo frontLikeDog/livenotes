@@ -191,3 +191,48 @@ def test_library_cards_total_tracks_filters_keyword_sort_and_paging(http_base, d
     # 关键词 + 排序组合
     combo_sort = _json(http_base, base + "&q=%E5%A4%8D%E7%9B%98&sort=duration")  # 复盘
     assert combo_sort["total"] == 5
+
+
+def test_library_cards_keyword_matches_card_fields_and_note_units(http_base, db):
+    """关键词覆盖卡片展示字段与 note_units，历史总结未建索引也能命中。"""
+    sid = "S1"
+    store.insert_session(db, {
+        "id": sid, "title": "原始标题", "started_at": "2026-11-10T20:00:00",
+        "duration_s": 60, "source_mode": "browser",
+    })
+    # 历史总结：只有 summaries.payload_json，没有 note_units 索引
+    db.execute(
+        "INSERT INTO summaries(session_id, scope, filter_json, engine, "
+        "payload_json, created_at) VALUES (?,?,?,?,?,?)",
+        (sid, "content", "{}", "test",
+         '{"session_title": "选品专场", "overview": "本场讲复购策略", '
+         '"host_speaker": "阿哲", "topics": ["选品", "复购"], "points": []}',
+         "2026-11-10T21:00:00"))
+    db.commit()
+    assert db.execute("SELECT COUNT(*) AS n FROM note_units").fetchone()["n"] == 0
+
+    def total(q):
+        return _json(http_base,
+                     "/api/library/cards?limit=24&q=" + urllib.parse.quote(str(q)))["total"]
+
+    base = _json(http_base, "/api/library/cards?limit=24")
+    card = base["items"][0]
+    # 卡片展示的字段都要能搜到：标题 / 主播 / 概述 / 主题
+    for kw, expect in [(card["title"], 1), (card["streamer"] or card["title"], 1)]:
+        assert total(kw) == expect, kw
+    assert total("选品专场") == 1          # summary session_title
+    assert total("原始标题") == 1          # session title
+    assert total("复购策略") == 1          # summary overview
+    assert total("阿哲") == 1              # host_speaker 主播名
+    assert total("复购") == 1              # topics
+    assert total("zzz-not-exist") == 0
+
+    # note_units 命中路径：要点正文 / 署名
+    db.execute(
+        "INSERT INTO note_units(session_id, kind, ref_id, t, speaker, title, "
+        "text, weight, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        (sid, "point", "0", None, "小王、阿哲", "选品专场",
+         "这条要点讲 ROI 回收", 1.0, None))
+    db.commit()
+    assert total("ROI") == 1               # note_units.text
+    assert total("小王") == 1              # note_units.speaker

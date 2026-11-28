@@ -63,7 +63,6 @@ try{var _t=new URLSearchParams(location.search).get('theme');if(_t)document.docu
         <button class="chip" type="button" data-lib-filter="ready">已生成</button>
         <button class="chip" type="button" data-lib-filter="running">生成中</button>
       </div>
-      <span class="count filter-status" id="libCount" aria-live="polite" aria-atomic="true">共 0 条</span>
       <label class="lib-search-ctrl">
         <input type="search" id="libSearch" name="q" placeholder="搜索关键词" aria-label="搜索笔记关键词"
           autocomplete="off" spellcheck="false">
@@ -76,6 +75,7 @@ try{var _t=new URLSearchParams(location.search).get('theme');if(_t)document.docu
           <option value="generated">生成时间</option>
         </select>
       </label>
+      <span class="count filter-status" id="libCount" aria-live="polite" aria-atomic="true">共 0 条</span>
     </div>
 
     <div class="library-grid" id="libGrid" aria-live="polite"></div>
@@ -178,7 +178,8 @@ try{var _t=new URLSearchParams(location.search).get('theme');if(_t)document.docu
     var grid = P1.$('#libGrid');
     if (reset) grid.innerHTML = '';
     (added || S.items).forEach(function (item, index) {
-      grid.appendChild(card(item, reset && index === 0 && S.filter === 'all'));
+      // 搜索/筛选态下不放大第一张卡片；仅「全部」无关键词时保留首图。
+      grid.appendChild(card(item, reset && index === 0 && S.filter === 'all' && !S.q));
     });
     P1.$('#libMoreWrap').hidden = !S.cursor;
     P1.$('#libEmpty').hidden = S.items.length > 0 || S.busy;
@@ -216,7 +217,13 @@ try{var _t=new URLSearchParams(location.search).get('theme');if(_t)document.docu
       if (mySeq !== S.seq) return; // 已有更新的请求，旧响应作废
       S.busy = false;
       P1.$('#libMore').disabled = false;
-      if (d.error) { P1.toast(d.error); return; }
+      if (d.error) {
+        P1.toast(d.error);
+        // 与 .catch 一致：清理数量、网格与翻页状态，不留旧卡片与旧数量。
+        S.total = 0;
+        render(true, []);
+        return;
+      }
       var added = d.items || [];
       S.items = reset ? added : S.items.concat(added);
       S.cursor = d.next_cursor || '';
@@ -249,6 +256,7 @@ try{var _t=new URLSearchParams(location.search).get('theme');if(_t)document.docu
   });
   // 输入/清空关键词：重新过滤列表并更新当前结果数量。
   P1.$('#libSearch').addEventListener('input', P1.debounce(function (e) {
+    if (e.isComposing) return; // 输入法组字中不请求，等组词结束的 input 再过滤
     S.q = (e.target.value || '').trim();
     load(true);
   }, 250));
