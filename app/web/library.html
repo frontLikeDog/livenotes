@@ -48,7 +48,7 @@ try{var _t=new URLSearchParams(location.search).get('theme');if(_t)document.docu
     <header class="page-head">
       <div class="page-head-main">
         <p class="eyebrow">LIBRARY</p>
-        <h1>笔记库 <span class="count" id="libCount">0</span></h1>
+        <h1>笔记库</h1>
         <p class="page-lead">每一场直播都会变成一篇能读的笔记。点开先看要点，需要时再回到原话。</p>
       </div>
       <div class="page-actions">
@@ -61,8 +61,12 @@ try{var _t=new URLSearchParams(location.search).get('theme');if(_t)document.docu
         <button class="chip is-on" type="button" data-lib-filter="all">全部</button>
         <button class="chip" type="button" data-lib-filter="week">本周</button>
         <button class="chip" type="button" data-lib-filter="ready">已生成</button>
-        <button class="chip" type="button" data-lib-filter="running">整理中</button>
+        <button class="chip" type="button" data-lib-filter="running">生成中</button>
       </div>
+      <label class="lib-search-ctrl">
+        <input type="search" id="libSearch" name="q" placeholder="搜索关键词" aria-label="搜索笔记关键词"
+          autocomplete="off" spellcheck="false">
+      </label>
       <label class="sort-ctrl">
         <span>排序</span>
         <select id="libSort" aria-label="笔记排序">
@@ -71,6 +75,7 @@ try{var _t=new URLSearchParams(location.search).get('theme');if(_t)document.docu
           <option value="generated">生成时间</option>
         </select>
       </label>
+      <span class="count filter-status" id="libCount" aria-live="polite" aria-atomic="true">共 0 条</span>
     </div>
 
     <div class="library-grid" id="libGrid" aria-live="polite"></div>
@@ -94,7 +99,8 @@ try{var _t=new URLSearchParams(location.search).get('theme');if(_t)document.docu
 <script>
 (function () {
   'use strict';
-  var S = { filter: 'all', sort: 'time', cursor: '', items: [], counts: {}, busy: false };
+  var S = { filter: 'all', sort: 'time', q: '', cursor: '', items: [], counts: {},
+    total: 0, busy: false, seq: 0 };
 
   function card(item, featured) {
     var meta = P1.noteState(item.note_state, item.progress);
@@ -172,17 +178,21 @@ try{var _t=new URLSearchParams(location.search).get('theme');if(_t)document.docu
     var grid = P1.$('#libGrid');
     if (reset) grid.innerHTML = '';
     (added || S.items).forEach(function (item, index) {
-      grid.appendChild(card(item, reset && index === 0 && S.filter === 'all'));
+      // 搜索/筛选态下不放大第一张卡片；仅「全部」无关键词时保留首图。
+      grid.appendChild(card(item, reset && index === 0 && S.filter === 'all' && !S.q));
     });
     P1.$('#libMoreWrap').hidden = !S.cursor;
     P1.$('#libEmpty').hidden = S.items.length > 0 || S.busy;
-    var total = S.counts.all || 0;
-    P1.$('#libCount').textContent = String(S.filter === 'all' ? total : S.items.length);
-    if (!S.items.length && !S.busy && total > 0) {
+    // 当前筛选（含关键词）后的结果总数；翻页不改变，0 条也明确显示。
+    var total = S.total || 0;
+    P1.$('#libCount').textContent = '共 ' + total + ' 条';
+    // 空状态保留：库里本来就没有笔记 vs. 筛选/关键词没有匹配，两种提示分开。
+    var libTotal = S.counts.all || 0;
+    if (!S.items.length && !S.busy && libTotal > 0) {
       P1.$('#libEmptyKicker').textContent = '没有筛选结果';
       P1.$('#libEmptyTitle').textContent = '没有符合当前筛选的笔记。';
-      P1.$('#libEmptyText').textContent = '换一个筛选，或查看全部笔记。';
-    } else if (!S.items.length && !S.busy && total === 0) {
+      P1.$('#libEmptyText').textContent = '换一个筛选或关键词，或查看全部笔记。';
+    } else if (!S.items.length && !S.busy && libTotal === 0) {
       P1.$('#libEmptyKicker').textContent = '还没有笔记';
       P1.$('#libEmptyTitle').textContent = '记录第一场直播，这里就会出现一篇笔记。';
       P1.$('#libEmptyText').textContent =
@@ -191,28 +201,42 @@ try{var _t=new URLSearchParams(location.search).get('theme');if(_t)document.docu
   }
 
   function load(reset) {
-    if (S.busy) return;
+    // 翻页需要上一页的加载完成；重置类请求（筛选/关键词/排序）立即发出，
+    // 用 seq 丢弃过期响应，保证数量与列表最终一致。
+    if (!reset && S.busy) return;
     S.busy = true;
     if (reset) { S.cursor = ''; S.items = []; }
+    var mySeq = ++S.seq;
     P1.$('#libMore').disabled = true;
     var size = (P1.perf && P1.perf.effective && P1.perf.effective.library_page) || 24;
     var url = '/api/library/cards?limit=' + size + '&filter=' + encodeURIComponent(S.filter)
       + '&sort=' + encodeURIComponent(S.sort)
+      + (S.q ? '&q=' + encodeURIComponent(S.q) : '')
       + (S.cursor ? '&cursor=' + encodeURIComponent(S.cursor) : '');
     P1.api(url).then(function (d) {
+      if (mySeq !== S.seq) return; // 已有更新的请求，旧响应作废
       S.busy = false;
       P1.$('#libMore').disabled = false;
-      if (d.error) { P1.toast(d.error); return; }
+      if (d.error) {
+        P1.toast(d.error);
+        // 与 .catch 一致：清理数量、网格与翻页状态，不留旧卡片与旧数量。
+        S.total = 0;
+        render(true, []);
+        return;
+      }
       var added = d.items || [];
       S.items = reset ? added : S.items.concat(added);
       S.cursor = d.next_cursor || '';
       S.counts = d.counts || S.counts;
+      if (typeof d.total === 'number') S.total = d.total;
       render(reset, added);
       if (reset) P1.metric('library_open', { kind: S.filter });
     }).catch(function () {
+      if (mySeq !== S.seq) return;
       S.busy = false;
       P1.$('#libMore').disabled = false;
       P1.toast('笔记库没有加载出来，稍后再试。');
+      S.total = 0;
       render(true, []);
     });
   }
@@ -230,6 +254,12 @@ try{var _t=new URLSearchParams(location.search).get('theme');if(_t)document.docu
     S.sort = e.target.value;
     load(true);
   });
+  // 输入/清空关键词：重新过滤列表并更新当前结果数量。
+  P1.$('#libSearch').addEventListener('input', P1.debounce(function (e) {
+    if (e.isComposing) return; // 输入法组字中不请求，等组词结束的 input 再过滤
+    S.q = (e.target.value || '').trim();
+    load(true);
+  }, 250));
   P1.$('#libMore').addEventListener('click', function () { load(false); });
 
   P1.$('#libGrid').innerHTML = '<div class="skeleton-card"></div>'

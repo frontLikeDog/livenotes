@@ -1537,6 +1537,7 @@ p{font-size:14px;line-height:1.75;margin:8px 0}
                 cursor=str(q.get("cursor") or ""),
                 filter=str(q.get("filter") or "all"),
                 sort=str(q.get("sort") or "time"),
+                q=str(q.get("q") or ""),
                 since=monday.isoformat(timespec="seconds")))
         if p == "/api/library":
             return self._json({"sessions": _library_rows(conn, False),
@@ -3237,6 +3238,11 @@ class _Server(ThreadingHTTPServer):
     队列放大到 128，给突发留余量。
     """
     request_queue_size = 128
+    # 请求处理线程不用 daemon：server_close() 会 join 它们，等请求结束时的收尾
+    # （_record_request 向 stdout 写结构化日志）跑完再退出。否则 daemon 线程在
+    # 解释器关停时仍在打日志，和 stdout 最终 flush 抢锁，CPython 会报
+    # `_enter_buffered_busy` 并 abort（见 tests/test_degradation.py）。
+    daemon_threads = False
 
 
 def make_server(host: str = HOST, port: int = PORT) -> ThreadingHTTPServer:

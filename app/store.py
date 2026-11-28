@@ -2774,8 +2774,12 @@ def derive_note_state(conn: sqlite3.Connection, sid: str,
 
 def library_cards(conn: sqlite3.Connection, limit: int = 24, cursor: str = "",
                   filter: str = "all", sort: str = "time",
-                  since: str = "") -> dict:
-    """笔记库卡片流。一条 SQL 取候选 + 聚合计数，避免 N+1 与逐行 stat()。"""
+                  since: str = "", q: str = "") -> dict:
+    """笔记库卡片流。一条 SQL 取候选 + 聚合计数，避免 N+1 与逐行 stat()。
+
+    返回 ``total``：当前筛选（filter + 关键词 q + since，不含翻页 cursor）
+    下的结果总数，供界面显示「共 N 条」；翻页不改变它。
+    """
     limit = max(1, min(60, int(limit or 24)))
     filter = filter if filter in ("all", "ready", "running", "nogen", "week",
                                   "follow") else "all"
@@ -2796,6 +2800,32 @@ def library_cards(conn: sqlite3.Connection, limit: int = 24, cursor: str = "",
         args.append(since or "0000")
     elif filter == "follow":
         where.append("EXISTS(SELECT 1 FROM follows f WHERE f.last_session_id=s.id)")
+    keyword = str(q or "").strip()
+    if keyword:
+        # 关键词过滤：标题 + 已索引的笔记正文（note_units），与计数共用同一谓词。
+        like = ("%" + keyword.replace("\\", "\\\\").replace("%", "\\%")
+                .replace("_", "\\_") + "%")
+        # 覆盖卡片实际展示的文字：标题、主播名、概述、主题 + 已索引笔记正文/署名。
+        # summaries.payload_json 兜底：历史总结可能还没建 note_units 索引。
+        where.append(
+            "(s.title LIKE ? ESCAPE '\\' "
+            "OR EXISTS(SELECT 1 FROM note_units nu WHERE nu.session_id=s.id AND ("
+            "     nu.title LIKE ? ESCAPE '\\' OR nu.text LIKE ? ESCAPE '\\' "
+            "     OR nu.speaker LIKE ? ESCAPE '\\')) "
+            "OR EXISTS(SELECT 1 FROM summaries su WHERE su.session_id=s.id "
+            "AND json_valid(su.payload_json) AND ("
+            "     json_extract(su.payload_json,'$.session_title') LIKE ? ESCAPE '\\' "
+            "     OR json_extract(su.payload_json,'$.overview') LIKE ? ESCAPE '\\' "
+            "     OR json_extract(su.payload_json,'$.host_speaker') LIKE ? ESCAPE '\\' "
+            "     OR json_extract(su.payload_json,'$.topics') LIKE ? ESCAPE '\\')))")
+        args.extend([like] * 8)
+    # 当前筛选下的结果总数（不含翻页 cursor），用于「共 N 条」。
+    total = int(conn.execute(
+        "SELECT COUNT(*) AS n FROM sessions s LEFT JOIN notes n "
+        "ON n.session_id=s.id WHERE " + " AND ".join(where),
+        args).fetchone()["n"] or 0)
+    page_where = list(where)
+    page_args = list(args)
     if cursor:
         try:
             key, cid = cursor.rsplit("|", 1)
@@ -2805,10 +2835,16 @@ def library_cards(conn: sqlite3.Connection, limit: int = 24, cursor: str = "",
             col = {"time": "COALESCE(s.started_at,'')",
                    "duration": "COALESCE(s.duration_s,0)",
                    "generated": "COALESCE(n.generated_at,'')"}[sort]
-            op = "<" if sort != "duration" else "<"
-            where.append("(%s %s ? OR (%s = ? AND s.id < ?))"
-                         % (col, op, col))
-            args.extend([key, key, cid])
+            # duration 是数值列：key 转数值，避免「数值 < 文本」恒真的 SQLite 比较。
+            if sort == "duration":
+                try:
+                    keyval: Any = float(key)
+                except (TypeError, ValueError):
+                    keyval = 0.0
+            else:
+                keyval = key
+            page_where.append("(%s < ? OR (%s = ? AND s.id < ?))" % (col, col))
+            page_args.extend([keyval, keyval, cid])
     order = {"time": "COALESCE(s.started_at,'') DESC, s.id DESC",
              "duration": "COALESCE(s.duration_s,0) DESC, s.id DESC",
              "generated": "COALESCE(n.generated_at,'') DESC, s.id DESC"}[sort]
@@ -2822,8 +2858,8 @@ def library_cards(conn: sqlite3.Connection, limit: int = 24, cursor: str = "",
         " n.state AS note_state, n.progress AS note_progress,"
         " n.generated_at AS note_generated_at"
         " FROM sessions s LEFT JOIN notes n ON n.session_id=s.id "
-        "WHERE " + " AND ".join(where) + " ORDER BY " + order + " LIMIT ?",
-        args + [limit + 1])]
+        "WHERE " + " AND ".join(page_where) + " ORDER BY " + order + " LIMIT ?",
+        page_args + [limit + 1])]
     has_more = len(rows) > limit
     rows = rows[:limit]
     items = []
@@ -2863,7 +2899,7 @@ def library_cards(conn: sqlite3.Connection, limit: int = 24, cursor: str = "",
                "duration": float(last.get("duration_s") or 0),
                "generated": last.get("note_generated_at") or ""}[sort]
         next_cursor = "%s|%s" % (key, last["id"])
-    return {"items": items, "next_cursor": next_cursor,
+    return {"items": items, "next_cursor": next_cursor, "total": total,
             "counts": _library_counts(conn), "stats": _library_stats_conn(conn)}
 
 
