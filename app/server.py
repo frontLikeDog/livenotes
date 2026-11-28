@@ -1537,6 +1537,7 @@ p{font-size:14px;line-height:1.75;margin:8px 0}
                 cursor=str(q.get("cursor") or ""),
                 filter=str(q.get("filter") or "all"),
                 sort=str(q.get("sort") or "time"),
+                q=str(q.get("q") or ""),
                 since=monday.isoformat(timespec="seconds")))
         if p == "/api/library":
             return self._json({"sessions": _library_rows(conn, False),

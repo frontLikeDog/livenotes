@@ -103,3 +103,91 @@ def test_library_cards_endpoint(http_base, db):
     searched = _json(http_base, "/api/search?q=%E9%80%89%E5%93%81&types=notes")
     assert searched["q"] == "选品"
     assert "rows" in searched
+
+
+def test_library_filter_status_reports_current_result_count(http_base):
+    """笔记库筛选状态：页面有 #libCount + 关键词框，数量显示「共 N 条」。"""
+    page = _text(http_base, "/library")
+    assert 'id="libCount"' in page
+    assert "共 0 条" in page
+    assert 'id="libSearch"' in page
+    for marker in ('data-lib-filter="all"', 'data-lib-filter="week"',
+                   'data-lib-filter="ready"', 'data-lib-filter="running"'):
+        assert marker in page, marker
+    assert "生成中" in page
+    # 空态容器保留
+    assert 'id="libEmpty"' in page
+
+
+def test_library_cards_total_tracks_filters_keyword_sort_and_paging(http_base, db):
+    """/api/library/cards 返回当前筛选下的 total；翻页不改变，无结果为 0。"""
+    from datetime import datetime, timedelta
+    today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    monday = today - timedelta(days=today.weekday())
+    for i in range(6):
+        sid = "S%d" % i
+        store.insert_session(db, {
+            "id": sid,
+            "title": "选品夜谈" if i == 0 else "复盘 %d" % i,
+            # 前 2 场本周，其余本周之前
+            "started_at": (monday + timedelta(hours=i)).isoformat(timespec="seconds")
+                          if i < 2 else
+                          (monday - timedelta(days=1 + i, hours=i)).isoformat(timespec="seconds"),
+            "duration_s": 60 * (i + 1), "source_mode": "browser",
+        })
+    store.upsert_note(db, "S0", state="ready", progress=100,
+                      generated_at="2026-11-10T22:00:00")
+
+    base = "/api/library/cards?limit=2"
+
+    # 全部
+    data = _json(http_base, base)
+    assert data["total"] == 6 == data["counts"]["all"]
+    assert len(data["items"]) == 2
+    cursor = data["next_cursor"]
+    assert cursor
+    # 翻页：不重复、total 不变、数量与列表一致
+    seen = {x["session_id"] for x in data["items"]}
+    page = _json(http_base, base + "&cursor=" + cursor)
+    assert page["total"] == data["total"] == 6
+    assert not seen & {x["session_id"] for x in page["items"]}
+
+    # 排序不改总数；duration 排序翻页不重复
+    for sort in ("time", "duration", "generated"):
+        d = _json(http_base, base + "&sort=" + sort)
+        assert d["total"] == 6, sort
+        if d["next_cursor"]:
+            d2 = _json(http_base, base + "&sort=" + sort + "&cursor=" + d["next_cursor"])
+            assert d2["total"] == 6
+            ids1 = {x["session_id"] for x in d["items"]}
+            ids2 = {x["session_id"] for x in d2["items"]}
+            assert not ids1 & ids2, sort
+
+    # 本周
+    week = _json(http_base, base + "&filter=week")
+    assert week["total"] == 2
+    # 已生成
+    ready = _json(http_base, base + "&filter=ready")
+    assert ready["total"] == 1
+    # 生成中：无 running → 0，但空状态所需的 counts.all 仍在
+    running = _json(http_base, base + "&filter=running")
+    assert running["total"] == 0
+    assert running["items"] == []
+    assert running["counts"]["all"] == 6
+
+    # 关键词：输入/清空
+    kw = _json(http_base, base + "&q=%E9%80%89%E5%93%81")  # 选品
+    assert kw["total"] == 1
+    assert kw["items"][0]["session_id"] == "S0"
+    cleared = _json(http_base, base + "&q=")
+    assert cleared["total"] == 6
+    # 关键词无匹配 → total=0
+    none = _json(http_base, base + "&q=zzz-not-exist")
+    assert none["total"] == 0
+    assert none["items"] == []
+    # 关键词 + 筛选组合
+    combo = _json(http_base, base + "&filter=ready&q=%E9%80%89%E5%93%81")
+    assert combo["total"] == 1
+    # 关键词 + 排序组合
+    combo_sort = _json(http_base, base + "&q=%E5%A4%8D%E7%9B%98&sort=duration")  # 复盘
+    assert combo_sort["total"] == 5
