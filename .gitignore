@@ -71,5 +71,11 @@ desktop/src-tauri/resources/ffmpeg/
 .claude/worktrees/
 .claude/settings.local.json
 
+# ---- tmp/ 里放的是部署脚本（要进仓库）；打包产物不进 ----
+# 以前一个 9MB 的 livenotes-deploy.tar.gz 被顺手提交进来，占了仓库三分之一。
+# 部署脚本自己现打包到 %TEMP%，仓库里不需要任何 tar 包。
+tmp/*.tar.gz
+tmp/*.tgz
+
 # ---- 本机运行数据：整个 data/ 都不进仓库 ----
 data/
