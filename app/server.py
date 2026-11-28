@@ -171,6 +171,8 @@ def _preresolve_room(rid: str, url: str) -> None:
             return
         rooms.update(rid, resolved_url=target)
         logs.log_event("rooms.preresolve", room_id=rid, resolved_url=target)
+        # 两条分享链接落成同一个房号页：这一刻才知道是同一间，顺手并掉。
+        rooms.absorb_resolved(rid, target)
     except Exception:
         # 预解析只是优化：失败就维持原样，绝不能把加房间弄挂。
         pass
@@ -2343,6 +2345,15 @@ p{font-size:14px;line-height:1.75;margin:8px 0}
                 except Exception:
                     traceback.print_exc()
             return self._json({"ok": ok})
+        if p == "/api/rooms/merge_duplicates":
+            # 同一间直播间换标题重开会在列表里攒成多条（判重以前只看链接）。
+            # 只并认得出房号的组；在跑的那条留下，绝不把正在录的一路并掉。
+            res = rooms.merge_duplicates()
+            for g in res.get("groups") or []:
+                logs.log_event("rooms.merged", kept=str(g.get("kept")),
+                               dropped=g.get("dropped") or [],
+                               identity=str(g.get("identity"))[:60])
+            return self._json(res)
         if p == "/api/rooms/state":
             # 采集端/采集页回报：名字、状态、阶段、会话 id、失败原因。
             # 阶段以这里写入的为准，前端不再按错误文案猜。
@@ -2458,6 +2469,11 @@ p{font-size:14px;line-height:1.75;margin:8px 0}
             r = rooms.update(rid, **f)
             if not r:
                 return self._json({"error": "房间不存在"}, 404)
+            if f.get("resolved_url"):
+                # 两条分享链接落成同一个房号页——判重发生在加房间时（那时
+                # 只有 reflow id，认不出来），到这一刻才确定是同一间。顺手并掉。
+                rooms.absorb_resolved(rid, str(f["resolved_url"]))
+                r = rooms.get(rid) or r
             return self._json({"room": r})
         if p == "/api/rooms/switch":
             # 「直取失败，切到浏览器采集」：只有用户在收听页确认后才调用。

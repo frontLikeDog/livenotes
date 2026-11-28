@@ -487,3 +487,126 @@ def test_startup_preresolve_noop_when_nothing_pending(monkeypatch):
     monkeypatch.setattr(server, "_preresolve_room",
                         lambda rid, url: pytest.fail("不该解析 %s" % url))
     assert server.preresolve_pending_rooms() == []
+
+
+# ---------------------------------------------------------------- 同一间直播间
+# 语音厅常常换标题重开：分享文案里每次的 reflow id 都不同，但采集端读到的
+# web_rid 是同一个直播间。老版本判重只看链接，于是飞书房间列表里同一间
+# 攒成 4 条（云端实测），而且手机上没有办法清掉。
+
+_HALL = "https://live.douyin.com/541395769307"
+
+
+def _share(reflow: str) -> str:
+    return "https://webcast.amemv.com/douyin/webcast/reflow/" + reflow
+
+
+def test_identity_prefers_live_room_id_over_reflow_id():
+    from app import liveprobe
+    a = liveprobe.room_identity(_share("7711718852761078582"), _HALL)
+    b = liveprobe.room_identity(_share("7712831134124067584"), _HALL)
+    assert a and a == b == "douyin:541395769307"
+    # 只有 reflow 时认不出来：那个 id 一次开播换一个，不能当身份。
+    assert liveprobe.room_identity(_share("7711718852761078582")) == ""
+    # 抖音以外的平台照旧按 room_key。
+    assert liveprobe.room_identity("https://live.bilibili.com/12345") == "bilibili:12345"
+
+
+def test_add_dedupes_same_room_by_resolved_live_page():
+    """采集端落成房号页之后，同一间换标题重开也不该多一条。"""
+    a, created = rooms.add(_share("7711718852761078582"), name="企智ai落地派")
+    assert created
+    rooms.update(a["id"], resolved_url=_HALL, state="stopped")
+
+    # 新标题、新 reflow，但采集端已经把上一场落成了同一个房号页
+    b, created = rooms.add(_HALL, name="企智ai落地派")
+    assert not created and b["id"] == a["id"]
+
+    # 再来一条分享链接：带上已知房号时（resolved_from 走短链展开），要认得出
+    c, created = rooms.add(_share("7712831134124067584"), _HALL)
+    assert not created and c["id"] == a["id"]
+    assert _share("7712831134124067584") in c.get("alt_urls", [])
+
+
+def test_add_without_room_id_cannot_judge_reflow_links():
+    """只有 reflow 链接时认不出是同一间：宁可新建，也不拿一次性 id 冒充房号。"""
+    a, _ = rooms.add(_share("7711718852761078582"))
+    b, created = rooms.add(_share("7712831134124067584"))
+    assert created and b["id"] != a["id"]
+    # 两条都还没被采集端落成房号页时，它们就是判不出来——宁可多一条，
+    # 也不能拿一次性的 reflow id 当房号把两个直播间并错。
+    assert len(rooms.list_rooms()) == 2
+    # 采集端落地后（服务端先写 resolved_url，再 absorb_resolved）才收口
+    rooms.update(a["id"], resolved_url=_HALL, state="stopped")
+    merged = rooms.absorb_resolved(b["id"], _HALL)
+    assert merged and merged["id"] == b["id"]
+    assert [r["id"] for r in rooms.list_rooms()] == [b["id"]]
+
+
+def test_preresolve_merges_same_room(monkeypatch):
+    """加房间时的预解析拿到房号后，也要把同一间的另一条并掉。"""
+    a, _ = rooms.add(_share("7711718852761078582"), name="旧标题")
+    rooms.update(a["id"], resolved_url=_HALL, state="stopped", session_id="S_OLD")
+    b, _ = rooms.add(_share("7712831134124067584"), name="新标题")
+    monkeypatch.setattr(server.liveprobe, "canonical_douyin_url",
+                        lambda url, timeout=8.0: _HALL)
+    server._preresolve_room(b["id"], b["url"])
+    # 留下的是刚报上房号的那条（它才是这一路；另一条只是没被解析过的历史）
+    assert [r["id"] for r in rooms.list_rooms()] == [b["id"]]
+    assert "S_OLD" in rooms.get(b["id"]).get("merged_sessions", [])
+
+
+def test_absorb_resolved_keeps_running_room():
+    """两条都落了同一个房号页：在录的那条留下，另一条并进去。"""
+    a, _ = rooms.add(_share("7711718852761078582"), name="旧标题")
+    rooms.update(a["id"], resolved_url=_HALL, state="stopped",
+                 session_id="LIVE_1", name_source="page")
+    b, _ = rooms.add(_share("7712831134124067584"), name="新标题")
+    rooms.update(b["id"], state="live", session_id="LIVE_2")
+    merged = rooms.absorb_resolved(b["id"], _HALL)
+    assert merged and merged["id"] == b["id"] and merged["state"] == "live"
+    assert [r["id"] for r in rooms.list_rooms()] == [b["id"]]
+    assert "LIVE_1" in merged.get("merged_sessions", [])
+
+
+def test_merge_duplicates_noop_when_clean():
+    rooms.add(_HALL)
+    rooms.add("https://live.douyin.com/438227123046")
+    res = rooms.merge_duplicates()
+    assert res["removed"] == 0 and res["groups"] == []
+
+
+def test_find_duplicates_reports_groups():
+    a, _ = rooms.add(_share("7711718852761078582"), _HALL)
+    rooms.update(a["id"], resolved_url=_HALL)
+    # 直接把同一间再塞一份（模拟老数据：判重还没按房号时的记录）
+    with rooms._LOCK:
+        data = rooms._read()
+        import copy
+        dup = copy.deepcopy(data[0])
+        dup.update(id="rmdup", seq=9)
+        data.append(dup)
+        rooms._write(data)
+    groups = rooms.find_duplicates()
+    assert len(groups) == 1 and len(groups[0]["rooms"]) == 2
+
+
+def test_merge_duplicates_http_endpoint(http_base, db):
+    a, _ = rooms.add(_share("7711718852761078582"), _HALL)
+    rooms.update(a["id"], resolved_url=_HALL, state="stopped")
+    with rooms._LOCK:
+        data = rooms._read()
+        import copy
+        dup = copy.deepcopy(data[0])
+        dup.update(id="rmdup2", seq=8, session_id="OLD_S")
+        data.append(dup)
+        rooms._write(data)
+    body = json.dumps({"x": 1}).encode()
+    req = urllib.request.Request(
+        http_base + "/api/rooms/merge_duplicates", data=body, method="POST",
+        headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        out = json.loads(resp.read())
+    assert out["ok"] and out["removed"] == 1
+    assert [r["id"] for r in rooms.list_rooms()] == [a["id"]]
+    assert "OLD_S" in rooms.get(a["id"]).get("merged_sessions", [])

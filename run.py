@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 import webbrowser
 from pathlib import Path
 
@@ -96,7 +97,7 @@ if _overlay is not None:
 
 from app import (config, follows, live, logs, metrics, notes, notify, qa,  # noqa: E402
                  scheduler, seed_demo, settings, store, runtime, weekly)
-from app import audio, lan  # noqa: E402
+from app import audio, lan, rooms  # noqa: E402
 from app.config import (HOST, METRICS_SAMPLE_S, PORT, RESUME_ROOMS,  # noqa: E402
                         ensure_dirs)
 from app.server import (make_server, preresolve_pending_rooms,  # noqa: E402
@@ -469,6 +470,29 @@ def main() -> int:
             print(f"[rooms] 后台补解析 {len(pending)} 个房间的直播地址", flush=True)
     except Exception as e:
         print(f"[rooms] 补解析启动失败：{e}", flush=True)
+    # 同一间换标题重开攒下的重复房间：启动时并一次。判重已经按房号，
+    # 老数据只在这里收口——在跑的那条留下，别的并成别名，回放不受影响。
+    def _merge_dups(why: str) -> None:
+        # 判重已按房号；老数据里的重复只在这里收口——在录的留下，其余并成
+        # 别名。启动时跑一次，之后后台补解析完再跑一次：拿不到房号页的房间
+        # 要等它落成房号才认得出是同一间。
+        try:
+            merged = rooms.merge_duplicates()
+        except Exception as e:
+            print(f"[rooms] 合并重复房间失败（{why}）：{e}", flush=True)
+            return
+        if not merged.get("removed"):
+            return
+        for g in merged.get("groups") or []:
+            logs.log_event("rooms.merged", kept=str(g.get("kept")),
+                           dropped=g.get("dropped") or [],
+                           identity=str(g.get("identity"))[:60])
+        print("[rooms] 合并了 %d 条同一间直播间的重复记录（%s）" %
+              (int(merged.get("removed")), why), flush=True)
+
+    _merge_dups("启动")
+    threading.Thread(target=lambda: (time.sleep(20), _merge_dups("补解析后")),
+                     daemon=True, name="rooms-merge-dups").start()
     # 录音归档清理：原 WAV 按保留期删除、过期的归档/片段缓存清掉。
     # 启动时跑一次，之后每 6 小时一次；没有 ffmpeg 也不影响，只是不转码。
     audio.start_sweeper()

@@ -359,6 +359,11 @@ def handle_card(value: dict, open_id: str, chat_id: str = "",
     真正的生成放到后台线程，结果单独发一条消息。
     """
     act = str(value.get("act") or "")
+    if act.startswith("room_"):
+        threading.Thread(target=_room_action,
+                         args=(act, value, open_id, chat_id, chat_type),
+                         daemon=True).start()
+        return ("正在处理…", None)
     if act == "naming_cancel":
         _naming_drop(str(value.get("nonce") or ""))
         return ("好，这次不补名", None)
@@ -1285,7 +1290,111 @@ def cmd_rooms() -> str:
     lines.append("")
     lines.append("状态：/状态 或 /状态 CH02")
     lines.append("停一路：/stop 1（上面的序号）或 /stop CH02（固定编号）")
+    lines.append("删一条：/删除 CH02（停止采集；录音和逐字稿都还在）")
     lines.append("管理页：%s/rooms" % lan.base_url())
+    return "\n".join(lines)
+
+
+def _rooms_card(rooms: list[dict]) -> dict:
+    """房间列表卡片：每条都能就地停、删。
+
+    文字版（cmd_rooms）在手机上只能读；攒了一批换标题重开的同一间以后，
+    没有任何办法在飞书里清掉。所以房间列表做成卡片，每路一组按钮：
+    状态 / 停止 / 删除（删除要二次确认，去掉录音的事不能一点就做）。
+    """
+    ordered = _ordered(rooms)
+    active = [r for r in rooms if r.get("state") in _ACTIVE]
+    elements: list[dict] = [{"tag": "div", "text": {"tag": "lark_md", "content":
+        "正在听 **%d/%d** 路。停止只停采集，删除会把这条记录从列表去掉；"
+        "两种都不动录音和逐字稿。" % (len(active), MAX_ROOMS)}}]
+    for i, r in enumerate(ordered, 1):
+        bits = ["%d. **%s %s**  %s" % (i, _ch(r), _md_safe(r.get("name") or ""),
+                                       _room_state_label(r))]
+        if r.get("url"):
+            bits.append(_md_safe(str(r["url"]))[:90])
+        elements.append({"tag": "div",
+                         "text": {"tag": "lark_md", "content": "\n".join(bits)}})
+        acts = [_btn("状态", {"act": "brief_status", "room": r.get("id")})]
+        if r.get("state") in _ACTIVE:
+            acts.append(_btn("停止", {"act": "room_stop", "room": r.get("id")}))
+        acts.append(_btn("删除", {"act": "room_del_ask", "room": r.get("id")}))
+        elements.append({"tag": "action", "actions": acts})
+    elements.append({"tag": "note", "elements": [{"tag": "plain_text", "content":
+        "按钮没反应就发 /stop CH02 停、/删除 CH02 删；"
+        "删除前会再问你一次。"}]})
+    return {"config": {"wide_screen_mode": True},
+            "header": {"template": "turquoise",
+                       "title": {"tag": "plain_text",
+                                 "content": "📋 房间列表 · %d 条" % len(ordered)}},
+            "elements": elements}
+
+
+def _remove_confirm_card(room: dict) -> dict:
+    body = ("要把 **%s %s** 从列表里删掉吗？\n"
+            "会先停止这一路采集；**录音和逐字稿都保留**，回放还能听。"
+            % (_ch(room), _md_safe(room.get("name") or "")))
+    return _brief_card(
+        "🗑 删除这一条？", "orange", body,
+        (_btn("删除", {"act": "room_del", "room": room.get("id")}, True),
+         _btn("不删了", {"act": "room_del_cancel", "room": room.get("id")})),
+        "按钮没反应就发 /删除 %s" % _ch(room))
+
+
+def _route_rooms_card(open_id: str, chat_id: str = "",
+                      chat_type: str = "p2p") -> str:
+    """房间列表：能发卡片就发卡片（带按钮），发不出去退回文字。"""
+    rooms = _rooms()
+    if not rooms:
+        return "现在一路都没在听。把直播间链接直接粘给我就开始。"
+    ok = _send_card_target(_rooms_card(rooms), cmd_rooms(),
+                           open_id, chat_id, chat_type)
+    return "" if ok else cmd_rooms()
+
+
+def cmd_remove(arg: str) -> str:
+    """删掉一条房间记录。手机上唯一的清理入口。
+
+    /stop 只是停下采集，房间还留在列表里；同一间换标题重开过几次以后，
+    列表会被这些历史条目塞满，而飞书这边没有删除按钮。所以给 /删除 一个
+    显式入口：先停采集，再从列表移除；录音和逐字稿留在库里，回放不受影响。
+    """
+    rooms = _rooms()
+    if not rooms:
+        return "现在没有房间。贴一个直播间链接给我。"
+    arg = (arg or "").strip()
+    if not arg:
+        return "删哪一条？发 /删除 CH02（编号看 /rooms）。\n" + cmd_rooms()
+    room = _resolve_room(rooms, arg)
+    if not room:
+        return "没找到「%s」。\n%s" % (arg, cmd_rooms())
+    rid = str(room.get("id") or "")
+    try:
+        _api("/api/rooms/remove", {"id": rid})
+    except Exception as e:
+        return "删除失败：%s" % _short_err(str(e))
+    print("[删除] %s %s" % (rid, room.get("name") or ""), flush=True)
+    kept = "录音和逐字稿都还在，回放还能听" if room.get("session_id") else "它没有录过音"
+    return ("已删除：%s %s\n采集已停，%s。"
+            % (_ch(room), room.get("name") or "", kept))
+
+
+def cmd_merge_dups() -> str:
+    """把同一间直播间的重复记录并成一条。"""
+    try:
+        res = _api("/api/rooms/merge_duplicates", {}, timeout=15)
+    except Exception as e:
+        return "合并失败：%s" % _short_err(str(e))
+    groups = res.get("groups") or []
+    if not groups:
+        extra = ("有几条同时在录，没敢自动并；要删就发 /删除 CHxx。"
+                 if res.get("conflicts") else "")
+        return "没有可自动合并的重复。" + extra
+    lines = ["已合并 %d 条重复记录：" % int(res.get("removed") or 0)]
+    for g in groups:
+        lines.append("· 留下 %s %s，并掉 %d 条"
+                     % (_ch({"seq": g.get("kept_ch")}), g.get("name") or "",
+                        len(g.get("dropped") or [])))
+    lines.append("录音和逐字稿都还在；留下的那条编号不变。")
     return "\n".join(lines)
 
 
@@ -2725,6 +2834,8 @@ def cmd_console(open_id: str, chat_id: str = "", chat_type: str = "p2p") -> str:
         return "现在一路都没在听。"
     _send_card_target(_status_card(data), _console_text(data),
                       open_id, chat_id, chat_type)
+    # 卡片已经发出去（发不出去时 _send_card_target 自己退回文字），
+    # 调用方不要再补一条文字，否则每次 /控制台 都会收到两份。
     return ""
 
 
@@ -2785,7 +2896,8 @@ def handle_menu(key: str, open_id: str) -> None:
     if key in ("status", "状态"):
         reply = cmd_status()
     elif key in ("rooms", "房间"):
-        reply = cmd_rooms()
+        # 房间列表菜单发卡片：手机上光看文字没法清理，每条要能停/删。
+        reply = _route_rooms_card(open_id)
     elif key in ("topics", "近聊", "最近10分钟"):
         reply = cmd_topics("", open_id)
     elif key in ("summary", "总结"):
@@ -2796,6 +2908,44 @@ def handle_menu(key: str, open_id: str) -> None:
         reply = _help_text()
     if reply:
         _send_text_target(reply, open_id)
+
+
+def _room_action(act: str, value: dict, open_id: str, chat_id: str = "",
+                 chat_type: str = "p2p") -> None:
+    """房间列表卡片上的操作：停止 / 删除（二次确认）/ 取消。
+
+    卡片按钮的回调不能等网络：删一路要先停会话、可能拖几十秒，所以
+    真正干活放到后台线程，结果单独发一条消息。
+    """
+    room = _room_by_id(value.get("room") or "")
+    if not room:
+        _send_text_target("这一条已经不在了，发 /rooms 看看。",
+                          open_id, chat_id, chat_type)
+        return
+    rid = str(room.get("id") or "")
+    label = "%s %s" % (_ch(room), room.get("name") or "")
+    if act == "room_del_ask":
+        _send_card_target(_remove_confirm_card(room),
+                          "要删掉 %s 吗？回 /删除 %s 确认。" % (label, _ch(room)),
+                          open_id, chat_id, chat_type)
+        return
+    if act == "room_del_cancel":
+        _send_text_target("好，%s 留着。" % label, open_id, chat_id, chat_type)
+        return
+    try:
+        if act == "room_stop":
+            _api("/api/rooms/close", {"id": rid})
+            _send_text_target("已停：%s\n录音会正常收尾保存。" % label,
+                              open_id, chat_id, chat_type)
+        elif act == "room_del":
+            _api("/api/rooms/remove", {"id": rid})
+            _send_text_target("已删除：%s\n录音和逐字稿都还在，回放还能听。" % label,
+                              open_id, chat_id, chat_type)
+    except Exception as e:
+        _send_text_target("没做成：%s" % _short_err(str(e)),
+                          open_id, chat_id, chat_type)
+        return
+    print("[房间] %s %s" % (act, rid), flush=True)
 
 
 def _brief_action(act: str, value: dict, open_id: str, chat_id: str = "",
@@ -3187,9 +3337,11 @@ def _help_text() -> str:
             "/刷新 重做上一条简报（绕过缓存）\n"
             "/控制台 一张卡片看所有房间和按钮\n"
             "/订阅 [分钟] /退订 定时把近聊摘要发给你\n"
-            "/rooms 房间列表（带 CH 编号）\n"
+            "/rooms 房间列表（带 CH 编号，卡片上可直接停/删）\n"
             "/重试 [CH] 重新拉起一路（下播后再开播用）\n"
             "/stop 1 或 /stop CH02 停掉一路\n"
+            "/删除 CH02 从列表删掉一条（录音和逐字稿保留）\n"
+            "/清理重复 把同一个直播间的几条记录并成一条\n"
             "/白名单 看过哪些站点被放行\n"
             "关注 FDE、OPC 给关键词加权\n"
             "/话题 OPC政策 搜历史场次里的原话\n"
@@ -3331,7 +3483,14 @@ def _route(t: str, low: str, open_id: str = "", chat_id: str = "",
             return cmd_status(target)
 
     if t.startswith(("/rooms", "/房间", "/列表", "房间列表")):
-        return cmd_rooms()
+        # 房间列表发卡片（带停止/删除按钮）；卡片发不出去时 _route_rooms_card
+        # 自己退回文字版，所以这里拿到空串就等于已经发过了。
+        return _route_rooms_card(open_id, chat_id, chat_type)
+    for verb in ("/删除", "/delete", "/移除"):
+        if t.startswith(verb):
+            return cmd_remove(t[len(verb):].strip(" ：:"))
+    if t.startswith(("/清理重复", "/合并重复", "清理重复")):
+        return cmd_merge_dups()
     for verb in ("/重试", "/retry"):
         if low.startswith(verb):
             return cmd_retry(t[len(verb):].strip(" ：:"))

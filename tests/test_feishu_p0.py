@@ -3,12 +3,44 @@
 from __future__ import annotations
 
 import json
+import time
 
 import pytest
 
 import tools.feishu_bot as fb
 from app import feishu
 from app.config import LIVE_STALL_WARN_S
+
+
+class FakeBot:
+    def __init__(self) -> None:
+        self.texts: list[tuple[str, str]] = []
+        self.cards: list[tuple[str, dict]] = []
+        self.text_ok = True
+        self.card_ok = True
+
+    def send_text(self, text: str, open_id: str = "") -> bool:
+        self.texts.append((open_id, text))
+        return self.text_ok
+
+    def send_card(self, card: dict, open_id: str = "") -> bool:
+        self.cards.append((open_id, card))
+        return self.card_ok
+
+    def send_text_to_chat(self, chat_id: str, text: str) -> bool:
+        self.texts.append((chat_id, text))
+        return self.text_ok
+
+    def send_card_to_chat(self, chat_id: str, card: dict) -> bool:
+        self.cards.append((chat_id, card))
+        return self.card_ok
+
+
+@pytest.fixture
+def bot(monkeypatch):
+    b = FakeBot()
+    monkeypatch.setattr(fb, "_BOT", b, raising=False)
+    return b
 
 
 @pytest.fixture(autouse=True)
@@ -300,3 +332,115 @@ def test_stop_plain_number_keeps_old_semantics(monkeypatch):
     out = fb.cmd_stop("1")
     assert closed == ["rm2"]
     assert "CH02" in out
+
+
+# ---------------------------------------------------------------- 房间列表卡片
+
+def _list_rooms():
+    return [
+        {"id": "rm1", "seq": 1, "state": "live", "name": "语音厅",
+         "url": "https://live.douyin.com/1"},
+        {"id": "rm2", "seq": 2, "state": "stopped", "name": "旧标题",
+         "url": "https://live.douyin.com/2"},
+    ]
+
+
+def test_rooms_card_has_stop_and_delete_per_room(monkeypatch, bot):
+    """房间列表要能就地停/删：手机上没有别的清理入口。"""
+    monkeypatch.setattr(fb, "_rooms", _list_rooms)
+    assert fb._route_rooms_card("ou") == ""
+    assert bot.cards, "应发出卡片"
+    card = bot.cards[0][1]
+    body = json.dumps(card, ensure_ascii=False)
+    assert "CH01" in body and "CH02" in body
+    # 在听的才有「停止」；两条都能「删除」
+    acts = [a for el in card["elements"] if el["tag"] == "action"
+            for a in el["actions"]]
+    stops = [a["value"]["room"] for a in acts
+             if a["value"].get("act") == "room_stop"]
+    dels = [a["value"]["room"] for a in acts
+            if a["value"].get("act") == "room_del_ask"]
+    assert stops == ["rm1"]
+    assert dels == ["rm1", "rm2"]
+
+
+def test_rooms_card_falls_back_to_text(monkeypatch, bot):
+    """卡片发不出去时退回文字版，而且只发一次（不能卡片失败再补一遍）。"""
+    monkeypatch.setattr(fb, "_rooms", _list_rooms)
+    bot.card_ok = False
+    assert fb._route_rooms_card("ou") == ""
+    assert len(bot.texts) == 1
+    text = bot.texts[0][1]
+    assert "CH01" in text and "/删除" in text
+
+
+def test_route_rooms_sends_card(monkeypatch, bot):
+    monkeypatch.setattr(fb, "_rooms", _list_rooms)
+    assert fb._route("/rooms", "/rooms", "ou") == ""
+    assert bot.cards
+
+
+def test_remove_confirm_requires_second_tap(monkeypatch, bot):
+    """删除要二次确认：点一下就删掉，误触代价太大。"""
+    monkeypatch.setattr(fb, "_room_by_id", lambda rid: _list_rooms()[1])
+    calls: list = []
+    monkeypatch.setattr(fb, "_api", lambda path, payload=None, timeout=6.0:
+                        calls.append((path, payload)) or {})
+    toast, card = fb.handle_card({"act": "room_del_ask", "room": "rm2"}, "ou")
+    assert "正在处理" in toast
+    # 后台线程先发确认卡；等它跑完再断言没有真的删
+    for _ in range(50):
+        if bot.cards:
+            break
+        time.sleep(0.02)
+    assert bot.cards and not calls
+    assert "删除这一条" in json.dumps(bot.cards[0][1], ensure_ascii=False)
+    toast, card = fb.handle_card({"act": "room_del_cancel", "room": "rm2"}, "ou")
+    for _ in range(50):
+        if len(bot.texts) >= 1:
+            break
+        time.sleep(0.02)
+    assert not any(p == "/api/rooms/remove" for p, _ in calls)
+
+
+def test_remove_action_deletes_after_confirm(monkeypatch, bot):
+    monkeypatch.setattr(fb, "_room_by_id", lambda rid: _list_rooms()[0])
+    calls: list = []
+    monkeypatch.setattr(fb, "_api", lambda path, payload=None, timeout=6.0:
+                        calls.append((path, payload)) or {})
+    fb.handle_card({"act": "room_del", "room": "rm1"}, "ou")
+    for _ in range(50):
+        if calls:
+            break
+        time.sleep(0.02)
+    assert ("/api/rooms/remove", {"id": "rm1"}) in calls
+    for _ in range(50):
+        if bot.texts:
+            break
+        time.sleep(0.02)
+    assert "回放还能听" in bot.texts[0][1]
+
+
+def test_cmd_remove_by_ch(monkeypatch):
+    calls: list = []
+    monkeypatch.setattr(fb, "_rooms", _list_rooms)
+    monkeypatch.setattr(fb, "_api", lambda path, payload=None, timeout=6.0:
+                        calls.append((path, payload)) or {})
+    out = fb.cmd_remove("CH02")
+    assert "已删除" in out and "CH02" in out
+    assert calls == [("/api/rooms/remove", {"id": "rm2"})]
+
+
+def test_cmd_remove_needs_target(monkeypatch):
+    monkeypatch.setattr(fb, "_rooms", _list_rooms)
+    out = fb.cmd_remove("")
+    assert "删哪一条" in out and "CH02" in out
+
+
+def test_cmd_merge_dups_reports(monkeypatch):
+    monkeypatch.setattr(fb, "_api", lambda path, payload=None, timeout=6.0: {
+        "ok": True, "removed": 1,
+        "groups": [{"kept": "rm1", "kept_ch": 1, "name": "语音厅",
+                    "dropped": ["rm9"]}]})
+    out = fb.cmd_merge_dups()
+    assert "已合并 1 条" in out and "CH01" in out

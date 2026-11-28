@@ -230,6 +230,40 @@ def room_key_of(url: str, platform: str = "") -> str:
     return (parts.hostname or "") + parts.path.rstrip("/")
 
 
+def room_identity(*urls: str) -> str:
+    """这几种链接是不是同一个直播间：返回同一个跨场次稳定的钥匙，否则空串。
+
+    ``room_key_of`` 对抖音只会从 **live 页** 里认出 web_rid；分享文案里的
+    reflow 链接它给的是 reflow 后面的 room id——那个 id 一次开播换一个，
+    同一主播换个标题重开就变成另一把钥匙。拿它判重，列表就会越攒越多
+    （云端曾出现同一间语音厅 4 个房间项）。
+
+    这里先找所有输入里有没有 live.douyin.com/<web_rid>：只要有一个，
+    就用它当身份；都没有才退回 ``room_key_of``（其它平台照旧）。
+    抖音只有 reflow/reflow 时**故意返回空串**：认不出来就说认不出来，
+    不能拿一次性的 room id 冒充房号。
+    """
+    live = ""
+    for u in urls:
+        m = _LIVE_RE.match(str(u or "").strip())
+        if m:
+            live = m.group(1)
+            break
+    if live:
+        return "douyin:" + live
+    platform = ""
+    key = ""
+    for u in urls:
+        u = str(u or "").strip()
+        if not u or platform_of(u) == "douyin":
+            continue
+        k = room_key_of(u, platform_of(u))
+        if k:
+            platform, key = platform_of(u), k
+            break
+    return (platform + ":" + key) if key else ""
+
+
 # ---------------------------------------------------------------- 探测
 
 def _probe_douyin(url: str, timeout: float) -> dict:

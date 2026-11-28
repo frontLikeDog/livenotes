@@ -22,6 +22,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
+from . import liveprobe
 from .config import DATA_DIR
 from .traffic import sanitize_traffic
 
@@ -127,8 +128,24 @@ def get_by_session(session_id: str) -> dict | None:
     return None
 
 
+def _identities(room: dict) -> set[str]:
+    """这个房间认得出的一切身份：房号页、入口链接、分享原文、历史别名。"""
+    urls = [room.get("url"), room.get("resolved_url"), room.get("resolved_from")]
+    urls += list(room.get("alt_urls") or [])
+    return {i for i in (liveprobe.room_identity(u) for u in urls) if i}
+
+
+def _identity_of(room: dict) -> str:
+    ids = _identities(room)
+    return sorted(ids)[0] if ids else ""
+
+
 def add(url: str, resolved_from: str = "", name: str = "") -> tuple[dict, bool]:
-    """返回 (房间, 是否新建)。同一个链接重复提交不会产生第二路。
+    """返回 (房间, 是否新建)。同一个直播间重复提交不会产生第二路。
+
+    "同一个直播间"按房号判：抖音认 live.douyin.com/<web_rid>，别的平台认
+    room_key。只看链接文本不行——同一间语音厅换标题重开，分享出来的 reflow
+    id 就换了，只看链接会把同一间攒成 4 条（飞书房间列表就是这么膨胀的）。
 
     resolved_from 是分享/短链原文：同一个分享文案再发一次时，落地页地址
     可能被规范化成不同形式，用它兜住重复。
@@ -144,17 +161,29 @@ def add(url: str, resolved_from: str = "", name: str = "") -> tuple[dict, bool]:
     with _LOCK:
         rooms = _read()
         healed = _heal_rooms(rooms)
+        ident = liveprobe.room_identity(norm, src)
         for r in rooms:
             # 同一个房间可能一次是短链/reflow、一次是真实房号；都算命中。
             if not (norm in (r.get("url"), r.get("resolved_url"))
-                    or (src and src == r.get("resolved_from"))):
+                    or (src and src == r.get("resolved_from"))
+                    or (ident and ident in _identities(r))):
                 continue
-            # 老房间还没有名字时，顺手用这次分享文案里的主播名补上，
-            # 免得重发一次链接反而又退回显示域名。
+            # 老把 reflow 当身份的记录：这次拿到了房号（或反过来），
+            # 把新链接记成别名；否则下次换一种分享它还是认不出来。
+            extra = norm not in (r.get("url"), r.get("resolved_url"),
+                                 r.get("resolved_from"))
+            changed = False
             if hint and not str(r.get("name") or "").strip():
-                r.update(name=hint, name_source="share", updated_at=now())
-                _write(rooms)
-            elif healed:
+                # 老房间还没有名字时，顺手用这次分享文案里的主播名补上，
+                # 免得重发一次链接反而又退回显示域名。
+                r.update(name=hint, name_source="share")
+                changed = True
+            if extra:
+                r.setdefault("alt_urls", []).append(norm)
+                r["alt_urls"] = r["alt_urls"][-8:]
+                changed = True
+            if changed or healed:
+                r["updated_at"] = now()
                 _write(rooms)
             return r, False
         # seq 是稳定的展示编号（CH01…），加/删别的房间不会让它变。
@@ -177,6 +206,9 @@ def add(url: str, resolved_from: str = "", name: str = "") -> tuple[dict, bool]:
             "resolved_url": "",
             # 用户贴进来的分享/短链原文，重复发送时用来去重
             "resolved_from": src,
+            # 同一间认过的其它链接（换标题重开后的新 reflow、稳定下来的
+            # 房号页）。只用于判重，不参与采集；最多留 8 条。
+            "alt_urls": [],
             # 展示名。空着的话前端只能退回显示域名（webcast.amemv.com），
             # 于是「哪一路是哪个直播间」就没人说得清。
             "name": hint,
@@ -241,6 +273,194 @@ def remove(room_id: str) -> bool:
     with _CAP_LOCK:
         _CAPTURE.pop(room_id, None)
     return True
+
+
+def _merged_name(keep: dict, drop: dict) -> tuple[str, str]:
+    """留下哪一路时用哪个名字：人工改过的赢，其次是页面读到的真名。"""
+    rank = {"user": 3, "page": 2, "share": 1, "": 0}
+    if rank.get(str(keep.get("name_source") or ""), 0) >= \
+            rank.get(str(drop.get("name_source") or ""), 0):
+        return str(keep.get("name") or ""), str(keep.get("name_source") or "")
+    return str(drop.get("name") or ""), str(drop.get("name_source") or "")
+
+
+def absorb_resolved(room_id: str, resolved: str) -> dict | None:
+    """采集端报来真实房号后，把同一间的其它记录并掉。
+
+    两条分享链接落成同一个房号页时，只有 ``resolved_url`` 写进来这一刻
+    才知道它们是一间；判重发生在加房间时（那时还只有 reflow id），
+    必须在这里补一次。在录的那条留下，别的并成别名，回放不受影响。
+    """
+    rid = str(room_id or "")
+    target = str(resolved or "").strip()
+    ident = liveprobe.room_identity(target)
+    if not rid or not ident:
+        return None
+    with _LOCK:
+        rooms = _read()
+        me = next((r for r in rooms if r.get("id") == rid), None)
+        if me is None:
+            return None
+        if target and target not in (me.get("url"), me.get("resolved_url"),
+                                     me.get("resolved_from")) \
+                and target not in (me.get("alt_urls") or []):
+            me.setdefault("alt_urls", []).append(target)
+            me["alt_urls"] = me["alt_urls"][-8:]
+        same = [i for i, r in enumerate(rooms) if ident in _identities(r)]
+        if not same:
+            same = [rooms.index(me)]
+        keep_i = min(same, key=lambda i: _keep_key(rooms[i]))
+        keep = rooms[keep_i]
+        if keep.get("id") != rid:
+            # 另一条在录：给它留下这一路的新房号，回复里的记录照样用它
+            keep.setdefault("alt_urls", []).append(target)
+            keep["alt_urls"] = keep["alt_urls"][-8:]
+        dead: set[int] = set()
+        running = [i for i, r in enumerate(rooms)
+                   if ident in _identities(r)
+                   and r.get("state") in ("live", "starting")]
+        merged: list[str] = []
+        if len(running) <= 1:
+            for i, r in enumerate(rooms):
+                if i == keep_i or ident not in _identities(r):
+                    continue
+                dead.add(i)
+                merged.append(str(r.get("id") or ""))
+                for u in [r.get("url"), r.get("resolved_url"),
+                          r.get("resolved_from")] + list(r.get("alt_urls") or []):
+                    u = str(u or "").strip()
+                    if u and u not in [keep.get("url"), keep.get("resolved_url"),
+                                       keep.get("resolved_from")] + \
+                            list(keep.get("alt_urls") or []):
+                        keep.setdefault("alt_urls", []).append(u)
+                if r.get("session_id"):
+                    keep.setdefault("merged_sessions", [])
+                    if r["session_id"] not in keep["merged_sessions"]:
+                        keep["merged_sessions"].append(r["session_id"])
+        keep["alt_urls"] = list(keep.get("alt_urls") or [])[-8:]
+        keep["updated_at"] = now()
+        _write([r for i, r in enumerate(rooms) if i not in dead])
+        out = dict(keep)
+    if merged:
+        with _CAP_LOCK:
+            for x in merged:
+                _CAPTURE.pop(x, None)
+        print("[房间] %s 与 %s 是同一间，已合并" % (rid, ",".join(merged)),
+              flush=True)
+    return out
+
+
+_STATE_RANK = {"live": 4, "starting": 3, "pending": 2, "failed": 1, "stopped": 0}
+
+
+def _keep_key(r: dict) -> tuple:
+    """一组重复里留哪条：在录的 > 启动中 > 待启动 > 失败/停止。
+
+    同档时留创建早的那条：它是在听的、有 CH 编号和会话的那一路。
+    绝不能反过来——把 live 那条并掉，采集代理下一拍就回收浏览器，
+    正在录的一场会断在这里。所以排在最前面的是「状态最高 + 创建最早」。
+    """
+    return (0 - _STATE_RANK.get(str(r.get("state") or ""), 0),
+            str(r.get("created_at") or "9999"), str(r.get("id") or ""))
+
+
+def merge_duplicates() -> dict:
+    """把同一间直播间的多条房间并成一条。返回给人看的合并结果。
+
+    产生原因：分享文案每次换个标题重开都是新的 reflow id，而老版本判重
+    只看链接，于是同一间语音厅在飞书列表里越攒越多。这里按 ``room_identity``
+    归组，每组留一条：
+      - 在录的 > 启动中 > 待启动 > 失败/停止；同档留创建早的那条；
+      - 名字取更像真名的那个（user > page > share），别名并进 alt_urls；
+      - 被并掉的那几条的会话记进 ``merged_sessions``，回放还能找到。
+
+    有两条以上还在 live/starting 的组**整个跳过**：那是两路都在录，
+    并掉哪条都会让正在录的一场断掉。这种情况只能人看着删（/删除），
+    删除会先正常停会话。
+    """
+    with _LOCK:
+        rooms = _read()
+        groups: dict[str, list[int]] = {}
+        for i, r in enumerate(rooms):
+            ident = _identity_of(r)
+            if ident:
+                groups.setdefault(ident, []).append(i)
+        dup = {k: v for k, v in groups.items() if len(v) > 1}
+        if not dup:
+            return {"ok": True, "groups": [], "removed": 0, "conflicts": []}
+        dead: set[int] = set()
+        report: list[dict] = []
+        conflicts: list[dict] = []
+        for ident, idxs in dup.items():
+            running = [i for i in idxs
+                       if rooms[i].get("state") in ("live", "starting")]
+            if len(running) > 1:
+                conflicts.append({"identity": ident,
+                                  "rooms": [str(rooms[i].get("id") or "")
+                                            for i in running]})
+                continue
+            keep_i = min(idxs, key=lambda i: _keep_key(rooms[i]))
+            keep = rooms[keep_i]
+            dropped_ids = []
+            others = [rooms[i] for i in idxs if i != keep_i]
+            # 名字先整体挑一次：在录的那条不一定名字最全（老记录名还是从
+            # 分享文案垫的短名），一条条按优先级比会把 user 名冲掉。
+            for drop in others:
+                nm, ns = _merged_name(keep, drop)
+                if nm:
+                    keep["name"], keep["name_source"] = nm, ns
+            for i in idxs:
+                if i == keep_i:
+                    continue
+                drop = rooms[i]
+                dead.add(i)
+                dropped_ids.append(str(drop.get("id") or ""))
+                for u in [drop.get("url"), drop.get("resolved_url"),
+                          drop.get("resolved_from")] + list(drop.get("alt_urls") or []):
+                    u = str(u or "").strip()
+                    if u and u not in (keep.get("url"), keep.get("resolved_url"),
+                                       keep.get("resolved_from")) \
+                            and u not in (keep.get("alt_urls") or []):
+                        keep.setdefault("alt_urls", []).append(u)
+                if drop.get("session_id"):
+                    keep.setdefault("merged_sessions", [])
+                    if drop["session_id"] not in keep["merged_sessions"]:
+                        keep["merged_sessions"].append(drop["session_id"])
+            keep["alt_urls"] = list(keep.get("alt_urls") or [])[-8:]
+            keep["updated_at"] = now()
+            report.append({"identity": ident, "kept": keep.get("id"),
+                           "kept_ch": keep.get("seq"), "dropped": dropped_ids,
+                           "name": keep.get("name") or ""})
+        if not dead:
+            return {"ok": True, "groups": [], "removed": 0, "conflicts": conflicts}
+        rooms = [r for i, r in enumerate(rooms) if i not in dead]
+        _write(rooms)
+    with _CAP_LOCK:
+        for item in report:
+            for rid in item["dropped"]:
+                _CAPTURE.pop(rid, None)
+    return {"ok": True, "groups": report,
+            "removed": sum(len(g["dropped"]) for g in report),
+            "conflicts": conflicts}
+
+
+def find_duplicates() -> list[dict]:
+    """只看不改：同一间直播间出现在几条记录里。给飞书列表现场提示。"""
+    rooms = _read()
+    groups: dict[str, list[dict]] = {}
+    for r in rooms:
+        ident = _identity_of(r)
+        if ident:
+            groups.setdefault(ident, []).append(r)
+    out = []
+    for ident, rows in groups.items():
+        if len(rows) > 1:
+            out.append({"identity": ident,
+                        "rooms": [{"id": r.get("id"), "seq": r.get("seq"),
+                                   "name": r.get("name") or "",
+                                   "state": r.get("state") or ""}
+                                  for r in rows]})
+    return out
 
 
 # ---------------------------------------------------------------- 采集端心跳

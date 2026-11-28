@@ -657,6 +657,9 @@ def test_handle_text_silent_when_no_reply(monkeypatch, bot):
 def test_menu_maps_keys(monkeypatch, bot):
     monkeypatch.setattr(fb, "cmd_status", lambda arg="": "STATUS")
     monkeypatch.setattr(fb, "cmd_rooms", lambda: "ROOMS")
+    # 房间列表菜单现在先试着发卡片；这里让它当场失败，验证退回文字这一步。
+    monkeypatch.setattr(fb, "_route_rooms_card",
+                        lambda oid, cid="", ctype="p2p": fb.cmd_rooms())
     sent: list = []
     monkeypatch.setattr(fb, "_send_text_target",
                         lambda text, oid, cid="", ctype="p2p":
